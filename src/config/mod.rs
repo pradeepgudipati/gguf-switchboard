@@ -31,6 +31,9 @@ pub struct Config {
     /// Seconds between memory pressure checks (default 30).
     #[serde(default = "default_memory_check_interval_secs")]
     pub memory_check_interval_secs: u64,
+    /// Minimum context size (`-c`) when auto-reducing after a failed model load.
+    #[serde(default = "default_context_fallback_min")]
+    pub context_fallback_min: u32,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -74,6 +77,10 @@ fn default_memory_critical_threshold() -> u8 {
 
 fn default_memory_check_interval_secs() -> u64 {
     30
+}
+
+fn default_context_fallback_min() -> u32 {
+    8192
 }
 
 impl Config {

@@ -276,6 +276,26 @@ impl Backend for LlamaCppBackend {
     fn _health_url(&self) -> &str {
         &self.config.health_url
     }
+
+    async fn process_running(&self) -> bool {
+        let mut guard = self.process.lock().await;
+        let Some(child) = guard.as_mut() else {
+            return false;
+        };
+
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                warn!(model = %self.model_id, %status, "Backend process exited");
+                self.running.store(false, Ordering::SeqCst);
+                false
+            }
+            Ok(None) => true,
+            Err(e) => {
+                warn!(model = %self.model_id, error = %e, "Failed to poll backend process");
+                false
+            }
+        }
+    }
 }
 
 impl LlamaCppBackend {

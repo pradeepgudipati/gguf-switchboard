@@ -1,6 +1,7 @@
 pub mod api;
 pub mod backend;
 pub mod config;
+pub mod context;
 pub mod db;
 pub mod errors;
 pub mod memory;

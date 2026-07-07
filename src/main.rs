@@ -1,6 +1,7 @@
 mod api;
 mod backend;
 mod config;
+mod context;
 mod db;
 mod errors;
 mod memory;

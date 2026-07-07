@@ -59,6 +59,10 @@ pub trait Backend: Send + Sync {
     fn backend_url(&self) -> &str;
     /// The health-check URL.
     fn _health_url(&self) -> &str;
+    /// Return `false` when the backend process has exited unexpectedly.
+    async fn process_running(&self) -> bool {
+        true
+    }
 }
 
 /// Create a concrete backend for the given model id and config.

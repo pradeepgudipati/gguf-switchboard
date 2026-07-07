@@ -22,7 +22,7 @@ args = [
     "-m", "/models/gemma-4-E4B-it-Q4_K_M.gguf",
     "--host", "127.0.0.1",
     "--port", "8081",
-    "-c", "16384",
+    "-c", "65536",
     "-ngl", "999",
 ]
 backend_url = "http://127.0.0.1:8081/v1"
@@ -38,7 +38,7 @@ args = [
     "-m", "/models/Qwen3.5-9B-Q4_K_M.gguf",
     "--host", "127.0.0.1",
     "--port", "8082",
-    "-c", "32768",
+    "-c", "65536",
     "-ngl", "999",
 ]
 backend_url = "http://127.0.0.1:8082/v1"
@@ -53,7 +53,7 @@ args = [
     "-m", "/models/Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
     "--host", "127.0.0.1",
     "--port", "8083",
-    "-c", "16384",
+    "-c", "65536",
     "-ngl", "999",
 ]
 backend_url = "http://127.0.0.1:8083/v1"

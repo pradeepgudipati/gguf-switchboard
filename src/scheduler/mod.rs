@@ -7,6 +7,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::backend::{Backend, create_backend};
 use crate::config::{Config, ModelConfig};
+use crate::context::{get_context_size, next_lower_context, with_context_size};
 use crate::errors::RuntimeError;
 use crate::memory;
 use crate::metrics::{BACKEND_HEALTH, LOADED_MODEL, MEMORY_USAGE_PERCENT, MODEL_LOAD_LATENCY};
@@ -14,6 +15,7 @@ use crate::metrics::{BACKEND_HEALTH, LOADED_MODEL, MEMORY_USAGE_PERCENT, MODEL_L
 struct SchedulerInner {
     config: Config,
     backends: RwLock<HashMap<String, Arc<dyn Backend>>>,
+    runtime_args: RwLock<HashMap<String, Vec<String>>>,
     loaded: RwLock<Option<String>>,
     load_lock: Mutex<()>,
     lru: RwLock<VecDeque<String>>,
@@ -32,6 +34,7 @@ impl Scheduler {
         let inner = SchedulerInner {
             config,
             backends: RwLock::new(HashMap::new()),
+            runtime_args: RwLock::new(HashMap::new()),
             loaded: RwLock::new(None),
             load_lock: Mutex::new(()),
             lru: RwLock::new(VecDeque::new()),
@@ -91,91 +94,46 @@ impl Scheduler {
 
                 info!(model = %priority_id, "Idle timeout reached, loading priority model");
 
-                // Acquire the load lock only for the critical section
-                // (checking state and preparing the backend). Release it
-                // before the expensive load + health-check loop so
-                // concurrent ensure_loaded calls are not blocked.
-                let backend = {
+                let should_load_priority = {
                     let _guard = inner.load_lock.lock().await;
 
                     // Double-check: already loaded?
                     let current = inner.loaded.read().await.clone();
                     if current.as_deref() == Some(&priority_id) {
-                        continue;
-                    }
-
-                    // Unload current model if any
-                    if let Some(ref model_id) = current {
-                        let backs = inner.backends.read().await;
-                        if let Some(backend) = backs.get(model_id) {
-                            if let Err(e) = backend.unload().await {
-                                error!(model = %model_id, error = %e, "Failed to unload model");
-                            }
-                            BACKEND_HEALTH.set(0);
-                            LOADED_MODEL.set(0);
-                        }
-                    }
-
-                    // Ensure backend exists
-                    {
-                        let mut backs = inner.backends.write().await;
-                        if !backs.contains_key(&priority_id) {
-                            if let Some(model_cfg) = inner.config.models.get(&priority_id) {
-                                let backend = create_backend(&priority_id, model_cfg);
-                                backs.insert(priority_id.clone(), Arc::from(backend));
-                            } else {
-                                error!(model = %priority_id, "Priority model not found in config");
-                                continue;
+                        false
+                    } else {
+                        // Unload current model if any
+                        if let Some(ref model_id) = current {
+                            let backs = inner.backends.read().await;
+                            if let Some(backend) = backs.get(model_id) {
+                                if let Err(e) = backend.unload().await {
+                                    error!(model = %model_id, error = %e, "Failed to unload model");
+                                }
+                                BACKEND_HEALTH.set(0);
+                                LOADED_MODEL.set(0);
                             }
                         }
+                        true
                     }
-
-                    // Get the backend handle (clone to release the read lock)
-                    inner.backends.read().await.get(&priority_id).cloned()
                     // _guard dropped here — load_lock released
                 };
 
-                // Load and wait for health (lock released, so
-                // ensure_loaded can still serve already-loaded models)
-                if let Some(backend) = backend {
-                    let start = Instant::now();
-                    if let Err(e) = backend.load().await {
-                        error!(model = %priority_id, error = %e, "Failed to load priority model");
-                        let _ = backend.unload().await;
-                        continue;
-                    }
+                if !should_load_priority {
+                    continue;
+                }
 
-                    let deadline =
-                        Instant::now() + Duration::from_secs(inner.config.startup_timeout);
-                    loop {
-                        if Instant::now() > deadline {
-                            error!(model = %priority_id, "Priority model health check timed out");
-                            let _ = backend.unload().await;
-                            break;
-                        }
-                        match backend.health().await {
-                            Ok(true) => {
-                                let elapsed = start.elapsed();
-                                MODEL_LOAD_LATENCY.observe(elapsed.as_secs_f64());
-                                LOADED_MODEL.set(1);
-                                BACKEND_HEALTH.set(1);
-                                info!(
-                                    model = %priority_id,
-                                    elapsed_ms = elapsed.as_millis(),
-                                    "Priority model loaded"
-                                );
-                                *inner.loaded.write().await = Some(priority_id.clone());
-                                lru_write(&inner.lru, &priority_id, inner.max_loaded).await;
-                                break;
-                            }
-                            Ok(false) => {
-                                tokio::time::sleep(Duration::from_millis(500)).await;
-                            }
-                            Err(e) => {
-                                warn!(model = %priority_id, error = %e, "Health check error");
-                                tokio::time::sleep(Duration::from_millis(500)).await;
-                            }
-                        }
+                if !inner.config.models.contains_key(&priority_id) {
+                    error!(model = %priority_id, "Priority model not found in config");
+                    continue;
+                }
+
+                match inner.load_model_with_context_fallback(&priority_id).await {
+                    Ok(_backend) => {
+                        *inner.loaded.write().await = Some(priority_id.clone());
+                        lru_write(&inner.lru, &priority_id, inner.max_loaded).await;
+                    }
+                    Err(e) => {
+                        error!(model = %priority_id, error = %e, "Failed to load priority model");
                     }
                 }
             }
@@ -227,64 +185,16 @@ impl Scheduler {
             }
         }
 
-        // Get or create the backend
-        let backend = {
-            let mut backs = self.inner.backends.write().await;
-            if !backs.contains_key(model_id) {
-                let model_cfg = self
-                    .inner
-                    .config
-                    .models
-                    .get(model_id)
-                    .ok_or_else(|| RuntimeError::ModelNotFound(model_id.to_string()))?;
-                let b = create_backend(model_id, model_cfg);
-                backs.insert(model_id.to_string(), Arc::from(b));
-            }
-            backs[model_id].clone()
-        };
+        // Get or create the backend, load, and reduce context on failure.
+        let backend = self
+            .inner
+            .load_model_with_context_fallback(model_id)
+            .await?;
 
-        // Load and wait for health
-        let start = Instant::now();
-        info!(model = %model_id, "Loading model");
-        backend.load().await.map_err(|e| {
-            RuntimeError::ModelLoadingFailed(format!("Failed to start model '{model_id}': {e}"))
-        })?;
-
-        let deadline = Instant::now() + Duration::from_secs(self.inner.config.startup_timeout);
-        loop {
-            if Instant::now() > deadline {
-                let _ = backend.unload().await;
-                *self.inner.loaded.write().await = None;
-                return Err(RuntimeError::ModelLoadingTimeout(format!(
-                    "Model '{model_id}' did not become healthy within {}s",
-                    self.inner.config.startup_timeout
-                )));
-            }
-            match backend.health().await {
-                Ok(true) => {
-                    let elapsed = start.elapsed();
-                    MODEL_LOAD_LATENCY.observe(elapsed.as_secs_f64());
-                    LOADED_MODEL.set(1);
-                    BACKEND_HEALTH.set(1);
-                    info!(
-                        model = %model_id,
-                        elapsed_ms = elapsed.as_millis(),
-                        "Model loaded and healthy"
-                    );
-                    *self.inner.loaded.write().await = Some(model_id.to_string());
-                    self.touch(model_id).await;
-                    lru_write(&self.inner.lru, model_id, self.inner.max_loaded).await;
-                    return Ok(backend);
-                }
-                Ok(false) => {
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
-                Err(e) => {
-                    debug!(model = %model_id, error = %e, "Health check error, retrying");
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
-            }
-        }
+        *self.inner.loaded.write().await = Some(model_id.to_string());
+        self.touch(model_id).await;
+        lru_write(&self.inner.lru, model_id, self.inner.max_loaded).await;
+        Ok(backend)
     }
 
     /// Get the backend for a model that is already loaded.
@@ -413,6 +323,187 @@ impl Scheduler {
                 }
             }
         });
+    }
+}
+
+impl SchedulerInner {
+    async fn effective_args(&self, model_id: &str) -> Result<Vec<String>, RuntimeError> {
+        if let Some(args) = self.runtime_args.read().await.get(model_id) {
+            return Ok(args.clone());
+        }
+
+        self.config
+            .models
+            .get(model_id)
+            .map(|cfg| cfg.args.clone())
+            .ok_or_else(|| RuntimeError::ModelNotFound(model_id.to_string()))
+    }
+
+    async fn recreate_backend(
+        &self,
+        model_id: &str,
+        args: Vec<String>,
+    ) -> Result<Arc<dyn Backend>, RuntimeError> {
+        let model_cfg = self
+            .config
+            .models
+            .get(model_id)
+            .ok_or_else(|| RuntimeError::ModelNotFound(model_id.to_string()))?;
+        let backend_cfg = model_config_with_args(model_cfg, args.clone());
+        let backend: Arc<dyn Backend> = Arc::from(create_backend(model_id, &backend_cfg));
+        self.backends
+            .write()
+            .await
+            .insert(model_id.to_string(), backend.clone());
+        self.runtime_args
+            .write()
+            .await
+            .insert(model_id.to_string(), args);
+        Ok(backend)
+    }
+
+    async fn get_or_create_backend(
+        &self,
+        model_id: &str,
+    ) -> Result<Arc<dyn Backend>, RuntimeError> {
+        if let Some(backend) = self.backends.read().await.get(model_id).cloned() {
+            return Ok(backend);
+        }
+
+        let args = self.effective_args(model_id).await?;
+        self.recreate_backend(model_id, args).await
+    }
+
+    async fn wait_until_healthy(
+        &self,
+        model_id: &str,
+        backend: &Arc<dyn Backend>,
+    ) -> Result<(), RuntimeError> {
+        let deadline = Instant::now() + Duration::from_secs(self.config.startup_timeout);
+        loop {
+            if Instant::now() > deadline {
+                let _ = backend.unload().await;
+                return Err(RuntimeError::ModelLoadingTimeout(format!(
+                    "Model '{model_id}' did not become healthy within {}s",
+                    self.config.startup_timeout
+                )));
+            }
+
+            if !backend.process_running().await {
+                let _ = backend.unload().await;
+                return Err(RuntimeError::ModelLoadingFailed(format!(
+                    "Model '{model_id}' backend process exited before becoming healthy"
+                )));
+            }
+
+            match backend.health().await {
+                Ok(true) => return Ok(()),
+                Ok(false) => {
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                Err(e) => {
+                    debug!(model = %model_id, error = %e, "Health check error, retrying");
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            }
+        }
+    }
+
+    async fn load_model_with_context_fallback(
+        &self,
+        model_id: &str,
+    ) -> Result<Arc<dyn Backend>, RuntimeError> {
+        loop {
+            let backend = self.get_or_create_backend(model_id).await?;
+            let args = self.effective_args(model_id).await?;
+            let current_ctx = get_context_size(&args);
+
+            info!(model = %model_id, context = ?current_ctx, "Loading model");
+
+            let start = Instant::now();
+            if let Err(e) = backend.load().await {
+                warn!(model = %model_id, error = %e, "Model load failed");
+                let _ = backend.unload().await;
+
+                if let Some(next_ctx) = self.try_reduce_context(model_id, current_ctx).await? {
+                    warn!(
+                        model = %model_id,
+                        from = ?current_ctx,
+                        to = next_ctx,
+                        "Retrying model load with reduced context"
+                    );
+                    continue;
+                }
+
+                self.backends.write().await.remove(model_id);
+                return Err(RuntimeError::ModelLoadingFailed(format!(
+                    "Failed to start model '{model_id}': {e}"
+                )));
+            }
+
+            match self.wait_until_healthy(model_id, &backend).await {
+                Ok(()) => {
+                    let elapsed = start.elapsed();
+                    MODEL_LOAD_LATENCY.observe(elapsed.as_secs_f64());
+                    LOADED_MODEL.set(1);
+                    BACKEND_HEALTH.set(1);
+                    info!(
+                        model = %model_id,
+                        context = ?current_ctx,
+                        elapsed_ms = elapsed.as_millis(),
+                        "Model loaded and healthy"
+                    );
+                    return Ok(backend);
+                }
+                Err(e) => {
+                    warn!(model = %model_id, error = %e, "Model health check failed");
+
+                    if let Some(next_ctx) = self.try_reduce_context(model_id, current_ctx).await? {
+                        warn!(
+                            model = %model_id,
+                            from = ?current_ctx,
+                            to = next_ctx,
+                            "Retrying model load with reduced context after health failure"
+                        );
+                        continue;
+                    }
+
+                    self.backends.write().await.remove(model_id);
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    async fn try_reduce_context(
+        &self,
+        model_id: &str,
+        current_ctx: Option<u32>,
+    ) -> Result<Option<u32>, RuntimeError> {
+        let Some(current) = current_ctx else {
+            return Ok(None);
+        };
+
+        let min = self.config.context_fallback_min;
+        let Some(next) = next_lower_context(current, min) else {
+            return Ok(None);
+        };
+
+        let args = self.effective_args(model_id).await?;
+        let reduced_args = with_context_size(&args, next);
+        self.backends.write().await.remove(model_id);
+        self.runtime_args
+            .write()
+            .await
+            .insert(model_id.to_string(), reduced_args);
+        Ok(Some(next))
+    }
+}
+
+fn model_config_with_args(base: &ModelConfig, args: Vec<String>) -> ModelConfig {
+    ModelConfig {
+        args,
+        ..base.clone()
     }
 }
 

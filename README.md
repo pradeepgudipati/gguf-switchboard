@@ -183,7 +183,7 @@ args = [
     "-m", "/models/gemma-3-4b.gguf",
     "--host", "127.0.0.1",
     "--port", "8081",
-    "-c", "16384",
+    "-c", "65536",
     "-ngl", "999",
 ]
 backend_url = "http://127.0.0.1:8081/v1"
@@ -198,7 +198,7 @@ args = [
     "-m", "/models/qwen2.5-coder-7b.gguf",
     "--host", "127.0.0.1",
     "--port", "8082",
-    "-c", "32768",
+    "-c", "65536",
     "-ngl", "999",
 ]
 backend_url = "http://127.0.0.1:8082/v1"
@@ -221,6 +221,40 @@ priority = false
 | `models.<id>.backend_url` | Base URL for the backend's OpenAI-compatible API |
 | `models.<id>.health_url` | Health check endpoint URL |
 | `models.<id>.priority` | If `true`, auto-loads after `idle_timeout` |
+| `memory_warning_threshold` | RAM usage % that logs a warning |
+| `memory_critical_threshold` | RAM usage % that auto-unloads the active model |
+| `memory_check_interval_secs` | Seconds between RAM pressure checks |
+| `context_fallback_min` | Lowest `-c` value used when auto-reducing context after a failed load |
+
+### Context size (`-c`)
+
+All models in the bundled configs default to a **65536-token** context window via the `-c` flag passed to `llama-server`:
+
+```toml
+args = [
+    # ...
+    "-c", "65536",
+    # ...
+]
+```
+
+This is the effective context limit for clients (Cursor, Cline, Continue, etc.) — not whatever context size the IDE UI may advertise.
+
+**After changing `-c`**, restart the runtime (or trigger a model reload) so `llama-server` picks up the new value:
+
+```bash
+sudo systemctl restart openai-runtime
+# or
+./deploy.sh
+```
+
+**VRAM tradeoff:** larger context uses more GPU memory. On constrained GPUs (e.g. 12 GB), you may need to lower `-c` per model if loads fail or you hit OOM — especially for larger quantised models.
+
+**Automatic fallback:** if a model fails to start or never becomes healthy (for example due to insufficient VRAM for a large `-c`), the runtime halves the context size and retries until it succeeds or reaches `context_fallback_min` (default `8192`). The reduced value applies for the rest of the process lifetime (it is not written back to `config.toml`).
+
+```toml
+context_fallback_min = 8192
+```
 
 ## Running Locally
 
@@ -500,9 +534,13 @@ In Cursor settings, add a custom OpenAI-compatible model:
 In Cline settings:
 
 1. Select **OpenAI Compatible** as the API provider
-2. Set **Base URL** to `http://localhost:9090/v1`
-3. Set **API Key** to any string
-4. Set **Model** to your model id
+2. Set **Base URL** to `http://localhost:9090/v1` (must include `/v1`)
+3. Set **API Key** to any non-empty string (e.g., `sk-local`) — the runtime does not validate keys, but Cline requires the field
+4. Set **Model** to your model id (must match `config.toml`, e.g., `gemma-4-e4b`)
+
+If **"Use different models for Plan and Act modes"** is enabled, configure both modes separately (API key and base URL in each).
+
+**Context errors:** Cline agent prompts can be large (30k+ tokens). If you see `exceed_context_size_error`, either start a fresh Cline task to reduce prompt size, or increase `-c` in `config.toml` and restart the runtime (see [Context size](#context-size-c) above).
 
 ### Continue (VS Code / JetBrains)
 
