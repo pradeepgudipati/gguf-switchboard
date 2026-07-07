@@ -13,6 +13,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
   SWAGGER_UI_OVERWRITE_FOLDER: ${{ github.workspace }}/swagger-ui-overrides
 
 jobs:
@@ -24,7 +25,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+
+      # Cache ~/.cargo (registry, git deps) and target/ (compiled deps).
+      # Keys are auto-derived from Cargo.lock + rustc version; PRs restore main's cache.
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          cache-all-crates: true
 
       - name: Run checks
         run: ./precommit.sh
