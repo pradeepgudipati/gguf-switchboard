@@ -3,6 +3,7 @@ pub mod backend;
 pub mod config;
 pub mod db;
 pub mod errors;
+pub mod memory;
 pub mod metrics;
 pub mod proxy;
 pub mod scheduler;

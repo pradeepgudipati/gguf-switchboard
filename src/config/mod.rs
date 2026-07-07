@@ -22,6 +22,15 @@ pub struct Config {
     pub database_path: Option<String>,
     /// Model definitions keyed by model id
     pub models: HashMap<String, ModelConfig>,
+    /// Percentage of RAM usage at which a warning is logged (default 85).
+    #[serde(default = "default_memory_warning_threshold")]
+    pub memory_warning_threshold: u8,
+    /// Percentage of RAM usage at which the loaded model is auto-unloaded (default 95).
+    #[serde(default = "default_memory_critical_threshold")]
+    pub memory_critical_threshold: u8,
+    /// Seconds between memory pressure checks (default 30).
+    #[serde(default = "default_memory_check_interval_secs")]
+    pub memory_check_interval_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -53,6 +62,18 @@ fn default_idle_timeout() -> u64 {
 
 fn default_backend() -> String {
     "llama.cpp".to_string()
+}
+
+fn default_memory_warning_threshold() -> u8 {
+    85
+}
+
+fn default_memory_critical_threshold() -> u8 {
+    95
+}
+
+fn default_memory_check_interval_secs() -> u64 {
+    30
 }
 
 impl Config {

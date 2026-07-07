@@ -8,7 +8,8 @@ use tracing::{debug, error, info, warn};
 use crate::backend::{create_backend, Backend};
 use crate::config::{Config, ModelConfig};
 use crate::errors::RuntimeError;
-use crate::metrics::{BACKEND_HEALTH, LOADED_MODEL, MODEL_LOAD_LATENCY};
+use crate::memory;
+use crate::metrics::{BACKEND_HEALTH, LOADED_MODEL, MEMORY_USAGE_PERCENT, MODEL_LOAD_LATENCY};
 
 struct SchedulerInner {
     config: Config,
@@ -89,81 +90,90 @@ impl Scheduler {
                 }
 
                 info!(model = %priority_id, "Idle timeout reached, loading priority model");
-                let _guard = inner.load_lock.lock().await;
 
-                // Double-check
-                let current = inner.loaded.read().await.clone();
-                if current.as_deref() == Some(&priority_id) {
-                    continue;
-                }
+                // Acquire the load lock only for the critical section
+                // (checking state and preparing the backend). Release it
+                // before the expensive load + health-check loop so
+                // concurrent ensure_loaded calls are not blocked.
+                let backend = {
+                    let _guard = inner.load_lock.lock().await;
 
-                // Unload current model if any
-                if let Some(ref model_id) = current {
-                    let backs = inner.backends.read().await;
-                    if let Some(backend) = backs.get(model_id) {
-                        if let Err(e) = backend.unload().await {
-                            error!(model = %model_id, error = %e, "Failed to unload model");
-                        }
-                        BACKEND_HEALTH.set(0);
-                        LOADED_MODEL.set(0);
+                    // Double-check: already loaded?
+                    let current = inner.loaded.read().await.clone();
+                    if current.as_deref() == Some(&priority_id) {
+                        continue;
                     }
-                }
 
-                // Ensure backend exists
-                {
-                    let mut backs = inner.backends.write().await;
-                    if !backs.contains_key(&priority_id) {
-                        if let Some(model_cfg) = inner.config.models.get(&priority_id) {
-                            let backend = create_backend(&priority_id, model_cfg);
-                            backs.insert(priority_id.clone(), Arc::from(backend));
-                        } else {
-                            error!(model = %priority_id, "Priority model not found in config");
-                            continue;
+                    // Unload current model if any
+                    if let Some(ref model_id) = current {
+                        let backs = inner.backends.read().await;
+                        if let Some(backend) = backs.get(model_id) {
+                            if let Err(e) = backend.unload().await {
+                                error!(model = %model_id, error = %e, "Failed to unload model");
+                            }
+                            BACKEND_HEALTH.set(0);
+                            LOADED_MODEL.set(0);
                         }
                     }
-                }
 
-                // Load and wait for health
-                {
-                    let backs = inner.backends.read().await;
-                    if let Some(backend) = backs.get(&priority_id) {
-                        let start = Instant::now();
-                        if let Err(e) = backend.load().await {
-                            error!(model = %priority_id, error = %e, "Failed to load priority model");
+                    // Ensure backend exists
+                    {
+                        let mut backs = inner.backends.write().await;
+                        if !backs.contains_key(&priority_id) {
+                            if let Some(model_cfg) = inner.config.models.get(&priority_id) {
+                                let backend = create_backend(&priority_id, model_cfg);
+                                backs.insert(priority_id.clone(), Arc::from(backend));
+                            } else {
+                                error!(model = %priority_id, "Priority model not found in config");
+                                continue;
+                            }
+                        }
+                    }
+
+                    // Get the backend handle (clone to release the read lock)
+                    inner.backends.read().await.get(&priority_id).cloned()
+                    // _guard dropped here — load_lock released
+                };
+
+                // Load and wait for health (lock released, so
+                // ensure_loaded can still serve already-loaded models)
+                if let Some(backend) = backend {
+                    let start = Instant::now();
+                    if let Err(e) = backend.load().await {
+                        error!(model = %priority_id, error = %e, "Failed to load priority model");
+                        let _ = backend.unload().await;
+                        continue;
+                    }
+
+                    let deadline =
+                        Instant::now() + Duration::from_secs(inner.config.startup_timeout);
+                    loop {
+                        if Instant::now() > deadline {
+                            error!(model = %priority_id, "Priority model health check timed out");
                             let _ = backend.unload().await;
-                            continue;
+                            break;
                         }
-
-                        let deadline =
-                            Instant::now() + Duration::from_secs(inner.config.startup_timeout);
-                        loop {
-                            if Instant::now() > deadline {
-                                error!(model = %priority_id, "Priority model health check timed out");
-                                let _ = backend.unload().await;
+                        match backend.health().await {
+                            Ok(true) => {
+                                let elapsed = start.elapsed();
+                                MODEL_LOAD_LATENCY.observe(elapsed.as_secs_f64());
+                                LOADED_MODEL.set(1);
+                                BACKEND_HEALTH.set(1);
+                                info!(
+                                    model = %priority_id,
+                                    elapsed_ms = elapsed.as_millis(),
+                                    "Priority model loaded"
+                                );
+                                *inner.loaded.write().await = Some(priority_id.clone());
+                                lru_write(&inner.lru, &priority_id, inner.max_loaded).await;
                                 break;
                             }
-                            match backend.health().await {
-                                Ok(true) => {
-                                    let elapsed = start.elapsed();
-                                    MODEL_LOAD_LATENCY.observe(elapsed.as_secs_f64());
-                                    LOADED_MODEL.set(1);
-                                    BACKEND_HEALTH.set(1);
-                                    info!(
-                                        model = %priority_id,
-                                        elapsed_ms = elapsed.as_millis(),
-                                        "Priority model loaded"
-                                    );
-                                    *inner.loaded.write().await = Some(priority_id.clone());
-                                    lru_write(&inner.lru, &priority_id, inner.max_loaded).await;
-                                    break;
-                                }
-                                Ok(false) => {
-                                    tokio::time::sleep(Duration::from_millis(500)).await;
-                                }
-                                Err(e) => {
-                                    warn!(model = %priority_id, error = %e, "Health check error");
-                                    tokio::time::sleep(Duration::from_millis(500)).await;
-                                }
+                            Ok(false) => {
+                                tokio::time::sleep(Duration::from_millis(500)).await;
+                            }
+                            Err(e) => {
+                                warn!(model = %priority_id, error = %e, "Health check error");
+                                tokio::time::sleep(Duration::from_millis(500)).await;
                             }
                         }
                     }
@@ -334,6 +344,77 @@ impl Scheduler {
             .write()
             .await
             .insert(model_id.to_string(), Instant::now());
+    }
+
+    /// Spawn a background task that monitors system memory pressure.
+    ///
+    /// At the warning threshold a warning is logged. At the critical threshold
+    /// the currently loaded model is automatically unloaded to reclaim memory.
+    pub async fn start_memory_watcher(&self) {
+        let inner = Arc::clone(&self.inner);
+        let interval = Duration::from_secs(inner.config.memory_check_interval_secs);
+        let warning = inner.config.memory_warning_threshold;
+        let critical = inner.config.memory_critical_threshold;
+
+        tokio::spawn(async move {
+            info!(
+                interval_secs = interval.as_secs(),
+                warning_pct = warning,
+                critical_pct = critical,
+                "Memory watcher started"
+            );
+
+            loop {
+                tokio::time::sleep(interval).await;
+
+                let stats = match memory::check_memory() {
+                    Some(s) => s,
+                    None => {
+                        debug!("Memory stats unavailable, skipping check");
+                        continue;
+                    }
+                };
+
+                MEMORY_USAGE_PERCENT.set(stats.used_percent as i64);
+
+                if stats.used_percent >= critical {
+                    error!(
+                        used_percent = stats.used_percent,
+                        total_mb = stats.total_mb,
+                        available_mb = stats.available_mb,
+                        "CRITICAL: Memory pressure — unloading model"
+                    );
+
+                    let _guard = inner.load_lock.lock().await;
+                    let current = inner.loaded.read().await.clone();
+                    if let Some(ref model_id) = current {
+                        let backs = inner.backends.read().await;
+                        if let Some(backend) = backs.get(model_id) {
+                            if let Err(e) = backend.unload().await {
+                                error!(model = %model_id, error = %e, "Failed to unload model under memory pressure");
+                            }
+                            BACKEND_HEALTH.set(0);
+                            LOADED_MODEL.set(0);
+                            *inner.loaded.write().await = None;
+                            info!(model = %model_id, "Model unloaded due to critical memory pressure");
+                        }
+                    }
+                } else if stats.used_percent >= warning {
+                    warn!(
+                        used_percent = stats.used_percent,
+                        total_mb = stats.total_mb,
+                        available_mb = stats.available_mb,
+                        "WARNING: High memory usage"
+                    );
+                } else {
+                    debug!(
+                        used_percent = stats.used_percent,
+                        available_mb = stats.available_mb,
+                        "Memory OK"
+                    );
+                }
+            }
+        });
     }
 }
 

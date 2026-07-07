@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use crate::errors::RuntimeError;
 use crate::metrics::{ACTIVE_REQUESTS, INFERENCE_LATENCY, REQUEST_TOTAL};
+use crate::proxy::GuardedStream;
 use crate::state::AppState;
 use crate::types::chat::{ChatCompletionRequest, ChatMessage, Content, Role};
 use crate::types::responses::{
@@ -33,7 +34,6 @@ pub async fn responses(
 ) -> Result<impl IntoResponse, RuntimeError> {
     REQUEST_TOTAL.inc();
     ACTIVE_REQUESTS.inc();
-    let _guard = ActiveGuard;
 
     let start = std::time::Instant::now();
     let backend = state.scheduler.ensure_loaded(&request.model).await?;
@@ -103,6 +103,10 @@ pub async fn responses(
         let stream = backend.chat_stream(chat_request).await?;
         let response_id = format!("resp_{}", Uuid::new_v4().simple());
 
+        // Embed guard into the stream so it's dropped when the stream
+        // finishes, not when the handler returns.
+        let active_guard = ActiveGuard;
+
         let mapped = stream.map(move |chunk| match chunk {
             Ok(c) => {
                 let text = c
@@ -145,7 +149,12 @@ pub async fn responses(
         });
         let full_stream = mapped.chain(done);
 
-        let body = Body::from_stream(full_stream.map(|s: Result<String, _>| {
+        let guarded = GuardedStream::new(
+            full_stream,
+            vec![Box::new(active_guard)],
+        );
+
+        let body = Body::from_stream(guarded.map(|s: Result<String, _>| {
             s.map(bytes::Bytes::from)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
         }));
@@ -161,6 +170,7 @@ pub async fn responses(
             .body(body)
             .unwrap())
     } else {
+        let _guard = ActiveGuard;
         let chat_response = backend.chat(chat_request).await?;
         let response_id = format!("resp_{}", Uuid::new_v4().simple());
 

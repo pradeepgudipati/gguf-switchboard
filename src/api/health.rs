@@ -53,12 +53,14 @@ pub async fn status(
         })
         .collect();
 
+    let uptime_secs = state.started_at.elapsed().as_secs();
+
     Json(StatusResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         loaded_model: loaded,
         priority_model: priority,
         configured_models: models,
-        uptime_secs: 0,
+        uptime_secs,
     })
 }

@@ -61,6 +61,14 @@ pub static STREAMING_REQUESTS: LazyLock<IntGauge> = LazyLock::new(|| {
     .expect("failed to create STREAMING_REQUESTS metric")
 });
 
+pub static MEMORY_USAGE_PERCENT: LazyLock<IntGauge> = LazyLock::new(|| {
+    IntGauge::with_opts(Opts::new(
+        "openai_runtime_memory_usage_percent",
+        "Current system memory usage as a percentage (0-100)",
+    ))
+    .expect("failed to create MEMORY_USAGE_PERCENT metric")
+});
+
 /// Register all metrics with the custom registry.
 pub fn register_all() {
     let r = &*REGISTRY;
@@ -78,6 +86,8 @@ pub fn register_all() {
         .expect("register BACKEND_HEALTH");
     r.register(Box::new(STREAMING_REQUESTS.clone()))
         .expect("register STREAMING_REQUESTS");
+    r.register(Box::new(MEMORY_USAGE_PERCENT.clone()))
+        .expect("register MEMORY_USAGE_PERCENT");
 }
 
 /// Gather all metrics as a Prometheus text-format string.

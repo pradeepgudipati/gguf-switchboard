@@ -2,6 +2,14 @@
 
 A **100% OpenAI API-compatible** local inference runtime that dynamically loads and unloads GGUF models on demand. Point any OpenAI SDK or tool at it — Python, Node, Cursor, Cline, Continue — and it Just Works.
 
+## Why
+
+When running local LLMs, you typically manage models manually: start `llama-server` for one model, stop it, start another. If you use multiple models — a code model in Cursor, a general model in Continue, an embedding model for search — you're juggling processes, ports, and GPU memory yourself.
+
+OpenAI Runtime eliminates that. It sits between your tools and `llama-server`, presenting a single OpenAI-compatible endpoint. When a request comes in for a model that isn't loaded, it automatically unloads the current model, loads the requested one, and proxies the request. Your tools never know the difference — they just see an OpenAI API that happens to serve any configured model on demand.
+
+The result: one endpoint, many models, zero manual process management.
+
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                       OpenAI Runtime                         │
@@ -178,21 +186,49 @@ sudo journalctl -u openai-runtime -f
 
 ## Docker
 
-```bash
-# Build
-docker build -t openai-runtime .
+The container runs only `openai-runtime`. Your `llama-server` instances stay on the host. The container reaches them via `host.docker.internal`.
 
-# Run (mount your models and config)
-docker run -d \
-    --name openai-runtime \
-    --gpus all \
-    -p 9090:9090 \
-    -v /path/to/models:/models:ro \
-    -v /path/to/config.toml:/home/appuser/config.toml:ro \
-    openai-runtime
+### Quick Start
+
+```bash
+# 1. Start your llama-server on the host (as usual)
+#    e.g. llama-server -m /models/gemma-3-4b.gguf --port 8081 ...
+
+# 2. Clone and run
+git clone https://github.com/pradeepgudipati/gguf-switchboard.git
+cd gguf-switchboard
+docker compose up -d --build
+
+# 3. Use it
+curl http://localhost:9090/v1/models
 ```
 
-### Docker Compose
+`config.docker.toml` is pre-configured to reach `host.docker.internal:8081/8082/8083`. Edit it to match your setup.
+
+### How It Works
+
+```
+┌─────────────────────────┐
+│   Docker Container      │
+│                         │
+│   openai-runtime :9090  │──── client requests ────▶ tools / SDKs
+│                         │
+│   connects to host via  │
+│   host.docker.internal  │
+└────────┬────────────────┘
+         │
+         ▼
+┌─────────────────────────┐
+│   Host (your machine)   │
+│                         │
+│   llama-server :8081    │  ← your existing setup, untouched
+│   llama-server :8082    │
+│   llama-server :8083    │
+│   GPU, models, etc.     │
+└─────────────────────────┘
+```
+
+### Docker Compose File
 
 ```yaml
 services:
@@ -201,16 +237,31 @@ services:
     ports:
       - "9090:9090"
     volumes:
-      - /path/to/models:/models:ro
-      - ./config.toml:/home/appuser/config.toml:ro
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
+      - ./config.docker.toml:/home/appuser/config.toml:ro
+      - runtime-data:/var/lib/openai-runtime
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  runtime-data:
 ```
+
+### Custom Config
+
+To add your own models, edit `config.docker.toml` and restart:
+
+```bash
+# Edit config
+$EDITOR config.docker.toml
+
+# Restart (no rebuild needed for config changes)
+docker compose restart
+```
+
+### GPU Note
+
+The container itself does not need GPU access — only `llama-server` on the host does. No `--gpus` flag required.
 
 ## API Examples
 

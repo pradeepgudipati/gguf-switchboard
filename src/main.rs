@@ -3,6 +3,7 @@ mod backend;
 mod config;
 mod db;
 mod errors;
+mod memory;
 mod metrics;
 mod proxy;
 mod scheduler;
@@ -62,6 +63,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let app_state = Arc::new(AppState::new(config.clone(), scheduler.clone(), token_db));
 
     scheduler.start_priority_watcher().await;
+    scheduler.start_memory_watcher().await;
 
     let app = api::create_router(app_state.clone());
 

@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Instant;
 
 use crate::config::Config;
 use crate::db::TokenDb;
@@ -9,6 +10,7 @@ pub struct AppState {
     pub config: Config,
     pub scheduler: Arc<Scheduler>,
     pub token_db: Arc<TokenDb>,
+    pub started_at: Instant,
 }
 
 impl AppState {
@@ -17,6 +19,7 @@ impl AppState {
             config,
             scheduler,
             token_db,
+            started_at: Instant::now(),
         }
     }
 }

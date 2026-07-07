@@ -102,6 +102,30 @@ impl LlamaCppBackend {
 #[async_trait]
 impl Backend for LlamaCppBackend {
     async fn load(&self) -> Result<(), RuntimeError> {
+        // Validate backend binary exists
+        let cmd_path = std::path::Path::new(&self.config.command);
+        if cmd_path.is_absolute() && !cmd_path.exists() {
+            return Err(RuntimeError::ModelLoadingFailed(format!(
+                "Backend binary not found: '{}'. Install llama.cpp or update the command path in config.toml.",
+                self.config.command
+            )));
+        }
+
+        // Validate GGUF model file exists (look for -m / --model in args)
+        if let Some(model_path) = self.find_model_arg() {
+            if !std::path::Path::new(model_path).exists() {
+                return Err(RuntimeError::ModelNotFound(format!(
+                    "Model GGUF file not found: '{}'. Ensure the model file exists and the path is correct in config.toml.",
+                    model_path
+                )));
+            }
+        } else {
+            tracing::warn!(
+                model = %self.model_id,
+                "No -m/--model argument found in backend args; skipping GGUF file validation"
+            );
+        }
+
         info!(model = %self.model_id, command = %self.command_display(), "Starting backend process");
 
         let mut cmd = Command::new(&self.config.command);
@@ -252,6 +276,17 @@ impl Backend for LlamaCppBackend {
 impl LlamaCppBackend {
     fn command_display(&self) -> String {
         format!("{} {}", self.config.command, self.config.args.join(" "))
+    }
+
+    /// Extract the model path from the args list by looking for `-m` or `--model`.
+    fn find_model_arg(&self) -> Option<&str> {
+        let args = &self.config.args;
+        for i in 0..args.len() {
+            if (args[i] == "-m" || args[i] == "--model") && i + 1 < args.len() {
+                return Some(&args[i + 1]);
+            }
+        }
+        None
     }
 }
 

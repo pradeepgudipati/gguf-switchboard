@@ -1,0 +1,16 @@
+services:
+  openai-runtime:
+    build: .
+    ports:
+      - "9090:9090"
+    volumes:
+      # Mount your local config (edit backend_url/health_url to use host.docker.internal)
+      - ./config.docker.toml:/home/appuser/config.toml:ro
+      # Persist token usage database
+      - runtime-data:/var/lib/openai-runtime
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+
+volumes:
+  runtime-data:

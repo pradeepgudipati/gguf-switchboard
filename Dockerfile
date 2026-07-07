@@ -14,7 +14,9 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-RUN useradd --create-home --shell /bin/bash appuser
+RUN useradd --create-home --shell /bin/bash appuser && \
+    mkdir -p /var/lib/openai-runtime && \
+    chown appuser:appuser /var/lib/openai-runtime
 USER appuser
 WORKDIR /home/appuser
 

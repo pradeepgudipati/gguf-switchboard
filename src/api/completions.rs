@@ -9,6 +9,7 @@ use tracing::instrument;
 
 use crate::errors::RuntimeError;
 use crate::metrics::{ACTIVE_REQUESTS, INFERENCE_LATENCY, REQUEST_TOTAL, STREAMING_REQUESTS};
+use crate::proxy::GuardedStream;
 use crate::state::AppState;
 use crate::types::completions::CompletionRequest;
 
@@ -34,14 +35,13 @@ pub async fn completions(
 ) -> Result<impl IntoResponse, RuntimeError> {
     REQUEST_TOTAL.inc();
     ACTIVE_REQUESTS.inc();
-    let _guard = ActiveGuard;
 
     let start = std::time::Instant::now();
     let backend = state.scheduler.ensure_loaded(&request.model).await?;
 
     if request.stream == Some(true) {
         STREAMING_REQUESTS.inc();
-        let _stream_guard = StreamingGuard;
+
         let stream = backend.completions_stream(request).await?;
         let mapped = stream.map(move |chunk| match chunk {
             Ok(c) => {
@@ -58,7 +58,14 @@ pub async fn completions(
         });
         let full_stream = mapped.chain(done);
 
-        let body = Body::from_stream(full_stream.map(|s: Result<String, _>| {
+        // Embed guards into the stream so they're dropped when the stream
+        // finishes, not when the handler returns.
+        let guarded = GuardedStream::new(
+            full_stream,
+            vec![Box::new(ActiveGuard), Box::new(StreamingGuard)],
+        );
+
+        let body = Body::from_stream(guarded.map(|s: Result<String, _>| {
             s.map(bytes::Bytes::from)
                 .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
         }));
@@ -74,6 +81,7 @@ pub async fn completions(
             .body(body)
             .unwrap())
     } else {
+        let _guard = ActiveGuard;
         let response = backend.completions(request).await?;
 
         // Record token usage (completions endpoint uses prompt_tokens from usage)
