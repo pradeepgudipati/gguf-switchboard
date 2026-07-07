@@ -4,11 +4,12 @@ use axum::extract::{Query, State};
 use axum::response::{IntoResponse, Json};
 use serde::Deserialize;
 use tracing::instrument;
+use utoipa::IntoParams;
 
 use crate::errors::RuntimeError;
 use crate::state::AppState;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
 pub struct UsageQuery {
     /// Optional model id to filter by
     pub model: Option<String>,
@@ -16,7 +17,17 @@ pub struct UsageQuery {
     pub limit: Option<u32>,
 }
 
-/// `GET /v1/usage` — token usage statistics per model.
+/// Token usage statistics per model.
+#[utoipa::path(
+    get,
+    path = "/v1/usage",
+    tag = "usage",
+    params(UsageQuery),
+    responses(
+        (status = 200, description = "Token usage statistics"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[instrument(skip(state))]
 pub async fn usage(
     State(state): State<Arc<AppState>>,
@@ -38,7 +49,17 @@ pub async fn usage(
     }
 }
 
-/// `GET /v1/usage/recent` — recent token usage records.
+/// Recent token usage records.
+#[utoipa::path(
+    get,
+    path = "/v1/usage/recent",
+    tag = "usage",
+    params(UsageQuery),
+    responses(
+        (status = 200, description = "Recent usage records"),
+        (status = 500, description = "Internal server error")
+    )
+)]
 #[instrument(skip(state))]
 pub async fn recent_usage(
     State(state): State<Arc<AppState>>,

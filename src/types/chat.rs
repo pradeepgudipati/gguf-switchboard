@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::{StopSequence, ToolCall, Usage};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ChatMessage {
     pub role: Role,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -15,7 +16,7 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     System,
@@ -24,14 +25,14 @@ pub enum Role {
     Tool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(untagged)]
 pub enum Content {
     Text(String),
     Parts(Vec<ContentPart>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum ContentPart {
@@ -39,20 +40,20 @@ pub enum ContentPart {
     ImageUrl { image_url: ImageUrl },
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ImageUrl {
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct Tool {
     pub r#type: String,
     pub function: FunctionDefinition,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct FunctionDefinition {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,7 +62,7 @@ pub struct FunctionDefinition {
     pub parameters: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<ChatMessage>,
@@ -95,7 +96,7 @@ pub struct ChatCompletionRequest {
     pub response_format: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ChatCompletionResponse {
     pub id: String,
     pub object: String,
@@ -107,7 +108,7 @@ pub struct ChatCompletionResponse {
     pub system_fingerprint: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ChatChoice {
     pub index: u32,
     pub message: ChatMessage,
@@ -115,7 +116,7 @@ pub struct ChatChoice {
     pub finish_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ChatCompletionChunk {
     pub id: String,
     pub object: String,
@@ -128,7 +129,7 @@ pub struct ChatCompletionChunk {
     pub usage: Option<Usage>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ChatChunkChoice {
     pub index: u32,
     pub delta: ChatDelta,
@@ -136,7 +137,7 @@ pub struct ChatChunkChoice {
     pub finish_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ChatDelta {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<Role>,

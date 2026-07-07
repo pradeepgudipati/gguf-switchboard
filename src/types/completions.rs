@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::{StopSequence, Usage};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CompletionRequest {
     pub model: String,
     pub prompt: Prompt,
@@ -38,14 +39,14 @@ pub struct CompletionRequest {
     pub seed: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(untagged)]
 pub enum Prompt {
     Single(String),
     Multiple(Vec<String>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CompletionResponse {
     pub id: String,
     pub object: String,
@@ -55,7 +56,7 @@ pub struct CompletionResponse {
     pub usage: Usage,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CompletionChoice {
     pub text: String,
     pub index: u32,
@@ -65,7 +66,7 @@ pub struct CompletionChoice {
     pub finish_reason: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CompletionChunk {
     pub id: String,
     pub object: String,
@@ -74,7 +75,7 @@ pub struct CompletionChunk {
     pub choices: Vec<CompletionChunkChoice>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CompletionChunkChoice {
     pub text: String,
     pub index: u32,

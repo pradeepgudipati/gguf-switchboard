@@ -1,0 +1,2 @@
+[env]
+SWAGGER_UI_OVERWRITE_FOLDER = { value = "swagger-ui-overrides", relative = true }

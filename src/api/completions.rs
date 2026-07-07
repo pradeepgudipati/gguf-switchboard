@@ -11,7 +11,7 @@ use crate::errors::RuntimeError;
 use crate::metrics::{ACTIVE_REQUESTS, INFERENCE_LATENCY, REQUEST_TOTAL, STREAMING_REQUESTS};
 use crate::proxy::GuardedStream;
 use crate::state::AppState;
-use crate::types::completions::CompletionRequest;
+use crate::types::completions::{CompletionRequest, CompletionResponse};
 
 struct ActiveGuard;
 impl Drop for ActiveGuard {
@@ -27,7 +27,19 @@ impl Drop for StreamingGuard {
     }
 }
 
-/// `POST /v1/completions` — text completions with optional streaming.
+/// Text completions with optional streaming.
+#[utoipa::path(
+    post,
+    path = "/v1/completions",
+    tag = "completions",
+    request_body = CompletionRequest,
+    responses(
+        (status = 200, description = "Text completion response", body = CompletionResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 404, description = "Model not found"),
+        (status = 502, description = "Backend error")
+    )
+)]
 #[instrument(skip(state, request), fields(model = %request.model, stream = request.stream.unwrap_or(false)))]
 pub async fn completions(
     State(state): State<Arc<AppState>>,

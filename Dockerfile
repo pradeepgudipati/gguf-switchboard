@@ -4,6 +4,8 @@ FROM rust:1.85-bookworm AS builder
 WORKDIR /app
 COPY Cargo.toml Cargo.lock* ./
 COPY src/ src/
+COPY swagger-ui-overrides/ swagger-ui-overrides/
+COPY .cargo/ .cargo/
 
 RUN cargo build --release && strip /app/target/release/openai-runtime
 

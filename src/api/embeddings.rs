@@ -7,7 +7,7 @@ use tracing::instrument;
 use crate::errors::RuntimeError;
 use crate::metrics::{ACTIVE_REQUESTS, INFERENCE_LATENCY, REQUEST_TOTAL};
 use crate::state::AppState;
-use crate::types::embeddings::EmbeddingRequest;
+use crate::types::embeddings::{EmbeddingRequest, EmbeddingResponse};
 
 struct ActiveGuard;
 impl Drop for ActiveGuard {
@@ -16,7 +16,19 @@ impl Drop for ActiveGuard {
     }
 }
 
-/// `POST /v1/embeddings` — generate embeddings.
+/// Generate embeddings for input text.
+#[utoipa::path(
+    post,
+    path = "/v1/embeddings",
+    tag = "embeddings",
+    request_body = EmbeddingRequest,
+    responses(
+        (status = 200, description = "Generated embeddings", body = EmbeddingResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 404, description = "Model not found"),
+        (status = 502, description = "Backend error")
+    )
+)]
 #[instrument(skip(state, request), fields(model = %request.model))]
 pub async fn embeddings(
     State(state): State<Arc<AppState>>,

@@ -11,7 +11,7 @@ use crate::errors::RuntimeError;
 use crate::metrics::{ACTIVE_REQUESTS, INFERENCE_LATENCY, REQUEST_TOTAL, STREAMING_REQUESTS};
 use crate::proxy::GuardedStream;
 use crate::state::AppState;
-use crate::types::chat::ChatCompletionRequest;
+use crate::types::chat::{ChatCompletionRequest, ChatCompletionResponse};
 
 struct ActiveGuard;
 impl Drop for ActiveGuard {
@@ -27,7 +27,19 @@ impl Drop for StreamingGuard {
     }
 }
 
-/// `POST /v1/chat/completions` — chat completions with optional streaming.
+/// Chat completions with optional streaming.
+#[utoipa::path(
+    post,
+    path = "/v1/chat/completions",
+    tag = "chat",
+    request_body = ChatCompletionRequest,
+    responses(
+        (status = 200, description = "Chat completion response", body = ChatCompletionResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 404, description = "Model not found"),
+        (status = 502, description = "Backend error")
+    )
+)]
 #[instrument(skip(state, request), fields(model = %request.model, stream = request.stream.unwrap_or(false)))]
 pub async fn chat_completions(
     State(state): State<Arc<AppState>>,

@@ -69,7 +69,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let bind: std::net::SocketAddr = config.bind.parse()?;
     let listener = tokio::net::TcpListener::bind(bind).await?;
-    info!(address = %bind, "Server listening");
+    let base_url = format!(
+        "http://{}",
+        if bind.ip().is_unspecified() {
+            format!("localhost:{}", bind.port())
+        } else {
+            bind.to_string()
+        }
+    );
+    info!(address = %bind, swagger_ui = %format!("{base_url}/swagger-ui/"), "Server listening");
 
     let shutdown_signal = async {
         let ctrl_c = async {

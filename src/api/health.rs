@@ -3,16 +3,18 @@ use std::sync::Arc;
 use axum::extract::State;
 use axum::Json;
 use serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::state::AppState;
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct HealthResponse {
     pub status: String,
     pub version: String,
+    pub loaded_model: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
 pub struct StatusResponse {
     pub status: String,
     pub version: String,
@@ -22,17 +24,35 @@ pub struct StatusResponse {
     pub uptime_secs: u64,
 }
 
-/// `GET /health` — basic liveness probe.
+/// Basic liveness probe.
+#[utoipa::path(
+    get,
+    path = "/health",
+    tag = "health",
+    responses(
+        (status = 200, description = "Service is healthy", body = HealthResponse)
+    )
+)]
 pub async fn health(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
 ) -> Json<HealthResponse> {
+    let loaded = state.scheduler.loaded_model().await;
     Json(HealthResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
+        loaded_model: loaded,
     })
 }
 
-/// `GET /status` — detailed status report.
+/// Detailed status report.
+#[utoipa::path(
+    get,
+    path = "/status",
+    tag = "health",
+    responses(
+        (status = 200, description = "Detailed service status", body = StatusResponse)
+    )
+)]
 pub async fn status(
     State(state): State<Arc<AppState>>,
 ) -> Json<StatusResponse> {

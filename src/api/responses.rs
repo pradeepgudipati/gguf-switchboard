@@ -24,10 +24,22 @@ impl Drop for ActiveGuard {
     }
 }
 
-/// `POST /v1/responses` — OpenAI Responses API with optional streaming.
+/// OpenAI Responses API with optional streaming.
 ///
 /// This converts the Responses API request into a Chat Completion request
 /// internally so any chat-capable backend can serve it.
+#[utoipa::path(
+    post,
+    path = "/v1/responses",
+    tag = "responses",
+    request_body = ResponseRequest,
+    responses(
+        (status = 200, description = "Response result", body = ResponseResult),
+        (status = 400, description = "Invalid request"),
+        (status = 404, description = "Model not found"),
+        (status = 502, description = "Backend error")
+    )
+)]
 pub async fn responses(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ResponseRequest>,

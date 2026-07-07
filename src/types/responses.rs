@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ResponseRequest {
     pub model: String,
     pub input: ResponseInput,
@@ -24,20 +25,20 @@ pub struct ResponseRequest {
     pub user: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(untagged)]
 pub enum ResponseInput {
     Text(String),
     Messages(Vec<ResponseMessage>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ResponseMessage {
     pub role: String,
     pub content: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ResponseResult {
     pub id: String,
     pub object: String,
@@ -48,7 +49,7 @@ pub struct ResponseResult {
     pub status: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ResponseOutput {
     pub r#type: String,
     pub id: String,
@@ -56,13 +57,13 @@ pub struct ResponseOutput {
     pub content: Vec<ResponseContent>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ResponseContent {
     pub r#type: String,
     pub text: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ResponseUsage {
     pub input_tokens: u32,
     pub output_tokens: u32,

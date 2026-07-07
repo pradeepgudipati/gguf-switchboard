@@ -3,7 +3,15 @@ use axum::response::Response;
 
 use crate::metrics;
 
-/// `GET /metrics` — Prometheus-format metrics endpoint.
+/// Prometheus-format metrics endpoint.
+#[utoipa::path(
+    get,
+    path = "/metrics",
+    tag = "metrics",
+    responses(
+        (status = 200, description = "Prometheus metrics in text format", content_type = "text/plain")
+    )
+)]
 pub async fn metrics() -> Response {
     let body = metrics::gather();
     Response::builder()

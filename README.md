@@ -99,28 +99,43 @@ Point your IDE or agent at `http://localhost:9090/v1`, set a model name from you
 
 ## Quick Start
 
-### Prerequisites
-
-- [Rust 1.85+](https://rustup.rs/) (edition 2024)
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) built with server support
-- A GGUF model file
-
-### Install & Run
+### Install & run
 
 ```bash
-# Clone
-git clone https://github.com/pradeepgudipati/gguf-switchboard.git
-cd gguf-switchboard
-
-# Edit config.toml to point to your llama-server binary and model
-cp config.toml config.local.toml
-$EDITOR config.local.toml
-
-# Build and run
-cargo run --release -- config.local.toml
+./deploy.sh
 ```
 
-The server starts on `0.0.0.0:9090` by default.
+The script clones (if needed), checks out `Dev`, installs build dependencies and Rust, builds the release binary, creates `/etc/openai-runtime/config.toml` from the template if missing, installs the systemd service, and starts the server on `0.0.0.0:9090`.
+
+On completion it prints a table of **available models** (ID, display name, priority/loaded state) plus links to Swagger UI and health endpoints.
+
+**Post-install:** Edit `/etc/openai-runtime/config.toml` to point at your `llama-server` binary and GGUF model paths, then re-run:
+
+```bash
+./deploy.sh
+```
+
+Or restart only:
+
+```bash
+sudo systemctl restart openai-runtime
+```
+
+Explore the API at **http://localhost:9090/swagger-ui/** (Swagger UI).
+
+### Fresh machine (no clone yet)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/pradeepgudipati/gguf-switchboard/Dev/deploy.sh | bash
+```
+
+### Prerequisites
+
+- Ubuntu/Debian (for `apt`; other distros: install equivalent build deps manually)
+- [llama.cpp](https://github.com/ggerganov/llama.cpp) built with server support
+- A GGUF model file (configure paths in config after install)
+
+Rust is installed automatically if missing.
 
 ## Architecture
 
@@ -220,70 +235,23 @@ RUST_LOG=debug cargo run --release -- config.toml
 # (edit config.toml bind = "0.0.0.0:3000")
 ```
 
-## Systemd Setup
-
-```bash
-# Build
-cargo build --release
-sudo cp target/release/openai-runtime /usr/local/bin/
-
-# Create user
-sudo useradd --system --create-home --shell /bin/bash openai-runtime
-
-# Copy config
-sudo mkdir -p /etc/openai-runtime
-sudo cp config.toml /etc/openai-runtime/config.toml
-
-# Install service
-sudo cp openai-runtime.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now openai-runtime
-
-# Check status
-sudo systemctl status openai-runtime
-sudo journalctl -u openai-runtime -f
-```
-
 ## Systemd Setup (Recommended)
 
 The native install is recommended because the runtime spawns `llama-server` as a child process and needs direct access to your GPU and model files.
 
 ```bash
-# Build
-cargo build --release
+./deploy.sh
+```
 
-# Install binary
-sudo cp target/release/openai-runtime /usr/local/bin/
+Edit `/etc/openai-runtime/config.toml` to match your `llama-server` path and GGUF models, then re-run `./deploy.sh` or restart:
 
-# Create directories
-sudo mkdir -p /etc/openai-runtime /var/lib/openai-runtime
+```bash
+./deploy.sh
+# or
+sudo systemctl restart openai-runtime
+```
 
-# Copy and edit config
-sudo cp config.toml /etc/openai-runtime/config.toml
-$EDITOR /etc/openai-runtime/config.toml
-
-# Create systemd service
-sudo tee /etc/systemd/system/openai-runtime.service > /dev/null << 'EOF'
-[Unit]
-Description=OpenAI Runtime - Local LLM Inference Server
-After=network.target
-
-[Service]
-Type=simple
-User=pradeep
-ExecStart=/usr/local/bin/openai-runtime /etc/openai-runtime/config.toml
-Restart=on-failure
-RestartSec=5
-Environment=RUST_LOG=info
-
-[Install]
-WantedBy=multi-user.target
-EOF
-
-# Enable and start
-sudo systemctl daemon-reload
-sudo systemctl enable --now openai-runtime
-
+```bash
 # Check status
 sudo systemctl status openai-runtime
 sudo journalctl -u openai-runtime -f
@@ -371,6 +339,8 @@ curl http://localhost:9090/v1/embeddings \
 
 ### List Models
 
+After deploy, `./deploy.sh` prints configured models in the terminal. You can also query the API:
+
 ```bash
 curl http://localhost:9090/v1/models
 ```
@@ -386,6 +356,18 @@ curl http://localhost:9090/v1/responses \
         "instructions": "Answer concisely."
     }'
 ```
+
+### API Explorer (Swagger UI)
+
+After `./deploy.sh` completes, open the interactive API docs in your browser:
+
+- **Swagger UI:** http://localhost:9090/swagger-ui/
+- **OpenAPI spec:** http://localhost:9090/api-docs/openapi.json
+- **Root redirect:** http://localhost:9090/ → Swagger UI
+
+All endpoints are listed and testable from the Swagger UI — health, models, chat completions, embeddings, usage, and more.
+
+A **Model** dropdown appears in the top bar (like the Authorize token). The selected model is persisted in the browser and applied automatically to every API request that accepts a `model` field — chat, completions, embeddings, responses, audio, usage filters, and model lookups.
 
 ### Health & Status
 

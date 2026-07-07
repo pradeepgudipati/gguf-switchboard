@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
+use utoipa::ToSchema;
 
 use super::Usage;
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EmbeddingRequest {
     pub model: String,
     pub input: EmbeddingInput,
@@ -14,14 +15,14 @@ pub struct EmbeddingRequest {
     pub user: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[serde(untagged)]
 pub enum EmbeddingInput {
     Single(String),
     Multiple(Vec<String>),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EmbeddingResponse {
     pub object: String,
     pub data: Vec<EmbeddingData>,
@@ -29,14 +30,14 @@ pub struct EmbeddingResponse {
     pub usage: EmbeddingUsage,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EmbeddingData {
     pub object: String,
     pub embedding: Vec<f64>,
     pub index: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct EmbeddingUsage {
     pub prompt_tokens: u32,
     pub total_tokens: u32,

@@ -11,10 +11,22 @@ use crate::errors::RuntimeError;
 use crate::metrics::REQUEST_TOTAL;
 use crate::state::AppState;
 
-/// `POST /v1/audio/transcriptions` — transcribe audio to text.
+/// Transcribe audio to text.
 ///
 /// Forwards the request to the loaded backend's native `/audio/transcriptions`
 /// endpoint.
+#[utoipa::path(
+    post,
+    path = "/v1/audio/transcriptions",
+    tag = "audio",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Transcription result"),
+        (status = 400, description = "Invalid request"),
+        (status = 404, description = "Model not found"),
+        (status = 502, description = "Backend error")
+    )
+)]
 #[instrument(skip(state))]
 pub async fn transcriptions(
     State(state): State<Arc<AppState>>,
@@ -57,10 +69,22 @@ pub async fn transcriptions(
     }
 }
 
-/// `POST /v1/audio/speech` — generate speech from text.
+/// Generate speech from text.
 ///
 /// Forwards the request to the loaded backend's `/audio/speech` endpoint
 /// and returns the raw audio bytes.
+#[utoipa::path(
+    post,
+    path = "/v1/audio/speech",
+    tag = "audio",
+    request_body = serde_json::Value,
+    responses(
+        (status = 200, description = "Generated audio bytes", content_type = "audio/mpeg"),
+        (status = 400, description = "Invalid request"),
+        (status = 404, description = "Model not found"),
+        (status = 502, description = "Backend error")
+    )
+)]
 #[instrument(skip(state))]
 pub async fn speech(
     State(state): State<Arc<AppState>>,
