@@ -104,6 +104,8 @@ impl Scheduler {
                         if let Err(e) = backend.unload().await {
                             error!(model = %model_id, error = %e, "Failed to unload model");
                         }
+                        BACKEND_HEALTH.set(0);
+                        LOADED_MODEL.set(0);
                     }
                 }
 
@@ -128,6 +130,7 @@ impl Scheduler {
                         let start = Instant::now();
                         if let Err(e) = backend.load().await {
                             error!(model = %priority_id, error = %e, "Failed to load priority model");
+                            let _ = backend.unload().await;
                             continue;
                         }
 
@@ -136,6 +139,7 @@ impl Scheduler {
                         loop {
                             if Instant::now() > deadline {
                                 error!(model = %priority_id, "Priority model health check timed out");
+                                let _ = backend.unload().await;
                                 break;
                             }
                             match backend.health().await {
@@ -143,6 +147,7 @@ impl Scheduler {
                                     let elapsed = start.elapsed();
                                     MODEL_LOAD_LATENCY.observe(elapsed.as_secs_f64());
                                     LOADED_MODEL.set(1);
+                                    BACKEND_HEALTH.set(1);
                                     info!(
                                         model = %priority_id,
                                         elapsed_ms = elapsed.as_millis(),
@@ -206,6 +211,8 @@ impl Scheduler {
                     if let Err(e) = backend.unload().await {
                         error!(model = %old_model, error = %e, "Error unloading model");
                     }
+                    BACKEND_HEALTH.set(0);
+                    LOADED_MODEL.set(0);
                 }
             }
         }
@@ -317,6 +324,7 @@ impl Scheduler {
         }
         *self.inner.loaded.write().await = None;
         LOADED_MODEL.set(0);
+        BACKEND_HEALTH.set(0);
         Ok(())
     }
 

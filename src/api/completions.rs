@@ -19,6 +19,13 @@ impl Drop for ActiveGuard {
     }
 }
 
+struct StreamingGuard;
+impl Drop for StreamingGuard {
+    fn drop(&mut self) {
+        STREAMING_REQUESTS.dec();
+    }
+}
+
 /// `POST /v1/completions` — text completions with optional streaming.
 #[instrument(skip(state, request), fields(model = %request.model, stream = request.stream.unwrap_or(false)))]
 pub async fn completions(
@@ -34,6 +41,7 @@ pub async fn completions(
 
     if request.stream == Some(true) {
         STREAMING_REQUESTS.inc();
+        let _stream_guard = StreamingGuard;
         let stream = backend.completions_stream(request).await?;
         let mapped = stream.map(move |chunk| match chunk {
             Ok(c) => {
