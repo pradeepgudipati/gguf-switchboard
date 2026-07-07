@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
 use axum::Json;
+use axum::extract::{Path, State};
 use chrono::Utc;
 
 use crate::errors::RuntimeError;
@@ -25,13 +25,11 @@ pub async fn list_models(
         .scheduler
         .model_ids()
         .into_iter()
-        .map(|id| {
-            ModelInfo {
-                id,
-                object: "model".to_string(),
-                created: Utc::now().timestamp(),
-                owned_by: "local".to_string(),
-            }
+        .map(|id| ModelInfo {
+            id,
+            object: "model".to_string(),
+            created: Utc::now().timestamp(),
+            owned_by: "local".to_string(),
         })
         .collect();
 

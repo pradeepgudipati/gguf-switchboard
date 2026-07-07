@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use serde_json::json;
 use axum::extract::State;
-use axum::http::{header, Response, StatusCode};
+use axum::http::{Response, StatusCode, header};
 use axum::response::{IntoResponse, Json};
 use chrono::Utc;
 use futures::StreamExt;
@@ -175,14 +174,11 @@ pub async fn responses(
         });
         let full_stream = mapped.chain(done);
 
-        let guarded = GuardedStream::new(
-            full_stream,
-            vec![Box::new(active_guard)],
-        );
+        let guarded = GuardedStream::new(full_stream, vec![Box::new(active_guard)]);
 
         let body = Body::from_stream(guarded.map(|s: Result<String, _>| {
             s.map(bytes::Bytes::from)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                .map_err(|e| std::io::Error::other(e.to_string()))
         }));
 
         INFERENCE_LATENCY.observe(start.elapsed().as_secs_f64());

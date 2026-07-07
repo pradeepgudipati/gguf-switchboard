@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use axum::extract::State;
-use serde_json::json;
 use axum::response::{IntoResponse, Json};
 use tracing::instrument;
 

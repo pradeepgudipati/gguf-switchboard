@@ -172,7 +172,9 @@ fn test_completion_swagger_example_deserialization() {
 
     let request: CompletionRequest = serde_json::from_str(example).unwrap();
     assert_eq!(request.model, "gemma-4-e4b");
-    assert!(matches!(request.prompt, Prompt::Single(ref text) if text == "Say hello in one sentence."));
+    assert!(
+        matches!(request.prompt, Prompt::Single(ref text) if text == "Say hello in one sentence.")
+    );
     assert_eq!(request.max_tokens, Some(512));
 }
 
@@ -230,7 +232,9 @@ fn test_response_swagger_example_deserialization() {
 
     let request: ResponseRequest = serde_json::from_str(example).unwrap();
     assert_eq!(request.model, "gemma-4-e4b");
-    assert!(matches!(request.input, ResponseInput::Text(ref text) if text == "What is the capital of France?"));
+    assert!(
+        matches!(request.input, ResponseInput::Text(ref text) if text == "What is the capital of France?")
+    );
     assert_eq!(
         request.instructions.as_deref(),
         Some("Answer concisely in one sentence.")
@@ -271,7 +275,10 @@ fn test_speech_request_serialization() {
     assert!(json.contains("\"response_format\":\"mp3\""));
 
     let deserialized: SpeechRequest = serde_json::from_str(&json).unwrap();
-    assert_eq!(deserialized.input, "Hello from the OpenAI Runtime speech API.");
+    assert_eq!(
+        deserialized.input,
+        "Hello from the OpenAI Runtime speech API."
+    );
 }
 
 #[test]

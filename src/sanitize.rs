@@ -1,5 +1,5 @@
-use crate::types::chat::{ChatCompletionRequest, ChatMessage, Content, Tool};
 use crate::types::ToolCall;
+use crate::types::chat::{ChatCompletionRequest, ChatMessage, Content, Tool};
 
 /// Swagger UI defaults `max_tokens` to 2^30; only rewrite those placeholders.
 const SWAGGER_PLACEHOLDER_MAX_TOKENS: u32 = 1_000_000_000;
@@ -8,16 +8,13 @@ const SWAGGER_MAX_INT: i64 = 9_007_199_254_740_991;
 
 /// Strip Swagger UI placeholder values before forwarding to llama-server.
 pub fn sanitize_chat_request(mut request: ChatCompletionRequest) -> ChatCompletionRequest {
-    request.messages = request
-        .messages
-        .into_iter()
-        .map(sanitize_message)
-        .collect();
+    request.messages = request.messages.into_iter().map(sanitize_message).collect();
 
-    if let Some(max_tokens) = request.max_tokens {
-        if max_tokens >= SWAGGER_PLACEHOLDER_MAX_TOKENS {
-            request.max_tokens = Some(REASONING_DEFAULT_MAX_TOKENS);
-        }
+    if request
+        .max_tokens
+        .is_some_and(|max_tokens| max_tokens >= SWAGGER_PLACEHOLDER_MAX_TOKENS)
+    {
+        request.max_tokens = Some(REASONING_DEFAULT_MAX_TOKENS);
     }
 
     if request.n.is_some_and(|n| n > 128) {
@@ -40,9 +37,11 @@ pub fn sanitize_chat_request(mut request: ChatCompletionRequest) -> ChatCompleti
     if request.user.as_deref().is_some_and(is_placeholder_str) {
         request.user = None;
     }
-    if request.tools.as_ref().is_some_and(|tools| {
-        tools.is_empty() || tools.iter().all(is_placeholder_tool)
-    }) {
+    if request
+        .tools
+        .as_ref()
+        .is_some_and(|tools| tools.is_empty() || tools.iter().all(is_placeholder_tool))
+    {
         request.tools = None;
     }
 
@@ -57,7 +56,11 @@ fn sanitize_message(mut message: ChatMessage) -> ChatMessage {
     if message.name.as_deref().is_some_and(is_placeholder_str) {
         message.name = None;
     }
-    if message.tool_call_id.as_deref().is_some_and(is_placeholder_str) {
+    if message
+        .tool_call_id
+        .as_deref()
+        .is_some_and(is_placeholder_str)
+    {
         message.tool_call_id = None;
     }
     if message

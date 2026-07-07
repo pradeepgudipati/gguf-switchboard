@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
-use crate::backend::{create_backend, Backend};
+use crate::backend::{Backend, create_backend};
 use crate::config::{Config, ModelConfig};
 use crate::errors::RuntimeError;
 use crate::memory;
@@ -247,9 +247,7 @@ impl Scheduler {
         let start = Instant::now();
         info!(model = %model_id, "Loading model");
         backend.load().await.map_err(|e| {
-            RuntimeError::ModelLoadingFailed(format!(
-                "Failed to start model '{model_id}': {e}"
-            ))
+            RuntimeError::ModelLoadingFailed(format!("Failed to start model '{model_id}': {e}"))
         })?;
 
         let deadline = Instant::now() + Duration::from_secs(self.inner.config.startup_timeout);

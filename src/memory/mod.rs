@@ -34,10 +34,10 @@ pub fn check_memory() -> Option<MemoryStats> {
 
     #[cfg(target_os = "macos")]
     {
-        return read_macos().or_else(|| {
+        read_macos().or_else(|| {
             warn!("Failed to read memory stats via sysctl/vm_stat; memory monitoring disabled");
             None
-        });
+        })
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -72,11 +72,13 @@ fn read_linux() -> Option<MemoryStats> {
     let total_mb = total_kb / 1024;
     let available_mb = available_kb / 1024;
     let used_mb = total_mb.saturating_sub(available_mb);
-    let used_percent = if total_mb > 0 {
-        ((used_mb * 100) / total_mb) as u8
-    } else {
-        0
-    };
+    let used_percent = u8::try_from(
+        used_mb
+            .saturating_mul(100)
+            .checked_div(total_mb)
+            .unwrap_or(0),
+    )
+    .unwrap_or(0);
 
     debug!(
         total_mb,
@@ -152,11 +154,13 @@ fn read_macos() -> Option<MemoryStats> {
     let available_bytes = (free_pages + inactive_pages + speculative_pages) * page_size;
     let available_mb = available_bytes / (1024 * 1024);
     let used_mb = total_mb.saturating_sub(available_mb);
-    let used_percent = if total_mb > 0 {
-        ((used_mb * 100) / total_mb) as u8
-    } else {
-        0
-    };
+    let used_percent = u8::try_from(
+        used_mb
+            .saturating_mul(100)
+            .checked_div(total_mb)
+            .unwrap_or(0),
+    )
+    .unwrap_or(0);
 
     debug!(
         total_mb,
@@ -181,10 +185,7 @@ mod tests {
         // CI containers where /proc/meminfo may be restricted.
         if let Some(stats) = check_memory() {
             assert!(stats.total_mb > 0, "total_mb should be > 0");
-            assert!(
-                stats.used_percent <= 100,
-                "used_percent should be <= 100"
-            );
+            assert!(stats.used_percent <= 100, "used_percent should be <= 100");
         }
     }
 

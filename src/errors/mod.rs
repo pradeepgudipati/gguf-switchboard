@@ -61,19 +61,65 @@ struct OpenAIError {
 impl IntoResponse for RuntimeError {
     fn into_response(self) -> Response {
         let (status, error_type, code) = match &self {
-            RuntimeError::ModelNotFound(_) => (StatusCode::NOT_FOUND, "invalid_request_error", "model_not_found"),
-            RuntimeError::BackendError(_) => (StatusCode::BAD_GATEWAY, "server_error", "backend_error"),
-            RuntimeError::_BackendNotHealthy(_) => (StatusCode::SERVICE_UNAVAILABLE, "server_error", "backend_not_healthy"),
-            RuntimeError::ModelLoadingFailed(_) => (StatusCode::SERVICE_UNAVAILABLE, "server_error", "model_loading_failed"),
-            RuntimeError::ModelLoadingTimeout(_) => (StatusCode::GATEWAY_TIMEOUT, "server_error", "model_loading_timeout"),
-            RuntimeError::ConfigError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "server_error", "config_error"),
+            RuntimeError::ModelNotFound(_) => (
+                StatusCode::NOT_FOUND,
+                "invalid_request_error",
+                "model_not_found",
+            ),
+            RuntimeError::BackendError(_) => {
+                (StatusCode::BAD_GATEWAY, "server_error", "backend_error")
+            }
+            RuntimeError::_BackendNotHealthy(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "backend_not_healthy",
+            ),
+            RuntimeError::ModelLoadingFailed(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "model_loading_failed",
+            ),
+            RuntimeError::ModelLoadingTimeout(_) => (
+                StatusCode::GATEWAY_TIMEOUT,
+                "server_error",
+                "model_loading_timeout",
+            ),
+            RuntimeError::ConfigError(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "config_error",
+            ),
             RuntimeError::ProxyError(_) => (StatusCode::BAD_GATEWAY, "server_error", "proxy_error"),
-            RuntimeError::SerializationError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "server_error", "serialization_error"),
-            RuntimeError::InternalError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "server_error", "internal_error"),
-            RuntimeError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, "invalid_request_error", "invalid_request"),
-            RuntimeError::_Unauthorized => (StatusCode::UNAUTHORIZED, "authentication_error", "unauthorized"),
-            RuntimeError::_RateLimitExceeded => (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error", "rate_limit_exceeded"),
-            RuntimeError::_ServiceUnavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "server_error", "service_unavailable"),
+            RuntimeError::SerializationError(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "serialization_error",
+            ),
+            RuntimeError::InternalError(_) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "internal_error",
+            ),
+            RuntimeError::InvalidRequest(_) => (
+                StatusCode::BAD_REQUEST,
+                "invalid_request_error",
+                "invalid_request",
+            ),
+            RuntimeError::_Unauthorized => (
+                StatusCode::UNAUTHORIZED,
+                "authentication_error",
+                "unauthorized",
+            ),
+            RuntimeError::_RateLimitExceeded => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
+                "rate_limit_exceeded",
+            ),
+            RuntimeError::_ServiceUnavailable(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "server_error",
+                "service_unavailable",
+            ),
         };
 
         let body = OpenAIErrorResponse {

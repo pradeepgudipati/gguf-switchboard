@@ -1,6 +1,6 @@
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -137,9 +137,9 @@ impl Backend for LlamaCppBackend {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
-        let child = cmd
-            .spawn()
-            .map_err(|e| RuntimeError::ModelLoadingFailed(format!("Failed to spawn backend: {e}")))?;
+        let child = cmd.spawn().map_err(|e| {
+            RuntimeError::ModelLoadingFailed(format!("Failed to spawn backend: {e}"))
+        })?;
 
         *self.process.lock().await = Some(child);
         self.running.store(true, Ordering::SeqCst);
@@ -304,7 +304,9 @@ struct SseLineParser<T> {
 }
 
 impl<T> SseLineParser<T> {
-    fn new(stream: impl Stream<Item = Result<bytes::Bytes, RuntimeError>> + Send + 'static) -> Self {
+    fn new(
+        stream: impl Stream<Item = Result<bytes::Bytes, RuntimeError>> + Send + 'static,
+    ) -> Self {
         Self {
             inner: Box::pin(stream),
             buffer: Vec::with_capacity(4096),
@@ -371,8 +373,7 @@ impl<T: serde::de::DeserializeOwned + Unpin> futures::Stream for SseLineParser<T
                         return std::task::Poll::Ready(None);
                     }
                     // Try to parse any remaining data
-                    let remaining =
-                        String::from_utf8_lossy(&this.buffer).trim().to_string();
+                    let remaining = String::from_utf8_lossy(&this.buffer).trim().to_string();
                     this.buffer.clear();
                     if remaining.is_empty() {
                         return std::task::Poll::Ready(None);

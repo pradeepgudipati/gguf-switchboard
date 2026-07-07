@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use axum::extract::State;
 use axum::Json;
+use axum::extract::State;
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -33,9 +33,7 @@ pub struct StatusResponse {
         (status = 200, description = "Service is healthy", body = HealthResponse)
     )
 )]
-pub async fn health(
-    State(state): State<Arc<AppState>>,
-) -> Json<HealthResponse> {
+pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     let loaded = state.scheduler.loaded_model().await;
     Json(HealthResponse {
         status: "ok".to_string(),
@@ -53,9 +51,7 @@ pub async fn health(
         (status = 200, description = "Detailed service status", body = StatusResponse)
     )
 )]
-pub async fn status(
-    State(state): State<Arc<AppState>>,
-) -> Json<StatusResponse> {
+pub async fn status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
     let loaded = state.scheduler.loaded_model().await;
     let priority = state.scheduler.priority_model();
     let models = state

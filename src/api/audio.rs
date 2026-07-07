@@ -1,11 +1,10 @@
 use std::sync::Arc;
 
+use axum::Json;
 use axum::body::Body;
 use axum::extract::State;
-use axum::http::{header, Response, StatusCode};
+use axum::http::{Response, StatusCode, header};
 use axum::response::IntoResponse;
-use axum::Json;
-use serde_json::json;
 use tracing::instrument;
 
 use crate::errors::RuntimeError;
@@ -54,12 +53,9 @@ pub async fn transcriptions(
 
     let url = format!("{}/audio/transcriptions", backend.backend_url());
     let client = reqwest::Client::new();
-    let resp = client
-        .post(&url)
-        .json(&request)
-        .send()
-        .await
-        .map_err(|e| RuntimeError::ProxyError(format!("Audio transcription request failed: {e}")))?;
+    let resp = client.post(&url).json(&request).send().await.map_err(|e| {
+        RuntimeError::ProxyError(format!("Audio transcription request failed: {e}"))
+    })?;
 
     if resp.status().is_success() {
         let body = resp.text().await.map_err(|e| {

@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use serde_json::json;
 use axum::extract::State;
-use axum::http::{header, Response, StatusCode};
+use axum::http::{Response, StatusCode, header};
 use axum::response::{IntoResponse, Json};
 use futures::StreamExt;
 use tracing::instrument;
@@ -87,7 +86,7 @@ pub async fn completions(
 
         let body = Body::from_stream(guarded.map(|s: Result<String, _>| {
             s.map(bytes::Bytes::from)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                .map_err(|e| std::io::Error::other(e.to_string()))
         }));
 
         INFERENCE_LATENCY.observe(start.elapsed().as_secs_f64());

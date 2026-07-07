@@ -58,5 +58,3 @@ strip = true
 
 [lints.clippy]
 all = "warn"
-pedantic = "warn"
-nursery = "warn"

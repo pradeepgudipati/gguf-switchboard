@@ -235,6 +235,20 @@ RUST_LOG=debug cargo run --release -- config.toml
 # (edit config.toml bind = "0.0.0.0:3000")
 ```
 
+### Pre-commit checks
+
+Install git hooks to run standard Rust checks before each commit (format, clippy with denied warnings, build, tests):
+
+```bash
+./scripts/install-hooks.sh
+```
+
+Run the same checks manually:
+
+```bash
+./precommit.sh
+```
+
 ## Systemd Setup (Recommended)
 
 The native install is recommended because the runtime spawns `llama-server` as a child process and needs direct access to your GPU and model files.

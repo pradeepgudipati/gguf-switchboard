@@ -86,9 +86,10 @@ impl TokenDb {
         total_tokens: u32,
         request_id: Option<&str>,
     ) -> Result<(), RuntimeError> {
-        let conn = self.conn.lock().map_err(|e| {
-            RuntimeError::InternalError(format!("Database lock poisoned: {e}"))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| RuntimeError::InternalError(format!("Database lock poisoned: {e}")))?;
 
         let timestamp = Utc::now().to_rfc3339();
 
@@ -103,9 +104,10 @@ impl TokenDb {
     }
 
     pub fn get_usage_stats(&self) -> Result<UsageStats, RuntimeError> {
-        let conn = self.conn.lock().map_err(|e| {
-            RuntimeError::InternalError(format!("Database lock poisoned: {e}"))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| RuntimeError::InternalError(format!("Database lock poisoned: {e}")))?;
 
         // Total stats
         let (total_requests, total_prompt, total_completion, total_total): (i64, i64, i64, i64) =
@@ -146,9 +148,7 @@ impl TokenDb {
                     last_request: row.get(6)?,
                 })
             })
-            .map_err(|e| {
-                RuntimeError::InternalError(format!("Failed to query model stats: {e}"))
-            })?
+            .map_err(|e| RuntimeError::InternalError(format!("Failed to query model stats: {e}")))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| {
                 RuntimeError::InternalError(format!("Failed to collect model stats: {e}"))
@@ -164,9 +164,10 @@ impl TokenDb {
     }
 
     pub fn get_model_usage(&self, model: &str) -> Result<Option<ModelUsageSummary>, RuntimeError> {
-        let conn = self.conn.lock().map_err(|e| {
-            RuntimeError::InternalError(format!("Database lock poisoned: {e}"))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| RuntimeError::InternalError(format!("Database lock poisoned: {e}")))?;
 
         let mut stmt = conn
             .prepare(
@@ -206,9 +207,10 @@ impl TokenDb {
     }
 
     pub fn get_recent_records(&self, limit: u32) -> Result<Vec<TokenUsageRecord>, RuntimeError> {
-        let conn = self.conn.lock().map_err(|e| {
-            RuntimeError::InternalError(format!("Database lock poisoned: {e}"))
-        })?;
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| RuntimeError::InternalError(format!("Database lock poisoned: {e}")))?;
 
         let mut stmt = conn
             .prepare(

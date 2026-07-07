@@ -1,9 +1,8 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use serde_json::json;
 use axum::extract::State;
-use axum::http::{header, Response, StatusCode};
+use axum::http::{Response, StatusCode, header};
 use axum::response::{IntoResponse, Json};
 use futures::StreamExt;
 use tracing::instrument;
@@ -69,14 +68,9 @@ pub async fn chat_completions(
 
         let model = backend.name().to_string();
         // Record streaming request (token counts not available in stream mode)
-        let _ = state.token_db.record(
-            &model,
-            "/v1/chat/completions",
-            0,
-            0,
-            0,
-            None,
-        );
+        let _ = state
+            .token_db
+            .record(&model, "/v1/chat/completions", 0, 0, 0, None);
 
         let mapped = stream.map(move |chunk| match chunk {
             Ok(c) => {
@@ -102,7 +96,7 @@ pub async fn chat_completions(
 
         let body = Body::from_stream(guarded.map(|s: Result<String, _>| {
             s.map(bytes::Bytes::from)
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+                .map_err(|e| std::io::Error::other(e.to_string()))
         }));
 
         INFERENCE_LATENCY.observe(start.elapsed().as_secs_f64());

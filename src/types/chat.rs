@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use utoipa::ToSchema;
 
 use super::{StopSequence, ToolCall, Usage};
@@ -185,24 +184,22 @@ pub fn normalize_chat_response(mut response: ChatCompletionResponse) -> ChatComp
 pub fn normalize_chat_chunk(mut chunk: ChatCompletionChunk) -> ChatCompletionChunk {
     for choice in &mut chunk.choices {
         let delta = &mut choice.delta;
-        if delta.content.as_ref().is_none_or(|s| s.is_empty()) {
-            if let Some(reasoning) = delta.reasoning_content.as_ref() {
-                if !reasoning.is_empty() {
-                    delta.content = Some(reasoning.clone());
-                }
-            }
+        if delta.content.as_ref().is_none_or(|s| s.is_empty())
+            && let Some(reasoning) = delta.reasoning_content.as_ref()
+            && !reasoning.is_empty()
+        {
+            delta.content = Some(reasoning.clone());
         }
     }
     chunk
 }
 
 fn normalize_message(message: &mut ChatMessage) {
-    if content_is_empty(&message.content) {
-        if let Some(reasoning) = message.reasoning_content.as_ref() {
-            if !reasoning.is_empty() {
-                message.content = Some(Content::Text(reasoning.clone()));
-            }
-        }
+    if content_is_empty(&message.content)
+        && let Some(reasoning) = message.reasoning_content.as_ref()
+        && !reasoning.is_empty()
+    {
+        message.content = Some(Content::Text(reasoning.clone()));
     }
 }
 

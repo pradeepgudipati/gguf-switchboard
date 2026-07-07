@@ -100,20 +100,19 @@ pub struct ApiDoc;
 pub fn create_router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::permissive();
 
-    let trace = TraceLayer::new_for_http()
-        .make_span_with(|req: &axum::http::Request<_>| {
-            let request_id = req
-                .headers()
-                .get("x-request-id")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("unknown");
-            tracing::info_span!(
-                "request",
-                method = %req.method(),
-                uri = %req.uri(),
-                request_id = %request_id,
-            )
-        });
+    let trace = TraceLayer::new_for_http().make_span_with(|req: &axum::http::Request<_>| {
+        let request_id = req
+            .headers()
+            .get("x-request-id")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("unknown");
+        tracing::info_span!(
+            "request",
+            method = %req.method(),
+            uri = %req.uri(),
+            request_id = %request_id,
+        )
+    });
 
     let openapi = ApiDoc::openapi();
     let swagger_config = Config::new(["/api-docs/openapi.json"])
@@ -123,9 +122,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
     Router::new()
         .route(
             "/",
-            axum::routing::get(|| async {
-                axum::response::Redirect::permanent("/swagger-ui/")
-            }),
+            axum::routing::get(|| async { axum::response::Redirect::permanent("/swagger-ui/") }),
         )
         .merge(
             SwaggerUi::new("/swagger-ui")
@@ -149,10 +146,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/v1/models/{model_id}",
             axum::routing::get(models::get_model),
         )
-        .route(
-            "/v1/responses",
-            axum::routing::post(responses::responses),
-        )
+        .route("/v1/responses", axum::routing::post(responses::responses))
         .route(
             "/v1/audio/transcriptions",
             axum::routing::post(audio::transcriptions),
