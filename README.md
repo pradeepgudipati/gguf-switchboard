@@ -6,7 +6,42 @@ A **100% OpenAI API-compatible** local inference runtime that dynamically loads 
 
 When running local LLMs, you typically manage models manually: start `llama-server` for one model, stop it, start another. If you use multiple models — a code model in Cursor, a general model in Continue, an embedding model for search — you're juggling processes, ports, and GPU memory yourself.
 
-OpenAI Runtime eliminates that. It sits between your tools and `llama-server`, presenting a single OpenAI-compatible endpoint. When a request comes in for a model that isn't loaded, it automatically unloads the current model, loads the requested one, and proxies the request. Your tools never know the difference — they just see an OpenAI API that happens to serve any configured model on demand.
+### Landscape comparison
+
+Several tools address parts of this problem. None combine OpenAI compatibility, GGUF support, and GPU-aware model lifecycle management in one place.
+
+| Tool | OpenAI API | Loads by model name | Auto unload/load | GGUF support | Worth using? |
+|------|:----------:|:-------------------:|:----------------:|:------------:|--------------|
+| **Ollama** | Yes | Yes | Partial — keeps models resident | Yes | Close, but limited GPU scheduling control |
+| **llama.cpp** (`llama-server`) | Yes | Manual — one process per model | No — you manage start/stop | Yes | Low-level; you own process and port management |
+| **vLLM** | Yes | Yes | Yes — multi-model on large GPUs | No (HuggingFace weights) | Excellent for datacenter GPUs, not GGUF workflows |
+| **LocalAI** | Yes | Yes | Partial — not VRAM-pressure aware | Yes | Closest alternative, but not designed for eviction under memory pressure |
+| **Open WebUI** | Yes (proxy) | Via backend | Depends on backend | Via backend | UI layer — not a model scheduler |
+| **LiteLLM** | Yes | Routes only | No — does not load models | Via providers | API router, not a model loader |
+| **gguf-switchboard** | Yes | Yes | Yes — GPU-aware eviction | Yes | Built specifically for this problem |
+
+### Why existing tools fall short
+
+- **Ollama** gets close — drop-in model names, OpenAI-compatible API, GGUF support — but you have limited control over GPU scheduling. Models tend to stay resident; switching under VRAM pressure is opaque.
+- **LocalAI** is the closest full-stack alternative, supporting many backends and formats. It is not designed for proactive eviction when GPU memory is under pressure; you still manage capacity yourself.
+- **LiteLLM** is an excellent API gateway for routing, fallbacks, and retries across cloud and local providers. It does not spawn backends, load GGUF weights, or manage GPU memory — that is not its job.
+
+The gap: a tool that treats **model loading as a scheduling problem** on constrained local GPU hardware, not just an API compatibility layer.
+
+### What makes this different
+
+gguf-switchboard is a **GPU-aware model scheduler**. It presents a single OpenAI-compatible endpoint and decides which model should be loaded based on incoming requests and available VRAM — your tools never manage processes or ports.
+
+```
+OpenAI Request
+     │
+     ▼
+Requested model?
+     │
+     ├─ Already loaded? ──Yes──▶ Forward to backend
+     │
+     └─ No ──▶ Stop current model ──▶ Load requested model ──▶ Wait for healthy ──▶ Forward
+```
 
 The result: one endpoint, many models, zero manual process management.
 
@@ -25,6 +60,31 @@ The result: one endpoint, many models, zero manual process management.
 │  Prometheus metrics at /metrics                              │
 └─────────────────────────────────────────────────────────────┘
 ```
+
+### Separation of concerns
+
+This project does one job well: **local GPU scheduling and model lifecycle**.
+
+| Layer | Responsibility |
+|-------|----------------|
+| **[OmniRoute](https://github.com/pradeepgudipati/omniroute)** | Provider routing, fallbacks, retries across cloud and local endpoints |
+| **gguf-switchboard** (this project) | Local GPU scheduling, process lifecycle, model loading/unloading |
+| **Client tools** (Cursor, Cline, Codex, Open WebUI, etc.) | Talk to gguf-switchboard as a normal OpenAI server — no special integration needed |
+
+Point your IDE or agent at `http://localhost:9090/v1`, set a model name from your config, and requests flow through the scheduler automatically.
+
+### What you get
+
+- **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/responses`, `/v1/models`, `/v1/audio/*`
+- **llama.cpp backend** — spawns and manages `llama-server` child processes
+- **Automatic model loading/unloading** — models come up on first request, no manual restarts
+- **LRU eviction** — unloads the least-recently-used model when capacity is reached
+- **GPU VRAM awareness** — monitors memory pressure and evicts before OOM
+- **Health checks with loaded model name** — `/health` and `/status` report which model is active
+- **SSE streaming** — full `text/event-stream` support with proper `[DONE]` termination
+- **Prometheus metrics** — request counts, latency histograms, model load times at `/metrics`
+- **Idle timeout** — returns to your priority model after configurable inactivity
+- **Priority model auto-load** — keeps your preferred model warm when the GPU is idle
 
 ## Features
 
