@@ -1,0 +1,29 @@
+services:
+  openai-runtime:
+    build: .
+    ports:
+      - "9090:9090"
+    volumes:
+      # Config
+      - ./config.docker.toml:/home/appuser/config.toml:ro
+      # Persist token usage database
+      - runtime-data:/var/lib/openai-runtime
+      # Mount llama-server binary from host
+      # IMPORTANT: update this path to match `which llama-server` on your host
+      - /usr/local/bin/llama-server:/usr/local/bin/llama-server:ro
+      # Mount models from host SSD
+      - /media/storage_fast/Models/lmstudio-community/gemma-4-E4B-it-GGUF/gemma-4-E4B-it-Q4_K_M.gguf:/models/gemma-4-E4B-it-Q4_K_M.gguf:ro
+      - /media/storage_fast/Models/lmstudio-community/Qwen3.5-9B-GGUF/Qwen3.5-9B-Q4_K_M.gguf:/models/Qwen3.5-9B-Q4_K_M.gguf:ro
+      - /media/storage_fast/Models/lmstudio-community/Qwen3-VL-8B-Instruct-GGUF/Qwen3-VL-8B-Instruct-Q4_K_M.gguf:/models/Qwen3-VL-8B-Instruct-Q4_K_M.gguf:ro
+    # Allow llama-server to use host GPU
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  runtime-data:

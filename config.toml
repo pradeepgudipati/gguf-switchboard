@@ -1,0 +1,66 @@
+# OpenAI Runtime configuration
+# See README.md for full documentation.
+
+# Address to bind the HTTP server
+bind = "0.0.0.0:9090"
+
+# Maximum seconds to wait for a backend to become healthy
+startup_timeout = 60
+
+# Seconds of idle time before the priority model auto-loads
+idle_timeout = 600
+
+# Default backend engine
+default_backend = "llama.cpp"
+
+# Path to token usage SQLite database (defaults to token_usage.db)
+database_path = "/var/lib/openai-runtime/usage.db"
+
+# ─── Models ───────────────────────────────────────────────────────────────────
+# Each [models.<id>] section defines a model that can be requested via
+# the OpenAI-compatible API.  The <id> is what clients pass as "model".
+
+[models.local-gemma-code]
+backend = "llama.cpp"
+display_name = "Gemma 3 Coding Model"
+command = "/usr/local/bin/llama-server"
+args = [
+    "-m", "/models/gemma-3-4b.gguf",
+    "--host", "127.0.0.1",
+    "--port", "8081",
+    "-c", "65536",
+    "-ngl", "999",
+]
+backend_url = "http://127.0.0.1:8081/v1"
+health_url = "http://127.0.0.1:8081/health"
+priority = true
+
+[models.local-qwen-coder]
+backend = "llama.cpp"
+display_name = "Qwen 2.5 Coder"
+command = "/usr/local/bin/llama-server"
+args = [
+    "-m", "/models/qwen2.5-coder-7b.gguf",
+    "--host", "127.0.0.1",
+    "--port", "8082",
+    "-c", "65536",
+    "-ngl", "999",
+]
+backend_url = "http://127.0.0.1:8082/v1"
+health_url = "http://127.0.0.1:8082/health"
+priority = false
+
+[models.local-llama-3]
+backend = "llama.cpp"
+display_name = "Llama 3.2 3B"
+command = "/usr/local/bin/llama-server"
+args = [
+    "-m", "/models/llama-3.2-3b.gguf",
+    "--host", "127.0.0.1",
+    "--port", "8083",
+    "-c", "65536",
+    "-ngl", "999",
+]
+backend_url = "http://127.0.0.1:8083/v1"
+health_url = "http://127.0.0.1:8083/health"
+priority = false
