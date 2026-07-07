@@ -54,11 +54,11 @@ pub trait Backend: Send + Sync {
     /// The model id this backend serves.
     fn name(&self) -> &str;
     /// The engine type (e.g. "llama.cpp").
-    fn backend_type(&self) -> &str;
+    fn _backend_type(&self) -> &str;
     /// The base URL for the backend's OpenAI-compatible API.
     fn backend_url(&self) -> &str;
     /// The health-check URL.
-    fn health_url(&self) -> &str;
+    fn _health_url(&self) -> &str;
 }
 
 /// Create a concrete backend for the given model id and config.

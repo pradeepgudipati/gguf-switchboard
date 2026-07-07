@@ -319,7 +319,7 @@ impl Scheduler {
     }
 
     /// Return a reference to the config.
-    pub fn config(&self) -> &Config {
+    pub fn _config(&self) -> &Config {
         &self.inner.config
     }
 

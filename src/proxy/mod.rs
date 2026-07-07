@@ -37,6 +37,7 @@ impl Stream for GuardedStream {
 }
 
 /// Proxy a raw SSE response from a reqwest response directly to the client.
+#[allow(dead_code)]
 pub async fn proxy_sse_response(response: reqwest::Response) -> impl IntoResponse {
     let stream = response.bytes_stream().map(|chunk| {
         chunk.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))

@@ -70,7 +70,8 @@ pub struct ResponseUsage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ResponseStreamChunk {
+#[allow(dead_code)]
+pub struct _ResponseStreamChunk {
     pub id: String,
     pub object: String,
     pub created_at: i64,

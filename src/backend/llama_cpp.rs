@@ -260,7 +260,7 @@ impl Backend for LlamaCppBackend {
         &self.model_id
     }
 
-    fn backend_type(&self) -> &str {
+    fn _backend_type(&self) -> &str {
         &self.config.backend
     }
 
@@ -268,7 +268,7 @@ impl Backend for LlamaCppBackend {
         &self.config.backend_url
     }
 
-    fn health_url(&self) -> &str {
+    fn _health_url(&self) -> &str {
         &self.config.health_url
     }
 }

@@ -1,41 +1,59 @@
-# Docker-specific configuration
-# llama-server runs on the host; the container reaches it via host.docker.internal.
-# Start your llama-server on the host first, then: docker compose up -d --build
-
 bind = "0.0.0.0:9090"
-startup_timeout = 60
+startup_timeout = 120
 idle_timeout = 600
 default_backend = "llama.cpp"
 database_path = "/var/lib/openai-runtime/usage.db"
 
-# ─── Models ───────────────────────────────────────────────────────────────────
-# command is unused when backends are already running on the host.
-# backend_url / health_url point to host.docker.internal so the container
-# can reach the host network.
+memory_warning_threshold = 85
+memory_critical_threshold = 95
+memory_check_interval_secs = 30
 
-[models.local-gemma-code]
+# ─── Models ───────────────────────────────────────────────────────────────────
+# The runtime auto-starts/stops llama-server per model.
+# Only ONE model is loaded at a time (RTX 3060 12GB constraint).
+# When a different model is requested, the current one is unloaded first.
+
+[models.gemma-4-e4b]
 backend = "llama.cpp"
-display_name = "Gemma 3 Coding Model"
-command = "echo"          # not used — backend already running on host
-args = ["noop"]
-backend_url = "http://host.docker.internal:8081/v1"
-health_url = "http://host.docker.internal:8081/health"
+display_name = "Gemma 4 E4B"
+command = "/usr/local/bin/llama-server"
+args = [
+    "-m", "/models/gemma-4-E4B-it-Q4_K_M.gguf",
+    "--host", "127.0.0.1",
+    "--port", "8081",
+    "-c", "16384",
+    "-ngl", "999",
+]
+backend_url = "http://127.0.0.1:8081/v1"
+health_url = "http://127.0.0.1:8081/health"
 priority = true
 
-[models.local-qwen-coder]
+[models.qwen3.5-9b]
 backend = "llama.cpp"
-display_name = "Qwen 2.5 Coder"
-command = "echo"
-args = ["noop"]
-backend_url = "http://host.docker.internal:8082/v1"
-health_url = "http://host.docker.internal:8082/health"
+display_name = "Qwen 3.5 9B"
+command = "/usr/local/bin/llama-server"
+args = [
+    "-m", "/models/Qwen3.5-9B-Q4_K_M.gguf",
+    "--host", "127.0.0.1",
+    "--port", "8082",
+    "-c", "32768",
+    "-ngl", "999",
+]
+backend_url = "http://127.0.0.1:8082/v1"
+health_url = "http://127.0.0.1:8082/health"
 priority = false
 
-[models.local-llama-3]
+[models.qwen3-vl-8b]
 backend = "llama.cpp"
-display_name = "Llama 3.2 3B"
-command = "echo"
-args = ["noop"]
-backend_url = "http://host.docker.internal:8083/v1"
-health_url = "http://host.docker.internal:8083/health"
+display_name = "Qwen 3 VL 8B"
+command = "/usr/local/bin/llama-server"
+args = [
+    "-m", "/models/Qwen3-VL-8B-Instruct-Q4_K_M.gguf",
+    "--host", "127.0.0.1",
+    "--port", "8083",
+    "-c", "16384",
+    "-ngl", "999",
+]
+backend_url = "http://127.0.0.1:8083/v1"
+health_url = "http://127.0.0.1:8083/health"
 priority = false

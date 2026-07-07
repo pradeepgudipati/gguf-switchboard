@@ -7,7 +7,7 @@ use crate::scheduler::Scheduler;
 
 /// Shared application state passed to all API handlers.
 pub struct AppState {
-    pub config: Config,
+    pub _config: Config,
     pub scheduler: Arc<Scheduler>,
     pub token_db: Arc<TokenDb>,
     pub started_at: Instant,
@@ -16,7 +16,7 @@ pub struct AppState {
 impl AppState {
     pub fn new(config: Config, scheduler: Arc<Scheduler>, token_db: Arc<TokenDb>) -> Self {
         Self {
-            config,
+            _config: config,
             scheduler,
             token_db,
             started_at: Instant::now(),

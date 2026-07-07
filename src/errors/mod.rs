@@ -11,7 +11,7 @@ pub enum RuntimeError {
     BackendError(String),
 
     #[error("Backend not healthy: {0}")]
-    BackendNotHealthy(String),
+    _BackendNotHealthy(String),
 
     #[error("Model loading failed: {0}")]
     ModelLoadingFailed(String),
@@ -35,13 +35,13 @@ pub enum RuntimeError {
     InvalidRequest(String),
 
     #[error("Authentication required")]
-    Unauthorized,
+    _Unauthorized,
 
     #[error("Rate limit exceeded")]
-    RateLimitExceeded,
+    _RateLimitExceeded,
 
     #[error("Service unavailable: {0}")]
-    ServiceUnavailable(String),
+    _ServiceUnavailable(String),
 }
 
 #[derive(Serialize)]
@@ -63,7 +63,7 @@ impl IntoResponse for RuntimeError {
         let (status, error_type, code) = match &self {
             RuntimeError::ModelNotFound(_) => (StatusCode::NOT_FOUND, "invalid_request_error", "model_not_found"),
             RuntimeError::BackendError(_) => (StatusCode::BAD_GATEWAY, "server_error", "backend_error"),
-            RuntimeError::BackendNotHealthy(_) => (StatusCode::SERVICE_UNAVAILABLE, "server_error", "backend_not_healthy"),
+            RuntimeError::_BackendNotHealthy(_) => (StatusCode::SERVICE_UNAVAILABLE, "server_error", "backend_not_healthy"),
             RuntimeError::ModelLoadingFailed(_) => (StatusCode::SERVICE_UNAVAILABLE, "server_error", "model_loading_failed"),
             RuntimeError::ModelLoadingTimeout(_) => (StatusCode::GATEWAY_TIMEOUT, "server_error", "model_loading_timeout"),
             RuntimeError::ConfigError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "server_error", "config_error"),
@@ -71,9 +71,9 @@ impl IntoResponse for RuntimeError {
             RuntimeError::SerializationError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "server_error", "serialization_error"),
             RuntimeError::InternalError(_) => (StatusCode::INTERNAL_SERVER_ERROR, "server_error", "internal_error"),
             RuntimeError::InvalidRequest(_) => (StatusCode::BAD_REQUEST, "invalid_request_error", "invalid_request"),
-            RuntimeError::Unauthorized => (StatusCode::UNAUTHORIZED, "authentication_error", "unauthorized"),
-            RuntimeError::RateLimitExceeded => (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error", "rate_limit_exceeded"),
-            RuntimeError::ServiceUnavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "server_error", "service_unavailable"),
+            RuntimeError::_Unauthorized => (StatusCode::UNAUTHORIZED, "authentication_error", "unauthorized"),
+            RuntimeError::_RateLimitExceeded => (StatusCode::TOO_MANY_REQUESTS, "rate_limit_error", "rate_limit_exceeded"),
+            RuntimeError::_ServiceUnavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "server_error", "service_unavailable"),
         };
 
         let body = OpenAIErrorResponse {

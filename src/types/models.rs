@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ModelPermission {
+#[allow(dead_code)]
+pub struct _ModelPermission {
     pub id: String,
     pub object: String,
     pub created: i64,
