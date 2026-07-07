@@ -12,7 +12,10 @@ use tracing::{debug, info, warn};
 
 use crate::config::ModelConfig;
 use crate::errors::RuntimeError;
-use crate::types::chat::{ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse};
+use crate::types::chat::{
+    ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse, normalize_chat_chunk,
+    normalize_chat_response,
+};
 use crate::types::completions::{CompletionChunk, CompletionRequest, CompletionResponse};
 use crate::types::embeddings::{EmbeddingRequest, EmbeddingResponse};
 
@@ -193,7 +196,7 @@ impl Backend for LlamaCppBackend {
         let response: ChatCompletionResponse = resp.json().await.map_err(|e| {
             RuntimeError::BackendError(format!("Failed to parse backend response: {e}"))
         })?;
-        Ok(response)
+        Ok(normalize_chat_response(response))
     }
 
     async fn chat_stream(
@@ -211,7 +214,9 @@ impl Backend for LlamaCppBackend {
             chunk.map_err(|e| RuntimeError::ProxyError(format!("Stream read error: {e}")))
         });
 
-        Ok(Box::pin(SseLineParser::new(stream)))
+        Ok(Box::pin(
+            SseLineParser::new(stream).map(|item| item.map(normalize_chat_chunk)),
+        ))
     }
 
     async fn completions(

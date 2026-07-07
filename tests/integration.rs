@@ -1,7 +1,9 @@
 use openai_runtime::config::Config;
+use openai_runtime::types::audio::{SpeechRequest, TranscriptionRequest};
 use openai_runtime::types::chat::{ChatCompletionRequest, ChatMessage, Content, Role};
 use openai_runtime::types::completions::{CompletionRequest, Prompt};
 use openai_runtime::types::embeddings::{EmbeddingInput, EmbeddingRequest};
+use openai_runtime::types::responses::{ResponseInput, ResponseRequest};
 use openai_runtime::types::{ListModelsResponse, ModelInfo, Usage};
 
 #[test]
@@ -72,6 +74,7 @@ fn test_chat_request_serialization() {
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         }],
         temperature: Some(0.7),
         top_p: None,
@@ -87,6 +90,7 @@ fn test_chat_request_serialization() {
         tool_choice: None,
         seed: None,
         response_format: None,
+        chat_template_kwargs: None,
     };
 
     let json = serde_json::to_string(&request).unwrap();
@@ -140,6 +144,134 @@ fn test_embedding_request_serialization() {
 
     let json = serde_json::to_string(&request).unwrap();
     assert!(json.contains("\"input\":[\"hello\",\"world\"]"));
+}
+
+#[test]
+fn test_chat_swagger_example_deserialization() {
+    let example = r#"{
+        "model": "gemma-4-e4b",
+        "messages": [{"role": "user", "content": "Is Rust faster than Python for backend services? Explain briefly."}],
+        "max_tokens": 2048,
+        "stream": false
+    }"#;
+
+    let request: ChatCompletionRequest = serde_json::from_str(example).unwrap();
+    assert_eq!(request.model, "gemma-4-e4b");
+    assert_eq!(request.messages.len(), 1);
+    assert_eq!(request.max_tokens, Some(2048));
+    assert_eq!(request.stream, Some(false));
+}
+
+#[test]
+fn test_completion_swagger_example_deserialization() {
+    let example = r#"{
+        "model": "gemma-4-e4b",
+        "prompt": "Say hello in one sentence.",
+        "max_tokens": 512
+    }"#;
+
+    let request: CompletionRequest = serde_json::from_str(example).unwrap();
+    assert_eq!(request.model, "gemma-4-e4b");
+    assert!(matches!(request.prompt, Prompt::Single(ref text) if text == "Say hello in one sentence."));
+    assert_eq!(request.max_tokens, Some(512));
+}
+
+#[test]
+fn test_embedding_swagger_example_deserialization() {
+    let example = r#"{
+        "model": "gemma-4-e4b",
+        "input": "The quick brown fox jumps over the lazy dog."
+    }"#;
+
+    let request: EmbeddingRequest = serde_json::from_str(example).unwrap();
+    assert_eq!(request.model, "gemma-4-e4b");
+    assert!(matches!(
+        request.input,
+        EmbeddingInput::Single(ref text) if text == "The quick brown fox jumps over the lazy dog."
+    ));
+}
+
+#[test]
+fn test_response_request_serialization() {
+    let request = ResponseRequest {
+        model: "gemma-4-e4b".to_string(),
+        input: ResponseInput::Text("What is the capital of France?".to_string()),
+        instructions: Some("Answer concisely in one sentence.".to_string()),
+        temperature: None,
+        top_p: None,
+        max_output_tokens: Some(512),
+        stream: Some(false),
+        tools: None,
+        tool_choice: None,
+        response_format: None,
+        user: None,
+    };
+
+    let json = serde_json::to_string(&request).unwrap();
+    assert!(json.contains("\"model\":\"gemma-4-e4b\""));
+    assert!(json.contains("\"input\":\"What is the capital of France?\""));
+    assert!(json.contains("\"instructions\":\"Answer concisely in one sentence.\""));
+    assert!(json.contains("\"max_output_tokens\":512"));
+
+    let deserialized: ResponseRequest = serde_json::from_str(&json).unwrap();
+    assert_eq!(deserialized.model, "gemma-4-e4b");
+    assert_eq!(deserialized.max_output_tokens, Some(512));
+}
+
+#[test]
+fn test_response_swagger_example_deserialization() {
+    let example = r#"{
+        "model": "gemma-4-e4b",
+        "input": "What is the capital of France?",
+        "instructions": "Answer concisely in one sentence.",
+        "max_output_tokens": 512,
+        "stream": false
+    }"#;
+
+    let request: ResponseRequest = serde_json::from_str(example).unwrap();
+    assert_eq!(request.model, "gemma-4-e4b");
+    assert!(matches!(request.input, ResponseInput::Text(ref text) if text == "What is the capital of France?"));
+    assert_eq!(
+        request.instructions.as_deref(),
+        Some("Answer concisely in one sentence.")
+    );
+}
+
+#[test]
+fn test_transcription_request_serialization() {
+    let request = TranscriptionRequest {
+        model: "gemma-4-e4b".to_string(),
+        file: "sample.wav".to_string(),
+        response_format: Some("json".to_string()),
+        language: Some("en".to_string()),
+        prompt: None,
+        temperature: None,
+    };
+
+    let json = serde_json::to_string(&request).unwrap();
+    assert!(json.contains("\"file\":\"sample.wav\""));
+    assert!(json.contains("\"response_format\":\"json\""));
+
+    let deserialized: TranscriptionRequest = serde_json::from_str(&json).unwrap();
+    assert_eq!(deserialized.file, "sample.wav");
+}
+
+#[test]
+fn test_speech_request_serialization() {
+    let request = SpeechRequest {
+        model: "gemma-4-e4b".to_string(),
+        input: "Hello from the OpenAI Runtime speech API.".to_string(),
+        voice: Some("alloy".to_string()),
+        response_format: Some("mp3".to_string()),
+        speed: None,
+    };
+
+    let json = serde_json::to_string(&request).unwrap();
+    assert!(json.contains("\"voice\":\"alloy\""));
+    assert!(json.contains("\"response_format\":\"mp3\""));
+
+    let deserialized: SpeechRequest = serde_json::from_str(&json).unwrap();
+    assert_eq!(deserialized.input, "Hello from the OpenAI Runtime speech API.");
 }
 
 #[test]

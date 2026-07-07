@@ -1,7 +1,15 @@
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use utoipa::ToSchema;
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "model": "gemma-4-e4b",
+    "input": "What is the capital of France?",
+    "instructions": "Answer concisely in one sentence.",
+    "max_output_tokens": 512,
+    "stream": false
+}))]
 pub struct ResponseRequest {
     pub model: String,
     pub input: ResponseInput,

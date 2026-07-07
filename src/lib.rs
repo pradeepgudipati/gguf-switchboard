@@ -6,6 +6,7 @@ pub mod errors;
 pub mod memory;
 pub mod metrics;
 pub mod proxy;
+pub mod sanitize;
 pub mod scheduler;
 pub mod state;
 pub mod types;

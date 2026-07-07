@@ -5,11 +5,13 @@ use axum::extract::State;
 use axum::http::{header, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::Json;
+use serde_json::json;
 use tracing::instrument;
 
 use crate::errors::RuntimeError;
 use crate::metrics::REQUEST_TOTAL;
 use crate::state::AppState;
+use crate::types::audio::{SpeechRequest, TranscriptionRequest};
 
 /// Transcribe audio to text.
 ///
@@ -19,7 +21,15 @@ use crate::state::AppState;
     post,
     path = "/v1/audio/transcriptions",
     tag = "audio",
-    request_body = serde_json::Value,
+    request_body(
+        content = TranscriptionRequest,
+        example = json!({
+            "model": "gemma-4-e4b",
+            "file": "sample.wav",
+            "response_format": "json",
+            "language": "en"
+        })
+    ),
     responses(
         (status = 200, description = "Transcription result"),
         (status = 400, description = "Invalid request"),
@@ -77,7 +87,15 @@ pub async fn transcriptions(
     post,
     path = "/v1/audio/speech",
     tag = "audio",
-    request_body = serde_json::Value,
+    request_body(
+        content = SpeechRequest,
+        example = json!({
+            "model": "gemma-4-e4b",
+            "input": "Hello from the OpenAI Runtime speech API.",
+            "voice": "alloy",
+            "response_format": "mp3"
+        })
+    ),
     responses(
         (status = 200, description = "Generated audio bytes", content_type = "audio/mpeg"),
         (status = 400, description = "Invalid request"),

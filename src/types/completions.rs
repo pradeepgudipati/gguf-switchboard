@@ -1,9 +1,15 @@
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use utoipa::ToSchema;
 
 use super::{StopSequence, Usage};
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "model": "gemma-4-e4b",
+    "prompt": "Say hello in one sentence.",
+    "max_tokens": 512
+}))]
 pub struct CompletionRequest {
     pub model: String,
     pub prompt: Prompt,

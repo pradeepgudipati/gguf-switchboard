@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::body::Body;
+use serde_json::json;
 use axum::extract::State;
 use axum::http::{header, Response, StatusCode};
 use axum::response::{IntoResponse, Json};
@@ -32,7 +33,14 @@ impl Drop for StreamingGuard {
     post,
     path = "/v1/completions",
     tag = "completions",
-    request_body = CompletionRequest,
+    request_body(
+        content = CompletionRequest,
+        example = json!({
+            "model": "gemma-4-e4b",
+            "prompt": "Say hello in one sentence.",
+            "max_tokens": 512
+        })
+    ),
     responses(
         (status = 200, description = "Text completion response", body = CompletionResponse),
         (status = 400, description = "Invalid request"),

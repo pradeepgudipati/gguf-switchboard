@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::body::Body;
+use serde_json::json;
 use axum::extract::State;
 use axum::http::{header, Response, StatusCode};
 use axum::response::{IntoResponse, Json};
@@ -32,7 +33,16 @@ impl Drop for ActiveGuard {
     post,
     path = "/v1/responses",
     tag = "responses",
-    request_body = ResponseRequest,
+    request_body(
+        content = ResponseRequest,
+        example = json!({
+            "model": "gemma-4-e4b",
+            "input": "What is the capital of France?",
+            "instructions": "Answer concisely in one sentence.",
+            "max_output_tokens": 512,
+            "stream": false
+        })
+    ),
     responses(
         (status = 200, description = "Response result", body = ResponseResult),
         (status = 400, description = "Invalid request"),
@@ -60,6 +70,7 @@ pub async fn responses(
             name: None,
             tool_calls: None,
             tool_call_id: None,
+            reasoning_content: None,
         });
     }
 
@@ -71,6 +82,7 @@ pub async fn responses(
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,
+                reasoning_content: None,
             });
         }
         ResponseInput::Messages(msgs) => {
@@ -87,6 +99,7 @@ pub async fn responses(
                     name: None,
                     tool_calls: None,
                     tool_call_id: None,
+                    reasoning_content: None,
                 });
             }
         }
@@ -109,6 +122,7 @@ pub async fn responses(
         tool_choice: None,
         seed: None,
         response_format: request.response_format.clone(),
+        chat_template_kwargs: None,
     };
 
     if request.stream == Some(true) {

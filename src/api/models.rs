@@ -44,7 +44,7 @@ pub async fn list_models(
     path = "/v1/models/{model_id}",
     tag = "models",
     params(
-        ("model_id" = String, Path, description = "The model ID to retrieve")
+        ("model_id" = String, Path, description = "The model ID to retrieve", example = "gemma-4-e4b")
     ),
     responses(
         (status = 200, description = "Model details", body = ModelInfo),

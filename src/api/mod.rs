@@ -78,6 +78,8 @@ use crate::state::AppState;
         crate::types::responses::ResponseOutput,
         crate::types::responses::ResponseContent,
         crate::types::responses::ResponseUsage,
+        crate::types::audio::TranscriptionRequest,
+        crate::types::audio::SpeechRequest,
         crate::types::chat::Content,
     )),
     tags(

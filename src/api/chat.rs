@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::body::Body;
+use serde_json::json;
 use axum::extract::State;
 use axum::http::{header, Response, StatusCode};
 use axum::response::{IntoResponse, Json};
@@ -10,6 +11,7 @@ use tracing::instrument;
 use crate::errors::RuntimeError;
 use crate::metrics::{ACTIVE_REQUESTS, INFERENCE_LATENCY, REQUEST_TOTAL, STREAMING_REQUESTS};
 use crate::proxy::GuardedStream;
+use crate::sanitize::sanitize_chat_request;
 use crate::state::AppState;
 use crate::types::chat::{ChatCompletionRequest, ChatCompletionResponse};
 
@@ -32,7 +34,15 @@ impl Drop for StreamingGuard {
     post,
     path = "/v1/chat/completions",
     tag = "chat",
-    request_body = ChatCompletionRequest,
+    request_body(
+        content = ChatCompletionRequest,
+        example = json!({
+            "model": "gemma-4-e4b",
+            "messages": [{"role": "user", "content": "Is Rust faster than Python for backend services? Explain briefly."}],
+            "max_tokens": 2048,
+            "stream": false
+        })
+    ),
     responses(
         (status = 200, description = "Chat completion response", body = ChatCompletionResponse),
         (status = 400, description = "Invalid request"),
@@ -49,6 +59,7 @@ pub async fn chat_completions(
     ACTIVE_REQUESTS.inc();
 
     let start = std::time::Instant::now();
+    let request = sanitize_chat_request(request);
     let backend = state.scheduler.ensure_loaded(&request.model).await?;
 
     if request.stream == Some(true) {

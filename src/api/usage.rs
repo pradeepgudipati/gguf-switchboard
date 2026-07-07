@@ -10,10 +10,13 @@ use crate::errors::RuntimeError;
 use crate::state::AppState;
 
 #[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct UsageQuery {
     /// Optional model id to filter by
+    #[param(example = "gemma-4-e4b")]
     pub model: Option<String>,
     /// Number of recent records to return (default 50)
+    #[param(example = 50)]
     pub limit: Option<u32>,
 }
 

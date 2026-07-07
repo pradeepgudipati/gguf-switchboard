@@ -1,9 +1,14 @@
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use utoipa::ToSchema;
 
 use super::Usage;
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "model": "gemma-4-e4b",
+    "input": "The quick brown fox jumps over the lazy dog."
+}))]
 pub struct EmbeddingRequest {
     pub model: String,
     pub input: EmbeddingInput,

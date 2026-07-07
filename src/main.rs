@@ -6,6 +6,7 @@ mod errors;
 mod memory;
 mod metrics;
 mod proxy;
+mod sanitize;
 mod scheduler;
 mod state;
 mod types;

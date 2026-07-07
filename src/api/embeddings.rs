@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use axum::extract::State;
+use serde_json::json;
 use axum::response::{IntoResponse, Json};
 use tracing::instrument;
 
@@ -21,7 +22,13 @@ impl Drop for ActiveGuard {
     post,
     path = "/v1/embeddings",
     tag = "embeddings",
-    request_body = EmbeddingRequest,
+    request_body(
+        content = EmbeddingRequest,
+        example = json!({
+            "model": "gemma-4-e4b",
+            "input": "The quick brown fox jumps over the lazy dog."
+        })
+    ),
     responses(
         (status = 200, description = "Generated embeddings", body = EmbeddingResponse),
         (status = 400, description = "Invalid request"),

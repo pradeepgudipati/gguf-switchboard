@@ -299,6 +299,27 @@ curl http://localhost:9090/v1/chat/completions \
     }'
 ```
 
+### Thinking models
+
+`gemma-4-e4b` and `qwen3.5-9b` are thinking models served by llama.cpp with **reasoning enabled**. They emit chain-of-thought in a `reasoning_content` field on assistant messages (and stream deltas). The final answer is in `content` when the model finishes; if `max_tokens` is too low, reasoning may consume the budget and `content` can be empty — the runtime promotes `reasoning_content` into `content` in that case but keeps both fields when present.
+
+Use **`max_tokens` 2048 or higher** for substantive questions so the model has room to think and answer. Short prompts with `max_tokens: 50` often return only thinking traces.
+
+```bash
+curl http://localhost:9090/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "gemma-4-e4b",
+        "messages": [
+            {"role": "user", "content": "Is Rust faster than Python for backend services?"}
+        ],
+        "max_tokens": 2048,
+        "stream": false
+    }'
+```
+
+Optional: pass template kwargs through to llama-server (model-specific), e.g. `chat_template_kwargs` in the request body when your client supports it.
+
 ### Streaming Chat
 
 ```bash

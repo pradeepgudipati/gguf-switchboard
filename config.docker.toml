@@ -13,6 +13,7 @@ memory_check_interval_secs = 30
 # Only ONE model is loaded at a time (RTX 3060 12GB constraint).
 # When a different model is requested, the current one is unloaded first.
 
+# Thinking model — reasoning enabled by default. Use max_tokens 2048+ in API requests.
 [models.gemma-4-e4b]
 backend = "llama.cpp"
 display_name = "Gemma 4 E4B"
@@ -28,6 +29,7 @@ backend_url = "http://127.0.0.1:8081/v1"
 health_url = "http://127.0.0.1:8081/health"
 priority = true
 
+# Thinking model — reasoning enabled by default. Use max_tokens 2048+ in API requests.
 [models.qwen3.5-9b]
 backend = "llama.cpp"
 display_name = "Qwen 3.5 9B"
