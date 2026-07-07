@@ -6,35 +6,35 @@ use super::{StopSequence, Usage};
 pub struct CompletionRequest {
     pub model: String,
     pub prompt: Prompt,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub suffix: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub n: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub echo: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop: Option<StopSequence>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence_penalty: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frequency_penalty: Option<f64>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub best_of: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logit_bias: Option<serde_json::Value>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<i64>,
 }
 
@@ -59,7 +59,9 @@ pub struct CompletionResponse {
 pub struct CompletionChoice {
     pub text: String,
     pub index: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
 }
 
@@ -76,6 +78,8 @@ pub struct CompletionChunk {
 pub struct CompletionChunkChoice {
     pub text: String,
     pub index: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub logprobs: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
 }
