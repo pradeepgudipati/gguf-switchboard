@@ -1,6 +1,8 @@
 # OpenAI Runtime
 
-<video src="gguf-switchboard-demo-linkedin.mp4" controls width="100%"></video>
+![gguf-switchboard demo](gguf-switchboard-demo.gif)
+
+<sub>[▶ Watch with audio](gguf-switchboard-demo-linkedin.mp4)</sub>
 
 A **100% OpenAI API-compatible** local inference runtime that dynamically loads and unloads GGUF models on demand. Point any OpenAI SDK or tool at it — Python, Node, Cursor, Cline, Continue — and it Just Works.
 
