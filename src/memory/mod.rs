@@ -26,10 +26,10 @@ pub struct MemoryStats {
 pub fn check_memory() -> Option<MemoryStats> {
     #[cfg(target_os = "linux")]
     {
-        return read_linux().or_else(|| {
+        read_linux().or_else(|| {
             warn!("Failed to read /proc/meminfo; memory monitoring disabled");
             None
-        });
+        })
     }
 
     #[cfg(target_os = "macos")]
