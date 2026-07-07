@@ -75,6 +75,17 @@ pub async fn completions(
             .unwrap())
     } else {
         let response = backend.completions(request).await?;
+
+        // Record token usage (completions endpoint uses prompt_tokens from usage)
+        let _ = state.token_db.record(
+            &response.model,
+            "/v1/completions",
+            response.usage.prompt_tokens,
+            response.usage.completion_tokens,
+            response.usage.total_tokens,
+            None,
+        );
+
         INFERENCE_LATENCY.observe(start.elapsed().as_secs_f64());
         Ok(Json(response).into_response())
     }

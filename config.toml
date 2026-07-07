@@ -13,6 +13,9 @@ idle_timeout = 600
 # Default backend engine
 default_backend = "llama.cpp"
 
+# Path to token usage SQLite database (defaults to token_usage.db)
+# database_path = "token_usage.db"
+
 # ─── Models ───────────────────────────────────────────────────────────────────
 # Each [models.<id>] section defines a model that can be requested via
 # the OpenAI-compatible API.  The <id> is what clients pass as "model".

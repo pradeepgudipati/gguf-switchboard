@@ -41,6 +41,7 @@ rand = "0.8"
 nix = { version = "0.29", features = ["signal"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 mime = "0.3"
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [dev-dependencies]
 tokio-test = "0.4"

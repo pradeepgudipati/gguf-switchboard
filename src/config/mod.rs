@@ -17,6 +17,9 @@ pub struct Config {
     /// Default backend engine (e.g. "llama.cpp")
     #[serde(default = "default_backend")]
     pub default_backend: String,
+    /// Path to the token usage SQLite database
+    #[serde(default)]
+    pub database_path: Option<String>,
     /// Model definitions keyed by model id
     pub models: HashMap<String, ModelConfig>,
 }

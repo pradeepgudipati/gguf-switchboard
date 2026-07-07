@@ -43,6 +43,18 @@ pub async fn chat_completions(
         STREAMING_REQUESTS.inc();
         let _stream_guard = StreamingGuard;
         let stream = backend.chat_stream(request).await?;
+
+        let model = backend.name().to_string();
+        // Record streaming request (token counts not available in stream mode)
+        let _ = state.token_db.record(
+            &model,
+            "/v1/chat/completions",
+            0,
+            0,
+            0,
+            None,
+        );
+
         let mapped = stream.map(move |chunk| match chunk {
             Ok(c) => {
                 let json = serde_json::to_string(&c).unwrap_or_default();
@@ -75,6 +87,17 @@ pub async fn chat_completions(
             .unwrap())
     } else {
         let response = backend.chat(request).await?;
+
+        // Record token usage
+        let _ = state.token_db.record(
+            &response.model,
+            "/v1/chat/completions",
+            response.usage.prompt_tokens,
+            response.usage.completion_tokens,
+            response.usage.total_tokens,
+            None,
+        );
+
         INFERENCE_LATENCY.observe(start.elapsed().as_secs_f64());
         Ok(Json(response).into_response())
     }

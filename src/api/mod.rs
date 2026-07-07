@@ -6,6 +6,7 @@ pub mod health;
 pub mod metrics;
 pub mod models;
 pub mod responses;
+pub mod usage;
 
 use std::sync::Arc;
 
@@ -61,6 +62,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             axum::routing::post(audio::transcriptions),
         )
         .route("/v1/audio/speech", axum::routing::post(audio::speech))
+        .route("/v1/usage", axum::routing::get(usage::usage))
+        .route("/v1/usage/recent", axum::routing::get(usage::recent_usage))
         .route("/health", axum::routing::get(health::health))
         .route("/status", axum::routing::get(health::status))
         .route("/metrics", axum::routing::get(metrics::metrics))

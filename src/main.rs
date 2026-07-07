@@ -1,6 +1,7 @@
 mod api;
 mod backend;
 mod config;
+mod db;
 mod errors;
 mod metrics;
 mod proxy;
@@ -13,7 +14,10 @@ use std::sync::Arc;
 use tokio::signal;
 use tracing::{info, warn};
 
+use std::path::PathBuf;
+
 use crate::config::Config;
+use crate::db::TokenDb;
 use crate::scheduler::Scheduler;
 use crate::state::AppState;
 
@@ -46,8 +50,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "Starting OpenAI Runtime"
     );
 
+    let db_path = config
+        .database_path
+        .as_deref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("token_usage.db"));
+
+    let token_db = Arc::new(TokenDb::open(&db_path)?);
+
     let scheduler = Arc::new(Scheduler::new(config.clone()).await?);
-    let app_state = Arc::new(AppState::new(config.clone(), scheduler.clone()));
+    let app_state = Arc::new(AppState::new(config.clone(), scheduler.clone(), token_db));
 
     scheduler.start_priority_watcher().await;
 

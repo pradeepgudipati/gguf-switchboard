@@ -29,6 +29,17 @@ pub async fn embeddings(
     let start = std::time::Instant::now();
     let backend = state.scheduler.ensure_loaded(&request.model).await?;
     let response = backend.embeddings(request).await?;
+
+    // Record token usage
+    let _ = state.token_db.record(
+        &response.model,
+        "/v1/embeddings",
+        response.usage.prompt_tokens,
+        0,
+        response.usage.total_tokens,
+        None,
+    );
+
     INFERENCE_LATENCY.observe(start.elapsed().as_secs_f64());
 
     Ok(Json(response))
