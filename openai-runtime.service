@@ -1,0 +1,37 @@
+[Unit]
+Description=OpenAI Runtime — OpenAI-compatible local inference server
+After=network.target
+Documentation=https://github.com/pradeepgudipati/gguf-switchboard
+
+[Service]
+Type=simple
+User=openai-runtime
+Group=openai-runtime
+ExecStart=/usr/local/bin/openai-runtime /etc/openai-runtime/config.toml
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+
+# Environment
+Environment=RUST_LOG=info
+EnvironmentFile=-/etc/openai-runtime/env
+
+# Hardening
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/models
+PrivateTmp=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+LockPersonality=yes
+
+# Resource limits
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target
