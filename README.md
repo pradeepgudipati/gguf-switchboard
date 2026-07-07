@@ -184,84 +184,74 @@ sudo systemctl status openai-runtime
 sudo journalctl -u openai-runtime -f
 ```
 
-## Docker
+## Systemd Setup (Recommended)
 
-The container runs only `openai-runtime`. Your `llama-server` instances stay on the host. The container reaches them via `host.docker.internal`.
-
-### Quick Start
+The native install is recommended because the runtime spawns `llama-server` as a child process and needs direct access to your GPU and model files.
 
 ```bash
-# 1. Start your llama-server on the host (as usual)
-#    e.g. llama-server -m /models/gemma-3-4b.gguf --port 8081 ...
+# Build
+cargo build --release
 
-# 2. Clone and run
-git clone https://github.com/pradeepgudipati/gguf-switchboard.git
-cd gguf-switchboard
-docker compose up -d --build
+# Install binary
+sudo cp target/release/openai-runtime /usr/local/bin/
 
-# 3. Use it
-curl http://localhost:9090/v1/models
+# Create directories
+sudo mkdir -p /etc/openai-runtime /var/lib/openai-runtime
+
+# Copy and edit config
+sudo cp config.toml /etc/openai-runtime/config.toml
+$EDITOR /etc/openai-runtime/config.toml
+
+# Create systemd service
+sudo tee /etc/systemd/system/openai-runtime.service > /dev/null << 'EOF'
+[Unit]
+Description=OpenAI Runtime - Local LLM Inference Server
+After=network.target
+
+[Service]
+Type=simple
+User=pradeep
+ExecStart=/usr/local/bin/openai-runtime /etc/openai-runtime/config.toml
+Restart=on-failure
+RestartSec=5
+Environment=RUST_LOG=info
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Enable and start
+sudo systemctl daemon-reload
+sudo systemctl enable --now openai-runtime
+
+# Check status
+sudo systemctl status openai-runtime
+sudo journalctl -u openai-runtime -f
 ```
-
-`config.docker.toml` is pre-configured to reach `host.docker.internal:8081/8082/8083`. Edit it to match your setup.
 
 ### How It Works
 
 ```
-┌─────────────────────────┐
-│   Docker Container      │
-│                         │
-│   openai-runtime :9090  │──── client requests ────▶ tools / SDKs
-│                         │
-│   connects to host via  │
-│   host.docker.internal  │
-└────────┬────────────────┘
-         │
-         ▼
-┌─────────────────────────┐
-│   Host (your machine)   │
-│                         │
-│   llama-server :8081    │  ← your existing setup, untouched
-│   llama-server :8082    │
-│   llama-server :8083    │
-│   GPU, models, etc.     │
-└─────────────────────────┘
+Client Request
+     │
+     ▼
+┌──────────────────────────────────────────────────┐
+│              OpenAI Runtime (:9090)               │
+│                                                   │
+│  1. Request arrives for model "X"                 │
+│  2. If model "Y" loaded → SIGTERM "Y"             │
+│  3. Spawn llama-server for "X" → wait for health  │
+│  4. Proxy request → return response               │
+│  5. After idle_timeout → load priority model      │
+└───────────────────────┬──────────────────────────┘
+                        │
+                        ▼
+              ┌──────────────────┐
+              │   llama-server   │
+              │   (GPU loaded)   │
+              │   One at a time  │
+              └──────────────────┘
 ```
-
-### Docker Compose File
-
-```yaml
-services:
-  openai-runtime:
-    build: .
-    ports:
-      - "9090:9090"
-    volumes:
-      - ./config.docker.toml:/home/appuser/config.toml:ro
-      - runtime-data:/var/lib/openai-runtime
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    restart: unless-stopped
-
-volumes:
-  runtime-data:
-```
-
-### Custom Config
-
-To add your own models, edit `config.docker.toml` and restart:
-
-```bash
-# Edit config
-$EDITOR config.docker.toml
-
-# Restart (no rebuild needed for config changes)
-docker compose restart
-```
-
-### GPU Note
-
-The container itself does not need GPU access — only `llama-server` on the host does. No `--gpus` flag required.
 
 ## API Examples
 
@@ -530,7 +520,6 @@ time curl -s http://localhost:9090/v1/chat/completions \
 .
 ├── Cargo.toml              # Dependencies and build config
 ├── config.toml             # Example configuration
-├── Dockerfile              # Multi-stage Docker build
 ├── openai-runtime.service  # Systemd unit file
 ├── .github/workflows/
 │   ├── ci.yml              # CI: check, clippy, build, test
@@ -551,6 +540,8 @@ time curl -s http://localhost:9090/v1/chat/completions \
     │   └── llama_cpp.rs    # llama.cpp backend implementation
     ├── scheduler/mod.rs    # Core scheduler with LRU + priority
     ├── state/mod.rs        # Shared application state
+    ├── memory/mod.rs       # System memory pressure monitoring
+    ├── db/mod.rs           # Token usage tracking (SQLite)
     ├── proxy/mod.rs        # SSE proxy helpers
     ├── metrics/mod.rs      # Prometheus metric collectors
     └── api/
@@ -562,7 +553,8 @@ time curl -s http://localhost:9090/v1/chat/completions \
         ├── responses.rs    # POST /v1/responses
         ├── audio.rs        # POST /v1/audio/*
         ├── health.rs       # GET /health, /status
-        └── metrics.rs      # GET /metrics
+        ├── metrics.rs      # GET /metrics
+        └── usage.rs        # GET /v1/usage
 ```
 
 ## License
