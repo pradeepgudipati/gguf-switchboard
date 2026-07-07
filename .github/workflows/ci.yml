@@ -1,8 +1,12 @@
 name: CI
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
-    branches: [main, Dev]
+    branches: [main]
   pull_request:
     branches: [main]
 
@@ -12,8 +16,8 @@ env:
   SWAGGER_UI_OVERWRITE_FOLDER: ${{ github.workspace }}/swagger-ui-overrides
 
 jobs:
-  check:
-    name: Check & Clippy
+  ci:
+    name: CI
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -22,26 +26,5 @@ jobs:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
 
-      - name: Format check
+      - name: Run checks
         run: ./precommit.sh
-
-  build-matrix:
-    name: Build (${{ matrix.os }})
-    needs: check
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Build
-        run: cargo build --release
-
-      - name: Upload binary
-        uses: actions/upload-artifact@v4
-        with:
-          name: openai-runtime-${{ matrix.os }}
-          path: target/release/openai-runtime
