@@ -95,23 +95,141 @@ read_models_dir_from_toml() {
     awk -F'"' '/^models_dir\s*=/ { print $2; exit }' "$file"
 }
 
+is_discoverable_gguf_name() {
+    local name="${1,,}"
+    [[ "$name" == mmproj* || "$name" == mtp-* || "$name" == ggml-vocab* ]] && return 1
+    [[ "$name" == *-mmproj* || "$name" == *-lora* || "$name" == *-vocab.gguf ]] && return 1
+    return 0
+}
+
+count_gguf_files() {
+    local dir="$1"
+    local count=0
+    local file base
+    [[ -d "$dir" ]] || { echo 0; return; }
+    while IFS= read -r -d '' file; do
+        base="$(basename "$file")"
+        if is_discoverable_gguf_name "$base"; then
+            count=$((count + 1))
+        fi
+    done < <(find "$dir" -type f -iname '*.gguf' -print0 2>/dev/null)
+    echo "$count"
+}
+
+dir_in_models_dir_list() {
+    local needle="$1"
+    local configured="$2"
+    local part
+    IFS=',' read -ra parts <<< "$configured"
+    for part in "${parts[@]}"; do
+        part="${part#"${part%%[![:space:]]*}"}"
+        part="${part%"${part##*[![:space:]]}"}"
+        [[ "$part" == "$needle" ]] && return 0
+    done
+    return 1
+}
+
+scan_common_models_dirs() {
+    local configured="${1:-}"
+    local -a found=()
+    local candidate count
+    for candidate in /models "$HOME/.lmstudio/models" "$HOME/models" "/var/lib/gguf-switchboard/models"; do
+        count="$(count_gguf_files "$candidate")"
+        if [[ "$count" -gt 0 ]]; then
+            found+=("$candidate")
+        fi
+    done
+    if [[ -n "$configured" ]]; then
+        IFS=',' read -ra parts <<< "$configured"
+        for candidate in "${parts[@]}"; do
+            candidate="${candidate#"${candidate%%[![:space:]]*}"}"
+            candidate="${candidate%"${candidate##*[![:space:]]}"}"
+            [[ -z "$candidate" ]] && continue
+            if [[ -d "$candidate" ]] && count="$(count_gguf_files "$candidate")" && [[ "$count" -gt 0 ]]; then
+                local seen=false
+                for existing in "${found[@]}"; do
+                    [[ "$existing" == "$candidate" ]] && seen=true
+                done
+                [[ "$seen" == "false" ]] && found+=("$candidate")
+            fi
+        done
+    fi
+    if [[ "${#found[@]}" -eq 0 ]]; then
+        return 1
+    fi
+    local IFS=,
+    echo "${found[*]}"
+}
+
 detect_models_dir() {
     if [[ -n "${MODELS_DIR:-}" ]]; then
         echo "$MODELS_DIR"
         return 0
     fi
 
+    local configured=""
     for candidate in "$MODELS_FILE" "models.toml"; do
         if [[ -f "$candidate" ]]; then
-            dir="$(read_models_dir_from_toml "$candidate" || true)"
-            if [[ -n "$dir" ]]; then
-                echo "$dir"
-                return 0
-            fi
+            configured="$(read_models_dir_from_toml "$candidate" || true)"
+            [[ -n "$configured" ]] && break
         fi
     done
 
+    if scanned="$(scan_common_models_dirs "$configured" 2>/dev/null || true)" && [[ -n "$scanned" ]]; then
+        echo "$scanned"
+        return 0
+    fi
+
+    if [[ -n "$configured" ]]; then
+        echo "$configured"
+        return 0
+    fi
+
     return 1
+}
+
+print_models_dir_hints() {
+    local configured="${1:-}"
+    local scanned extra_dirs=() candidate count refresh_dirs=""
+
+    if [[ -z "$configured" ]]; then
+        configured="$(read_models_dir_from_toml "$MODELS_FILE" 2>/dev/null || read_models_dir_from_toml "models.toml" 2>/dev/null || true)"
+    fi
+
+    if [[ -n "$configured" ]]; then
+        echo "    Configured models_dir: $configured"
+    fi
+
+    scanned="$(scan_common_models_dirs "$configured" 2>/dev/null || true)"
+    if [[ -z "$scanned" ]]; then
+        echo "    No .gguf files found under common model directories."
+        echo "    Set MODELS_DIR=/path/to/models and re-run with --refresh-models."
+        return 0
+    fi
+
+    echo "    Directories with .gguf files on this host:"
+    IFS=',' read -ra scanned_parts <<< "$scanned"
+    for candidate in "${scanned_parts[@]}"; do
+        candidate="${candidate#"${candidate%%[![:space:]]*}"}"
+        candidate="${candidate%"${candidate##*[![:space:]]}"}"
+        count="$(count_gguf_files "$candidate")"
+        printf "      - %s (%s files)\n" "$candidate" "$count"
+        if [[ -n "$configured" ]] && ! dir_in_models_dir_list "$candidate" "$configured"; then
+            extra_dirs+=("$candidate")
+        fi
+    done
+
+    refresh_dirs="$scanned"
+    if [[ "${#extra_dirs[@]}" -gt 0 && -n "$configured" ]]; then
+        echo "    Note: some directories with models are not in configured models_dir."
+        refresh_dirs="$configured"
+        for candidate in "${extra_dirs[@]}"; do
+            refresh_dirs="$refresh_dirs,$candidate"
+        done
+    fi
+
+    echo "    To regenerate models.toml from disk:"
+    echo "    MODELS_DIR=$refresh_dirs ./deploy.sh --refresh-models"
 }
 
 generate_models_toml() {
@@ -121,11 +239,7 @@ generate_models_toml() {
 
     if [[ "$refresh" != "true" && -f "$MODELS_FILE" ]]; then
         echo "==> Keeping existing $MODELS_FILE (pass --refresh-models to regenerate from disk)."
-        if models_dir="$(detect_models_dir 2>/dev/null || true)" && [[ -n "$models_dir" ]]; then
-            echo "    Detected models on disk at: $models_dir"
-            echo "    To regenerate models.toml from that directory:"
-            echo "    MODELS_DIR=$models_dir ./deploy.sh --refresh-models"
-        fi
+        print_models_dir_hints
         return 0
     fi
 
