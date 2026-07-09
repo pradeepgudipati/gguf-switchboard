@@ -8,8 +8,26 @@ cd "$ROOT"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+write_minimal_gguf() {
+    python3 - "$1" "$2" <<'PY'
+import struct, sys
+path, arch = sys.argv[1], sys.argv[2]
+buf = bytearray()
+buf += struct.pack('<I', 0x46554747)
+buf += struct.pack('<I', 2)
+buf += struct.pack('<Q', 0)
+buf += struct.pack('<Q', 1)
+key = b'general.architecture'
+buf += struct.pack('<Q', len(key)) + key
+buf += struct.pack('<I', 8)
+buf += struct.pack('<Q', len(arch)) + arch.encode()
+open(path, 'wb').write(buf)
+PY
+}
+
 mkdir -p "$TMP/models/nested"
-touch "$TMP/models/gemma-3-4b.gguf" "$TMP/models/nested/qwen2.5-coder-7b.gguf"
+write_minimal_gguf "$TMP/models/gemma-3-4b.gguf" gemma
+write_minimal_gguf "$TMP/models/nested/qwen2.5-coder-7b.gguf" qwen2
 
 discover() {
     cargo run -q -- discover-models "$@"
@@ -22,6 +40,18 @@ grep -q 'alias = "gemma-3-4b"' "$out"
 grep -q 'alias = "qwen2.5-coder-7b"' "$out"
 grep -q 'auto_discover = true' "$out"
 grep -q "models_dir = \"$TMP/models\"" "$out"
+grep -q 'nested/qwen2.5-coder-7b.gguf' "$out"
+
+touch "$TMP/models/mmproj-test.gguf" "$TMP/models/ggml-vocab-test.gguf"
+discover "$TMP/models" -o "$TMP/no-artifacts.toml"
+! grep -q 'mmproj-test' "$TMP/no-artifacts.toml"
+! grep -q 'ggml-vocab-test' "$TMP/no-artifacts.toml"
+
+mkdir -p "$TMP/extra"
+write_minimal_gguf "$TMP/extra/beta.gguf" llama
+multi_out="$TMP/multi.toml"
+discover "$TMP/models,$TMP/extra" -o "$multi_out"
+grep -q 'alias = "beta"' "$multi_out"
 
 merge="$TMP/merge.toml"
 cat >"$merge" <<EOF

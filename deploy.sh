@@ -95,43 +95,19 @@ read_models_dir_from_toml() {
     awk -F'"' '/^models_dir\s*=/ { print $2; exit }' "$file"
 }
 
-dir_has_gguf_files() {
-    local dir="$1"
-    [[ -d "$dir" ]] || return 1
-    find "$dir" -type f -iname '*.gguf' -print -quit 2>/dev/null | grep -q .
-}
-
 detect_models_dir() {
     if [[ -n "${MODELS_DIR:-}" ]]; then
-        if [[ -d "$MODELS_DIR" ]]; then
-            echo "$MODELS_DIR"
-            return 0
-        fi
-        echo "==> Warning: MODELS_DIR is set but not a directory: $MODELS_DIR" >&2
+        echo "$MODELS_DIR"
+        return 0
     fi
-
-    local candidate dir
-    for candidate in /models "$HOME/models" "/var/lib/gguf-switchboard/models"; do
-        if dir_has_gguf_files "$candidate"; then
-            echo "$candidate"
-            return 0
-        fi
-    done
 
     for candidate in "$MODELS_FILE" "models.toml"; do
         if [[ -f "$candidate" ]]; then
             dir="$(read_models_dir_from_toml "$candidate" || true)"
-            if [[ -n "$dir" && -d "$dir" ]]; then
+            if [[ -n "$dir" ]]; then
                 echo "$dir"
                 return 0
             fi
-        fi
-    done
-
-    for candidate in /models "$HOME/models" "/var/lib/gguf-switchboard/models"; do
-        if [[ -d "$candidate" ]]; then
-            echo "$candidate"
-            return 0
         fi
     done
 
@@ -145,6 +121,11 @@ generate_models_toml() {
 
     if [[ "$refresh" != "true" && -f "$MODELS_FILE" ]]; then
         echo "==> Keeping existing $MODELS_FILE (pass --refresh-models to regenerate from disk)."
+        if models_dir="$(detect_models_dir 2>/dev/null || true)" && [[ -n "$models_dir" ]]; then
+            echo "    Detected models on disk at: $models_dir"
+            echo "    To regenerate models.toml from that directory:"
+            echo "    MODELS_DIR=$models_dir ./deploy.sh --refresh-models"
+        fi
         return 0
     fi
 
@@ -157,7 +138,7 @@ generate_models_toml() {
 
     if ! models_dir="$(detect_models_dir)"; then
         echo "==> Warning: Could not find a models directory."
-        echo "    Set MODELS_DIR, place GGUF files under /models, or edit models_dir in models.toml."
+        echo "    Set MODELS_DIR or edit models_dir in models.toml, then re-run with --refresh-models."
         if [[ ! -f "$MODELS_FILE" && -f "models.toml" ]]; then
             echo "==> Copying template models.toml to $MODELS_FILE..."
             sudo cp models.toml "$MODELS_FILE"
@@ -380,8 +361,8 @@ for i in {1..15}; do
             print_models_from_config "$CONFIG_FILE"
         fi
         if [[ "$CONFIG_CREATED" == "true" ]]; then
-            echo "==> Next step: place GGUF files in your models directory (default /models),"
-            echo "    then re-run deploy to auto-generate models.toml:"
+            echo "==> Next step: place GGUF files in models_dir (default /models),"
+            echo "    set models_dir in $MODELS_FILE if needed, then re-run:"
             echo "    MODELS_DIR=/path/to/models ./deploy.sh --refresh-models"
             echo "    Or edit $CONFIG_FILE / $MODELS_FILE manually and restart:"
             echo "    sudo systemctl restart gguf-switchboard"

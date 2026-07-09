@@ -5,6 +5,22 @@ use gguf_switchboard::types::completions::{CompletionRequest, Prompt};
 use gguf_switchboard::types::embeddings::{EmbeddingInput, EmbeddingRequest};
 use gguf_switchboard::types::responses::{ResponseInput, ResponseRequest};
 use gguf_switchboard::types::{ListModelsResponse, ModelInfo, Usage};
+use std::path::Path;
+
+fn write_test_gguf(path: &Path, architecture: &str) {
+    let mut buf = Vec::new();
+    buf.extend_from_slice(&0x4655_4747u32.to_le_bytes());
+    buf.extend_from_slice(&2u32.to_le_bytes());
+    buf.extend_from_slice(&0u64.to_le_bytes());
+    buf.extend_from_slice(&1u64.to_le_bytes());
+    let key = b"general.architecture";
+    buf.extend_from_slice(&(key.len() as u64).to_le_bytes());
+    buf.extend_from_slice(key);
+    buf.extend_from_slice(&8u32.to_le_bytes());
+    buf.extend_from_slice(&(architecture.len() as u64).to_le_bytes());
+    buf.extend_from_slice(architecture.as_bytes());
+    std::fs::write(path, buf).unwrap();
+}
 
 #[test]
 fn test_config_load_from_str() {
@@ -311,8 +327,8 @@ fn test_models_registry_discover_and_expand() {
     let dir = std::env::temp_dir().join("gguf-switchboard-discover-test");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("Qwen3.5-9B-Q4_K_M.gguf"), b"fake").unwrap();
-    std::fs::write(dir.join("gemma-3-4b.gguf"), b"fake").unwrap();
+    write_test_gguf(&dir.join("Qwen3.5-9B-Q4_K_M.gguf"), "qwen2");
+    write_test_gguf(&dir.join("gemma-3-4b.gguf"), "gemma");
 
     let registry = ModelsRegistry::discover(dir.to_str().unwrap()).unwrap();
     assert_eq!(registry.models.len(), 2);
@@ -331,7 +347,7 @@ fn test_config_loads_models_file() {
     let dir = std::env::temp_dir().join("gguf-switchboard-models-file-test");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("demo.gguf"), b"fake").unwrap();
+    write_test_gguf(&dir.join("demo.gguf"), "llama");
 
     let models_toml = format!(
         r#"

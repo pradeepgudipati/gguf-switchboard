@@ -3,10 +3,14 @@
 # Use short aliases in API requests (e.g. "gemma-code") instead of full GGUF filenames.
 # Link this file from config.toml:  models_file = "models.toml"
 #
-# Generate automatically from a folder of GGUF files:
+# Generate automatically from configured model directories:
 #   ./gguf-switchboard discover-models /path/to/models -o models.toml
+#
+# Multiple directories (comma-separated):
+#   models_dir = "/models,/home/you/extra-gguf"
 
 [defaults]
+# Root directory (or comma-separated directories) scanned for llama.cpp-loadable GGUF files.
 models_dir = "/models"
 llama_server = "/usr/local/bin/llama-server"
 host = "127.0.0.1"
@@ -15,21 +19,15 @@ context_size = 65536
 ngl = 999
 backend = "llama.cpp"
 
-# Register every .gguf under models_dir that is not listed below.
+# Register every llama.cpp-loadable .gguf under models_dir that is not listed below.
+# Sidecars (mmproj*, mtp-*), vocab files, LoRA adapters, and invalid GGUF files are skipped.
 auto_discover = true
 
-[[models]]
-alias = "gemma-code"
-file = "gemma-3-4b.gguf"
-display_name = "Gemma 3 Coding Model"
-priority = true
-
-[[models]]
-alias = "qwen-coder"
-file = "qwen2.5-coder-7b.gguf"
-display_name = "Qwen 2.5 Coder"
-
-[[models]]
-alias = "llama-3"
-file = "llama-3.2-3b.gguf"
-display_name = "Llama 3.2 3B"
+# Optional [[models]] entries pin aliases, display names, ports, or priority for
+# specific files. Any other .gguf under models_dir is picked up by auto_discover.
+#
+# [[models]]
+# alias = "gemma-code"
+# file = "gemma-3-4b.gguf"
+# display_name = "Gemma 3 Coding Model"
+# priority = true

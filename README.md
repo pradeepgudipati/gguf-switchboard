@@ -248,7 +248,7 @@ priority = true         # Auto-load after idle_timeout (optional)
 
 | Field | Description |
 |-------|-------------|
-| `defaults.models_dir` | Directory scanned for GGUF files |
+| `defaults.models_dir` | Directory (or comma-separated directories) scanned for llama.cpp-loadable GGUF files |
 | `defaults.llama_server` | Path to `llama-server` binary |
 | `defaults.base_port` | Starting port; model at index *N* uses `base_port + N` unless `port` is set |
 | `defaults.context_size` | Default context window (`-c`) for all models |
@@ -292,7 +292,19 @@ Duplicate aliases get a numeric suffix (`model-2`, `model-3`, …).
 
 #### Auto-discover at runtime
 
-With `auto_discover = true`, the runtime scans `models_dir` on startup and registers any `.gguf` file not already listed in `[[models]]`. Explicit entries let you pin aliases, display names, or priorities for specific files; everything else is picked up automatically.
+With `auto_discover = true`, the runtime scans every directory listed in `models_dir` on startup and registers any llama.cpp-loadable `.gguf` file not already listed in `[[models]]`. Explicit entries let you pin aliases, display names, or priorities for specific files; everything else is picked up automatically.
+
+`models_dir` must exist at startup — no fallback directories are searched. Use a comma-separated list to scan multiple folders:
+
+```toml
+[defaults]
+models_dir = "/models,/home/you/extra-gguf"
+auto_discover = true
+```
+
+Discovery is recursive and skips sidecars and non-model artifacts (`mmproj*`, `mtp-*`, `ggml-vocab*`, LoRA adapters) plus files that are not valid llama.cpp-loadable GGUF models (missing `general.architecture` metadata, vision encoders, etc.). With a single `models_dir`, nested paths are stored relative to that root; with multiple directories, discovered files are stored as absolute paths.
+
+You can omit `[[models]]` entirely and rely on auto-discover, or add entries only for models you want to customize.
 
 #### Deploy-time auto-generation
 
@@ -312,14 +324,18 @@ When generation runs:
 5. Installs the result to `/etc/gguf-switchboard/models.toml`
 6. Prints a table of configured models after the service is healthy
 
-**Models directory detection** (first match wins):
+**Models directory detection**:
 
-1. `$MODELS_DIR` environment variable
-2. `/models`, `~/models`, or `/var/lib/gguf-switchboard/models` if they contain `.gguf` files
-3. `models_dir` from existing `models.toml` (deploy target or repo copy)
-4. Common paths above if the directory exists (may be empty)
+1. `$MODELS_DIR` environment variable (may be comma-separated)
+2. `models_dir` from existing `models.toml` (deploy target or repo copy)
 
-If no directory is found or discovery fails, deploy warns and copies the template `models.toml` if needed — deploy does not fail.
+If no directory is configured or discovery fails, deploy warns and copies the template `models.toml` if needed — deploy does not fail.
+
+Set `models_dir` in `models.toml` or pass `MODELS_DIR` when models live outside `/models`:
+
+```bash
+MODELS_DIR=/path/to/models ./deploy.sh --refresh-models
+```
 
 #### `discover-models` CLI
 

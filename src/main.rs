@@ -174,7 +174,9 @@ fn run_discover_models(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     registry.write(&output)?;
 
     if discovered_count == 0 {
-        println!("Warning: no .gguf files found in {models_dir}; kept existing registry entries");
+        println!(
+            "Warning: no llama.cpp-loadable .gguf files found in {models_dir}; kept existing registry entries"
+        );
     } else {
         println!("Discovered {discovered_count} model(s) in {models_dir}");
     }
