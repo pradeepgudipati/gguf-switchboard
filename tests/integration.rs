@@ -1,4 +1,4 @@
-use gguf_switchboard::config::Config;
+use gguf_switchboard::config::{Config, ModelsRegistry};
 use gguf_switchboard::types::audio::{SpeechRequest, TranscriptionRequest};
 use gguf_switchboard::types::chat::{ChatCompletionRequest, ChatMessage, Content, Role};
 use gguf_switchboard::types::completions::{CompletionRequest, Prompt};
@@ -304,4 +304,70 @@ fn test_usage_serialization() {
     let json = serde_json::to_string(&usage).unwrap();
     assert!(json.contains("\"prompt_tokens\":10"));
     assert!(json.contains("\"total_tokens\":30"));
+}
+
+#[test]
+fn test_models_registry_discover_and_expand() {
+    let dir = std::env::temp_dir().join("gguf-switchboard-discover-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("Qwen3.5-9B-Q4_K_M.gguf"), b"fake").unwrap();
+    std::fs::write(dir.join("gemma-3-4b.gguf"), b"fake").unwrap();
+
+    let registry = ModelsRegistry::discover(dir.to_str().unwrap()).unwrap();
+    assert_eq!(registry.models.len(), 2);
+    assert!(registry.models.iter().any(|m| m.alias == "qwen3.5-9b"));
+    assert!(registry.models.iter().any(|m| m.alias == "gemma-3-4b"));
+
+    let expanded = registry.expand("llama.cpp").unwrap();
+    assert_eq!(expanded.len(), 2);
+    assert!(expanded.contains_key("qwen3.5-9b"));
+
+    std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn test_config_loads_models_file() {
+    let dir = std::env::temp_dir().join("gguf-switchboard-models-file-test");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("demo.gguf"), b"fake").unwrap();
+
+    let models_toml = format!(
+        r#"
+[defaults]
+models_dir = "{}"
+llama_server = "/usr/bin/echo"
+base_port = 9100
+context_size = 2048
+
+[[models]]
+alias = "demo"
+file = "demo.gguf"
+display_name = "Demo Model"
+priority = true
+"#,
+        dir.to_string_lossy()
+    );
+
+    let config_toml = r#"
+bind = "127.0.0.1:8080"
+default_backend = "llama.cpp"
+models_file = "models.toml"
+"#;
+
+    let config_path = dir.join("config.toml");
+    let models_path = dir.join("models.toml");
+    std::fs::write(&config_path, config_toml).unwrap();
+    std::fs::write(&models_path, models_toml).unwrap();
+
+    let config = Config::load(config_path.to_str().unwrap()).unwrap();
+    assert_eq!(config.models.len(), 1);
+    let model = config.models.get("demo").unwrap();
+    assert_eq!(model.display_name, "Demo Model");
+    assert_eq!(model.command, "/usr/bin/echo");
+    assert!(model.args.contains(&"9100".to_string()));
+    assert!(model.priority);
+
+    std::fs::remove_dir_all(&dir).ok();
 }

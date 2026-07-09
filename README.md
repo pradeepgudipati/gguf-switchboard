@@ -123,9 +123,12 @@ curl -fsSL https://github.com/pradeepgudipati/gguf-switchboard/releases/latest/d
   -o gguf-switchboard && chmod +x gguf-switchboard
 ```
 
-Copy `config.toml` from this repo, point it at your `llama-server` binary and GGUF model paths, then run:
+Copy `config.toml` and `models.toml` from this repo, point them at your `llama-server` binary and GGUF model directory, then run:
 
 ```bash
+# Optional: auto-generate models.toml from your GGUF folder
+./gguf-switchboard discover-models /models -o models.toml
+
 ./gguf-switchboard config.toml
 ```
 
@@ -139,21 +142,29 @@ If you want the runtime to start on boot and restart on failure, `deploy.sh` han
 ./deploy.sh
 ```
 
-The script installs build dependencies and Rust (if needed), builds the release binary, creates `/etc/gguf-switchboard/config.toml` from the template if missing, installs the systemd service, and starts the server on `0.0.0.0:9090`.
+The script installs build dependencies and Rust (if needed), builds the release binary, creates `/etc/gguf-switchboard/config.toml` from the template if missing, **auto-generates `/etc/gguf-switchboard/models.toml` on first install** from your GGUF directory, installs the systemd service, and starts the server on `0.0.0.0:9090`.
+
+On first deploy (no existing `models.toml`), discovery scans for `.gguf` files, assigns aliases and ports, and detects `llama-server` on your PATH. Override the scan directory with `MODELS_DIR`:
+
+```bash
+MODELS_DIR=/path/to/gguf-files ./deploy.sh
+```
+
+After adding new GGUF files, refresh the registry:
+
+```bash
+MODELS_DIR=/models ./deploy.sh --refresh-models
+```
 
 On completion it prints a table of **available models** (ID, display name, priority/loaded state) plus links to Swagger UI and health endpoints.
 
-**Post-install:** Edit `/etc/gguf-switchboard/config.toml` to point at your `llama-server` binary and GGUF model paths, then re-run:
-
-```bash
-./deploy.sh
-```
-
-Or restart only:
+**Post-install:** Edit `/etc/gguf-switchboard/models.toml` to tweak aliases or priorities, then restart:
 
 ```bash
 sudo systemctl restart gguf-switchboard
 ```
+
+Re-run `./deploy.sh --refresh-models` to pick up new GGUF files while preserving your customizations (merged by file path).
 
 ### Fresh machine (no clone yet)
 
@@ -201,6 +212,151 @@ Client Request
 
 Configuration is a TOML file (default: `config.toml`):
 
+### Model Configuration
+
+Day-to-day model setup lives in **`models.toml`**, referenced from `config.toml`:
+
+```toml
+# config.toml
+models_file = "models.toml"
+```
+
+If `models_file` is omitted but a sibling `models.toml` exists next to your config, it is loaded automatically.
+
+#### `models.toml` structure
+
+```toml
+[defaults]
+models_dir = "/models"                        # Root directory for GGUF files
+llama_server = "/usr/local/bin/llama-server"  # Backend binary (auto-detected on discover)
+host = "127.0.0.1"                            # llama-server bind host
+base_port = 8081                              # First model port; others increment from here
+context_size = 65536                          # Default -c passed to llama-server
+ngl = 999                                     # Default -ngl (GPU layers)
+backend = "llama.cpp"
+
+auto_discover = true    # Also register any .gguf under models_dir not listed in [[models]]
+
+[[models]]
+alias = "gemma-code"    # API model id — use this in Cursor, Cline, etc.
+file = "gemma-3-4b.gguf"  # Relative to models_dir, or an absolute path
+display_name = "Gemma 3 Coding Model"  # Shown in /v1/models (optional)
+priority = true         # Auto-load after idle_timeout (optional)
+# port = 8085           # Override auto-assigned port (optional)
+# context_size = 32768  # Override defaults.context_size for this model (optional)
+```
+
+| Field | Description |
+|-------|-------------|
+| `defaults.models_dir` | Directory scanned for GGUF files |
+| `defaults.llama_server` | Path to `llama-server` binary |
+| `defaults.base_port` | Starting port; model at index *N* uses `base_port + N` unless `port` is set |
+| `defaults.context_size` | Default context window (`-c`) for all models |
+| `auto_discover` | When `true`, any `.gguf` under `models_dir` not listed in `[[models]]` is registered at runtime |
+| `[[models]].alias` | Short id used in API requests (`model` field) |
+| `[[models]].file` | GGUF filename relative to `models_dir`, or absolute path |
+| `[[models]].display_name` | Human-readable name; defaults to a title-cased alias |
+| `[[models]].priority` | If `true`, this model loads automatically after `idle_timeout` |
+| `[[models]].port` | Override the auto-assigned backend port |
+
+#### Port assignment
+
+Ports are assigned sequentially from `defaults.base_port`:
+
+| Index | Port (default base 8081) |
+|-------|--------------------------|
+| 0 | 8081 |
+| 1 | 8082 |
+| 2 | 8083 |
+
+Set `port` on a specific `[[models]]` entry to pin a backend to a fixed port.
+
+#### Alias generation
+
+When models are discovered from filenames, aliases are derived automatically:
+
+1. Take the filename stem (without `.gguf`)
+2. Lowercase
+3. Strip common suffixes (`-instruct`, `-it`, `-gguf`, quant tags like `-Q4_K_M`, `-bf16`, etc.)
+4. Replace `_` with `-`
+
+Examples:
+
+| GGUF filename | Generated alias |
+|---------------|-----------------|
+| `Qwen3.5-9B-Q4_K_M.gguf` | `qwen3.5-9b` |
+| `gemma-3-4b-it-Q4_K_M.gguf` | `gemma-3-4b` |
+| `llama-3.2-3b.gguf` | `llama-3.2-3b` |
+
+Duplicate aliases get a numeric suffix (`model-2`, `model-3`, …).
+
+#### Auto-discover at runtime
+
+With `auto_discover = true`, the runtime scans `models_dir` on startup and registers any `.gguf` file not already listed in `[[models]]`. Explicit entries let you pin aliases, display names, or priorities for specific files; everything else is picked up automatically.
+
+#### Deploy-time auto-generation
+
+`./deploy.sh` generates `/etc/gguf-switchboard/models.toml` when:
+
+- **First install** — no existing `/etc/gguf-switchboard/models.toml` (auto-discovers from GGUF files)
+- **`--refresh-models`** — explicitly regenerate from disk, merging with the existing registry
+
+Subsequent deploys without `--refresh-models` keep the existing registry unchanged.
+
+When generation runs:
+
+1. Builds the release binary (required before `discover-models`)
+2. Detects the models directory (see below)
+3. Runs `discover-models` to scan for `.gguf` files
+4. Merges with the existing `/etc/gguf-switchboard/models.toml` when present — your custom `alias`, `display_name`, `priority`, `port`, and `context_size` are preserved per file
+5. Installs the result to `/etc/gguf-switchboard/models.toml`
+6. Prints a table of configured models after the service is healthy
+
+**Models directory detection** (first match wins):
+
+1. `$MODELS_DIR` environment variable
+2. `/models`, `~/models`, or `/var/lib/gguf-switchboard/models` if they contain `.gguf` files
+3. `models_dir` from existing `models.toml` (deploy target or repo copy)
+4. Common paths above if the directory exists (may be empty)
+
+If no directory is found or discovery fails, deploy warns and copies the template `models.toml` if needed — deploy does not fail.
+
+#### `discover-models` CLI
+
+Generate or refresh `models.toml` without a full deploy:
+
+```bash
+# Fresh discover from a directory
+./gguf-switchboard discover-models /models -o models.toml
+
+# Merge with an existing registry (preserves customizations by file path)
+./gguf-switchboard discover-models /models -o models.toml --merge models.toml
+```
+
+The command:
+
+- Recursively scans for `.gguf` files
+- Detects `llama-server` via `command -v llama-server` (falls back to `/usr/local/bin/llama-server`)
+- Writes `[defaults]` and `[[models]]` entries with aliases and display names
+- Sets `auto_discover = true` on fresh output
+- Marks the first model as `priority` unless an existing merge already defines one
+
+#### Docker (`models.docker.toml`)
+
+For Docker deployments, use `models.docker.toml` (mounted by `docker-compose` alongside `config.docker.toml`). The same schema applies; paths are container paths (`/models`, `/usr/local/bin/llama-server`). Example entries for thinking models are included in the repo template.
+
+#### Customizing aliases and priorities
+
+1. Edit `models.toml` — set `alias`, `display_name`, and `priority` on `[[models]]` entries
+2. Re-run `./deploy.sh --refresh-models` (or `discover-models --merge`) to pick up new GGUF files while keeping your edits
+3. Restart the service: `sudo systemctl restart gguf-switchboard`
+
+Only one model should have `priority = true` (the idle-timeout default). If none is set after discovery, the first model is marked priority.
+
+### Inline model config (advanced)
+
+You can still define models directly in `config.toml` when you need full control over backend args:
+
 ```toml
 bind = "0.0.0.0:9090"        # Address to listen on
 startup_timeout = 60           # Max seconds to wait for model health
@@ -246,6 +402,7 @@ priority = false
 | `startup_timeout` | Seconds to wait for a backend to become healthy |
 | `idle_timeout` | Seconds of inactivity before the priority model loads |
 | `default_backend` | Fallback backend engine name |
+| `models_file` | Path to simplified model registry (`models.toml`) |
 | `models.<id>.backend` | Engine type (`llama.cpp`) |
 | `models.<id>.display_name` | Human-readable name shown in `/v1/models` |
 | `models.<id>.command` | Path to the backend binary |
@@ -706,7 +863,10 @@ It builds `gguf-switchboard` if needed and downloads a `llama-swap` release bina
 ```
 .
 ├── Cargo.toml              # Dependencies and build config
-├── config.toml             # Example configuration
+├── config.toml             # Server configuration
+├── config.docker.toml      # Docker server configuration
+├── models.toml             # Model registry (aliases → GGUF files)
+├── models.docker.toml      # Docker model registry
 ├── gguf-switchboard.service  # Systemd unit file
 ├── .github/workflows/
 │   ├── ci.yml              # CI: check, clippy, build, test

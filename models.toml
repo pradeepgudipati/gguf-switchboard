@@ -1,0 +1,35 @@
+# GGUF Switchboard model registry
+#
+# Use short aliases in API requests (e.g. "gemma-code") instead of full GGUF filenames.
+# Link this file from config.toml:  models_file = "models.toml"
+#
+# Generate automatically from a folder of GGUF files:
+#   ./gguf-switchboard discover-models /path/to/models -o models.toml
+
+[defaults]
+models_dir = "/models"
+llama_server = "/usr/local/bin/llama-server"
+host = "127.0.0.1"
+base_port = 8081
+context_size = 65536
+ngl = 999
+backend = "llama.cpp"
+
+# Register every .gguf under models_dir that is not listed below.
+auto_discover = true
+
+[[models]]
+alias = "gemma-code"
+file = "gemma-3-4b.gguf"
+display_name = "Gemma 3 Coding Model"
+priority = true
+
+[[models]]
+alias = "qwen-coder"
+file = "qwen2.5-coder-7b.gguf"
+display_name = "Qwen 2.5 Coder"
+
+[[models]]
+alias = "llama-3"
+file = "llama-3.2-3b.gguf"
+display_name = "Llama 3.2 3B"

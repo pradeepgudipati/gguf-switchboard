@@ -1,0 +1,31 @@
+# Docker model registry — short aliases for API requests.
+# Mounted by docker-compose alongside config.docker.toml.
+
+[defaults]
+models_dir = "/models"
+llama_server = "/usr/local/bin/llama-server"
+host = "127.0.0.1"
+base_port = 8081
+context_size = 65536
+ngl = 999
+backend = "llama.cpp"
+
+auto_discover = true
+
+# Thinking model — reasoning enabled by default. Use max_tokens 2048+ in API requests.
+[[models]]
+alias = "gemma-4-e4b"
+file = "gemma-4-E4B-it-Q4_K_M.gguf"
+display_name = "Gemma 4 E4B"
+priority = true
+
+# Thinking model — reasoning enabled by default. Use max_tokens 2048+ in API requests.
+[[models]]
+alias = "qwen3.5-9b"
+file = "Qwen3.5-9B-Q4_K_M.gguf"
+display_name = "Qwen 3.5 9B"
+
+[[models]]
+alias = "qwen3-vl-8b"
+file = "Qwen3-VL-8B-Instruct-Q4_K_M.gguf"
+display_name = "Qwen 3 VL 8B"

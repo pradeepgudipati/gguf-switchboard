@@ -20,6 +20,7 @@ use tracing::{info, warn};
 use std::path::PathBuf;
 
 use crate::config::Config;
+use crate::config::ModelsRegistry;
 use crate::db::TokenDb;
 use crate::scheduler::Scheduler;
 use crate::state::AppState;
@@ -38,8 +39,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .json()
         .init();
 
-    let config_path = std::env::args()
-        .nth(1)
+    let args: Vec<String> = std::env::args().collect();
+
+    if args.len() >= 2 && args[1] == "discover-models" {
+        return run_discover_models(&args);
+    }
+
+    let config_path = args
+        .get(1)
+        .cloned()
         .unwrap_or_else(|| "config.toml".to_string());
 
     metrics::register_all();
@@ -115,5 +123,78 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     scheduler.shutdown().await?;
 
     info!("GGUF Switchboard stopped");
+    Ok(())
+}
+
+fn run_discover_models(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut models_dir = "/models".to_string();
+    let mut output = "models.toml".to_string();
+    let mut merge_from: Option<String> = None;
+
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" | "--output" => {
+                if let Some(path) = args.get(i + 1) {
+                    output = path.clone();
+                    i += 2;
+                } else {
+                    return Err("discover-models: missing value for --output".into());
+                }
+            }
+            "--merge" => {
+                if let Some(path) = args.get(i + 1) {
+                    merge_from = Some(path.clone());
+                    i += 2;
+                } else if std::path::Path::new(&output).is_file() {
+                    merge_from = Some(output.clone());
+                    i += 1;
+                } else {
+                    return Err("discover-models: missing value for --merge".into());
+                }
+            }
+            arg if arg.starts_with('-') => {
+                return Err(format!("discover-models: unknown flag '{arg}'").into());
+            }
+            path => {
+                models_dir = path.to_string();
+                i += 1;
+            }
+        }
+    }
+
+    let registry = match merge_from.as_deref() {
+        Some(path) => {
+            let existing = ModelsRegistry::load(path)?;
+            ModelsRegistry::discover_with_merge(&models_dir, Some(&existing))?
+        }
+        None => ModelsRegistry::discover(&models_dir)?,
+    };
+    let discovered_count = registry.models.len();
+    registry.write(&output)?;
+
+    if discovered_count == 0 {
+        println!("Warning: no .gguf files found in {models_dir}; kept existing registry entries");
+    } else {
+        println!("Discovered {discovered_count} model(s) in {models_dir}");
+    }
+    println!("Wrote {output}");
+    if let Some(ref merge_path) = merge_from {
+        println!("Merged customizations from {merge_path}");
+    }
+    println!();
+    println!("  {:<24} {:<6} FILE", "ALIAS", "PRI");
+    for entry in &registry.models {
+        let pri = if entry.priority { "yes" } else { "" };
+        println!("  {:<24} {:<6} {}", entry.alias, pri, entry.file);
+    }
+    println!();
+    println!("Defaults:");
+    println!("  models_dir   = {}", registry.defaults.models_dir);
+    println!("  llama_server = {}", registry.defaults.llama_server);
+    println!("  base_port    = {}", registry.defaults.base_port);
+    println!();
+    println!("Point config.toml at the registry with: models_file = \"{output}\"");
+
     Ok(())
 }
