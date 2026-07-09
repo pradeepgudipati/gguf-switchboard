@@ -1,4 +1,4 @@
-# OpenAI Runtime
+# gguf-switchboard
 
 ![gguf-switchboard demo](gguf-switchboard-demo.gif)
 
@@ -18,6 +18,7 @@ Several tools address parts of this problem. None combine OpenAI compatibility, 
 |------|:----------:|:-------------------:|:----------------:|:------------:|--------------|
 | **Ollama** | Yes | Yes | Partial — keeps models resident | Yes | Close, but limited GPU scheduling control |
 | **llama.cpp** (`llama-server`) | Yes | Manual — one process per model | No — you manage start/stop | Yes | Low-level; you own process and port management |
+| **llama-swap** | Yes | Yes | Yes — swaps on request; not VRAM-pressure aware | Yes | Single-binary, easy install; no idle timeout, VRAM monitoring, or usage tracking |
 | **vLLM** | Yes | Yes | Yes — multi-model on large GPUs | No (HuggingFace weights) | Excellent for datacenter GPUs, not GGUF workflows |
 | **LocalAI** | Yes | Yes | Partial — not VRAM-pressure aware | Yes | Closest alternative, but not designed for eviction under memory pressure |
 | **Open WebUI** | Yes (proxy) | Via backend | Depends on backend | Via backend | UI layer — not a model scheduler |
@@ -26,8 +27,9 @@ Several tools address parts of this problem. None combine OpenAI compatibility, 
 
 ### Why existing tools fall short
 
+- **llama-swap** is the closest single-binary alternative — download, configure, run, done. It swaps llama-server processes on request. What it lacks: no VRAM pressure monitoring, no context-size fallback on OOM, no idle timeout / priority model, no usage tracking.
 - **Ollama** gets close — drop-in model names, OpenAI-compatible API, GGUF support — but you have limited control over GPU scheduling. Models tend to stay resident; switching under VRAM pressure is opaque.
-- **LocalAI** is the closest full-stack alternative, supporting many backends and formats. It is not designed for proactive eviction when GPU memory is under pressure; you still manage capacity yourself.
+- **LocalAI** is a full-stack alternative supporting many backends and formats. It is not designed for proactive eviction when GPU memory is under pressure; you still manage capacity yourself.
 - **LiteLLM** is an excellent API gateway for routing, fallbacks, and retries across cloud and local providers. It does not spawn backends, load GGUF weights, or manage GPU memory — that is not its job.
 
 The gap: a tool that treats **model loading as a scheduling problem** on constrained local GPU hardware, not just an API compatibility layer.
@@ -51,7 +53,7 @@ The result: one endpoint, many models, zero manual process management.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                       OpenAI Runtime                         │
+│                      gguf-switchboard                        │
 │                                                              │
 │  /v1/chat/completions  ─┐                                    │
 │  /v1/completions       ─┤                                    │
@@ -103,13 +105,41 @@ Point your IDE or agent at `http://localhost:9090/v1`, set a model name from you
 
 ## Quick Start
 
-### Install & run
+### Download a prebuilt binary
+
+Grab the latest binary from [GitHub Releases](https://github.com/pradeepgudipati/gguf-switchboard/releases/latest) — no Rust toolchain required:
+
+```bash
+# Linux x86_64
+curl -fsSL https://github.com/pradeepgudipati/gguf-switchboard/releases/latest/download/openai-runtime-linux-amd64 \
+  -o openai-runtime && chmod +x openai-runtime
+
+# Linux ARM64
+curl -fsSL https://github.com/pradeepgudipati/gguf-switchboard/releases/latest/download/openai-runtime-linux-arm64 \
+  -o openai-runtime && chmod +x openai-runtime
+
+# macOS Apple Silicon
+curl -fsSL https://github.com/pradeepgudipati/gguf-switchboard/releases/latest/download/openai-runtime-darwin-arm64 \
+  -o openai-runtime && chmod +x openai-runtime
+```
+
+Copy `config.toml` from this repo, point it at your `llama-server` binary and GGUF model paths, then run:
+
+```bash
+./openai-runtime config.toml
+```
+
+Explore the API at **http://localhost:9090/swagger-ui/**.
+
+### Install as a systemd service
+
+If you want the runtime to start on boot and restart on failure, `deploy.sh` handles everything:
 
 ```bash
 ./deploy.sh
 ```
 
-The script clones (if needed), checks out `Dev`, installs build dependencies and Rust, builds the release binary, creates `/etc/openai-runtime/config.toml` from the template if missing, installs the systemd service, and starts the server on `0.0.0.0:9090`.
+The script installs build dependencies and Rust (if needed), builds the release binary, creates `/etc/openai-runtime/config.toml` from the template if missing, installs the systemd service, and starts the server on `0.0.0.0:9090`.
 
 On completion it prints a table of **available models** (ID, display name, priority/loaded state) plus links to Swagger UI and health endpoints.
 
@@ -124,8 +154,6 @@ Or restart only:
 ```bash
 sudo systemctl restart openai-runtime
 ```
-
-Explore the API at **http://localhost:9090/swagger-ui/** (Swagger UI).
 
 ### Fresh machine (no clone yet)
 
@@ -316,7 +344,7 @@ Client Request
      │
      ▼
 ┌──────────────────────────────────────────────────┐
-│              OpenAI Runtime (:9090)               │
+│             gguf-switchboard (:9090)              │
 │                                                   │
 │  1. Request arrives for model "X"                 │
 │  2. If model "Y" loaded → SIGTERM "Y"             │
@@ -432,15 +460,17 @@ curl http://localhost:9090/v1/responses \
 
 ### API Explorer (Swagger UI)
 
-After `./deploy.sh` completes, open the interactive API docs in your browser:
+After starting the runtime, open the interactive API docs in your browser:
 
 - **Swagger UI:** http://localhost:9090/swagger-ui/
 - **OpenAPI spec:** http://localhost:9090/api-docs/openapi.json
 - **Root redirect:** http://localhost:9090/ → Swagger UI
 
+![Swagger UI with model dropdown](docs/swagger-ui.png)
+
 All endpoints are listed and testable from the Swagger UI — health, models, chat completions, embeddings, usage, and more.
 
-A **Model** dropdown appears in the top bar (like the Authorize token). The selected model is persisted in the browser and applied automatically to every API request that accepts a `model` field — chat, completions, embeddings, responses, audio, usage filters, and model lookups.
+A **Model** dropdown appears in the top bar (like the Authorize button). The selected model is persisted in the browser and applied automatically to every API request that accepts a `model` field — chat, completions, embeddings, responses, audio, usage filters, and model lookups.
 
 ### Health & Status
 
