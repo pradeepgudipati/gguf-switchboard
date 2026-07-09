@@ -1,5 +1,5 @@
 window.onload = function() {
-  const MODEL_STORAGE_KEY = 'openai-runtime-swagger-model';
+  const MODEL_STORAGE_KEY = 'gguf-switchboard-swagger-model';
   let selectedModel = localStorage.getItem(MODEL_STORAGE_KEY) || '';
 
   function isSwaggerPlaceholder(value) {
@@ -137,7 +137,7 @@ window.onload = function() {
 
     if (path === '/v1/audio/speech') {
       if (isSwaggerPlaceholder(body.input)) {
-        body.input = 'Hello from the OpenAI Runtime speech API.';
+        body.input = 'Hello from the GGUF Switchboard speech API.';
       }
       if (isSwaggerPlaceholder(body.voice)) {
         body.voice = 'alloy';
@@ -193,7 +193,7 @@ window.onload = function() {
     if (path === '/v1/audio/speech') {
       return {
         model: resolvedModel,
-        input: 'Hello from the OpenAI Runtime speech API.',
+        input: 'Hello from the GGUF Switchboard speech API.',
         voice: 'alloy',
         response_format: 'mp3'
       };

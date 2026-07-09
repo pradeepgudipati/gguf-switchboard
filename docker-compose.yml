@@ -1,5 +1,5 @@
 services:
-  openai-runtime:
+  gguf-switchboard:
     build: .
     ports:
       - "9090:9090"
@@ -7,7 +7,7 @@ services:
       # Config
       - ./config.docker.toml:/home/appuser/config.toml:ro
       # Persist token usage database
-      - runtime-data:/var/lib/openai-runtime
+      - runtime-data:/var/lib/gguf-switchboard
       # Mount llama-server binary from host
       # IMPORTANT: update this path to match `which llama-server` on your host
       - /usr/local/bin/llama-server:/usr/local/bin/llama-server:ro

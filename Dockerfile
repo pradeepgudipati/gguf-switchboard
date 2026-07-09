@@ -7,7 +7,7 @@ COPY src/ src/
 COPY swagger-ui-overrides/ swagger-ui-overrides/
 COPY .cargo/ .cargo/
 
-RUN cargo build --release && strip /app/target/release/openai-runtime
+RUN cargo build --release && strip /app/target/release/gguf-switchboard
 
 # ─── Stage 2: Runtime ─────────────────────────────────────────────────────────
 FROM debian:bookworm-slim
@@ -17,17 +17,17 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 
 RUN useradd --create-home --shell /bin/bash appuser && \
-    mkdir -p /var/lib/openai-runtime && \
-    chown appuser:appuser /var/lib/openai-runtime
+    mkdir -p /var/lib/gguf-switchboard && \
+    chown appuser:appuser /var/lib/gguf-switchboard
 USER appuser
 WORKDIR /home/appuser
 
-COPY --from=builder /app/target/release/openai-runtime /usr/local/bin/openai-runtime
+COPY --from=builder /app/target/release/gguf-switchboard /usr/local/bin/gguf-switchboard
 
 # Default config location (mount your own at runtime)
 COPY --chown=appuser:appuser config.toml /home/appuser/config.toml
 
 EXPOSE 9090
 
-ENTRYPOINT ["openai-runtime"]
+ENTRYPOINT ["gguf-switchboard"]
 CMD ["config.toml"]

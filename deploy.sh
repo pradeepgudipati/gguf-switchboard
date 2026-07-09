@@ -4,8 +4,8 @@ set -euo pipefail
 REPO_URL="https://github.com/pradeepgudipati/gguf-switchboard.git"
 REPO_DIR="${GGUF_SWITCHBOARD_DIR:-$HOME/gguf-switchboard}"
 BRANCH="Dev"
-SERVICE_FILE="/etc/systemd/system/openai-runtime.service"
-CONFIG_FILE="/etc/openai-runtime/config.toml"
+SERVICE_FILE="/etc/systemd/system/gguf-switchboard.service"
+CONFIG_FILE="/etc/gguf-switchboard/config.toml"
 
 read_config() {
     if [[ -r "$1" ]]; then
@@ -71,7 +71,7 @@ print_models_from_status() {
 }
 
 in_repo() {
-    [[ -f "$1/Cargo.toml" ]] && grep -q 'name = "openai-runtime"' "$1/Cargo.toml" 2>/dev/null
+    [[ -f "$1/Cargo.toml" ]] && grep -q 'name = "gguf-switchboard"' "$1/Cargo.toml" 2>/dev/null
 }
 
 ensure_repo() {
@@ -128,8 +128,8 @@ cargo clean -p utoipa-swagger-ui 2>/dev/null || true
 cargo build --release
 
 echo "==> Ensuring runtime directories..."
-sudo mkdir -p /etc/openai-runtime /var/lib/openai-runtime
-sudo chown "$(whoami)":"$(whoami)" /var/lib/openai-runtime
+sudo mkdir -p /etc/gguf-switchboard /var/lib/gguf-switchboard
+sudo chown "$(whoami)":"$(whoami)" /var/lib/gguf-switchboard
 
 CONFIG_CREATED=false
 
@@ -139,13 +139,13 @@ if [[ ! -f "$SERVICE_FILE" ]]; then
 
     sudo tee "$SERVICE_FILE" > /dev/null <<EOF
 [Unit]
-Description=OpenAI Runtime - Local LLM Inference Server
+Description=GGUF Switchboard - Local LLM Inference Server
 After=network.target
 
 [Service]
 Type=simple
 User=$(whoami)
-ExecStart=/usr/local/bin/openai-runtime $CONFIG_FILE
+ExecStart=/usr/local/bin/gguf-switchboard $CONFIG_FILE
 Restart=on-failure
 RestartSec=5
 Environment=RUST_LOG=info
@@ -155,7 +155,7 @@ WantedBy=multi-user.target
 EOF
 
     sudo systemctl daemon-reload
-    sudo systemctl enable openai-runtime
+    sudo systemctl enable gguf-switchboard
     echo "==> Service created and enabled."
 fi
 
@@ -168,13 +168,13 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
 fi
 
 echo "==> Stopping service..."
-sudo systemctl stop openai-runtime || true
+sudo systemctl stop gguf-switchboard || true
 
 echo "==> Installing binary..."
-sudo cp target/release/openai-runtime /usr/local/bin/
+sudo cp target/release/gguf-switchboard /usr/local/bin/
 
 echo "==> Starting service..."
-sudo systemctl start openai-runtime
+sudo systemctl start gguf-switchboard
 
 # Resolve bind address from config (default 0.0.0.0:9090)
 BIND_ADDR="$(read_config "$CONFIG_FILE" | grep -E '^bind\s*=' | head -1 | sed -E 's/^bind\s*=\s*"([^"]+)".*/\1/' || true)"
@@ -203,7 +203,7 @@ for i in {1..15}; do
         fi
         if [[ "$CONFIG_CREATED" == "true" ]]; then
             echo "==> Next step: edit $CONFIG_FILE with your llama-server path and GGUF model files,"
-            echo "    then restart: sudo systemctl restart openai-runtime"
+            echo "    then restart: sudo systemctl restart gguf-switchboard"
         fi
         exit 0
     fi
@@ -211,5 +211,5 @@ for i in {1..15}; do
 done
 
 echo "==> FAILED: service did not become healthy in 15s"
-journalctl -u openai-runtime --no-pager -n 10
+journalctl -u gguf-switchboard --no-pager -n 10
 exit 1

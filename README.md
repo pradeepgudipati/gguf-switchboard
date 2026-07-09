@@ -111,22 +111,22 @@ Grab the latest binary from [GitHub Releases](https://github.com/pradeepgudipati
 
 ```bash
 # Linux x86_64
-curl -fsSL https://github.com/pradeepgudipati/gguf-switchboard/releases/latest/download/openai-runtime-linux-amd64 \
-  -o openai-runtime && chmod +x openai-runtime
+curl -fsSL https://github.com/pradeepgudipati/gguf-switchboard/releases/latest/download/gguf-switchboard-linux-amd64 \
+  -o gguf-switchboard && chmod +x gguf-switchboard
 
 # Linux ARM64
-curl -fsSL https://github.com/pradeepgudipati/gguf-switchboard/releases/latest/download/openai-runtime-linux-arm64 \
-  -o openai-runtime && chmod +x openai-runtime
+curl -fsSL https://github.com/pradeepgudipati/gguf-switchboard/releases/latest/download/gguf-switchboard-linux-arm64 \
+  -o gguf-switchboard && chmod +x gguf-switchboard
 
 # macOS Apple Silicon
-curl -fsSL https://github.com/pradeepgudipati/gguf-switchboard/releases/latest/download/openai-runtime-darwin-arm64 \
-  -o openai-runtime && chmod +x openai-runtime
+curl -fsSL https://github.com/pradeepgudipati/gguf-switchboard/releases/latest/download/gguf-switchboard-darwin-arm64 \
+  -o gguf-switchboard && chmod +x gguf-switchboard
 ```
 
 Copy `config.toml` from this repo, point it at your `llama-server` binary and GGUF model paths, then run:
 
 ```bash
-./openai-runtime config.toml
+./gguf-switchboard config.toml
 ```
 
 Explore the API at **http://localhost:9090/swagger-ui/**.
@@ -139,11 +139,11 @@ If you want the runtime to start on boot and restart on failure, `deploy.sh` han
 ./deploy.sh
 ```
 
-The script installs build dependencies and Rust (if needed), builds the release binary, creates `/etc/openai-runtime/config.toml` from the template if missing, installs the systemd service, and starts the server on `0.0.0.0:9090`.
+The script installs build dependencies and Rust (if needed), builds the release binary, creates `/etc/gguf-switchboard/config.toml` from the template if missing, installs the systemd service, and starts the server on `0.0.0.0:9090`.
 
 On completion it prints a table of **available models** (ID, display name, priority/loaded state) plus links to Swagger UI and health endpoints.
 
-**Post-install:** Edit `/etc/openai-runtime/config.toml` to point at your `llama-server` binary and GGUF model paths, then re-run:
+**Post-install:** Edit `/etc/gguf-switchboard/config.toml` to point at your `llama-server` binary and GGUF model paths, then re-run:
 
 ```bash
 ./deploy.sh
@@ -152,7 +152,7 @@ On completion it prints a table of **available models** (ID, display name, prior
 Or restart only:
 
 ```bash
-sudo systemctl restart openai-runtime
+sudo systemctl restart gguf-switchboard
 ```
 
 ### Fresh machine (no clone yet)
@@ -275,7 +275,7 @@ This is the effective context limit for clients (Cursor, Cline, Continue, etc.) 
 **After changing `-c`**, restart the runtime (or trigger a model reload) so `llama-server` picks up the new value:
 
 ```bash
-sudo systemctl restart openai-runtime
+sudo systemctl restart gguf-switchboard
 # or
 ./deploy.sh
 ```
@@ -323,18 +323,18 @@ The native install is recommended because the runtime spawns `llama-server` as a
 ./deploy.sh
 ```
 
-Edit `/etc/openai-runtime/config.toml` to match your `llama-server` path and GGUF models, then re-run `./deploy.sh` or restart:
+Edit `/etc/gguf-switchboard/config.toml` to match your `llama-server` path and GGUF models, then re-run `./deploy.sh` or restart:
 
 ```bash
 ./deploy.sh
 # or
-sudo systemctl restart openai-runtime
+sudo systemctl restart gguf-switchboard
 ```
 
 ```bash
 # Check status
-sudo systemctl status openai-runtime
-sudo journalctl -u openai-runtime -f
+sudo systemctl status gguf-switchboard
+sudo journalctl -u gguf-switchboard -f
 ```
 
 ### How It Works
@@ -600,13 +600,13 @@ In `~/.continue/config.json`:
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `openai_runtime_requests_total` | Counter | Total HTTP requests |
-| `openai_runtime_inference_latency_seconds` | Histogram | End-to-end inference latency |
-| `openai_runtime_model_load_latency_seconds` | Histogram | Model cold-start time |
-| `openai_runtime_active_requests` | Gauge | Current in-flight requests |
-| `openai_runtime_loaded_model` | Gauge | Whether a model is loaded (0/1) |
-| `openai_runtime_backend_healthy` | Gauge | Backend health status (0/1) |
-| `openai_runtime_streaming_requests` | Gauge | Active streaming connections |
+| `gguf_switchboard_requests_total` | Counter | Total HTTP requests |
+| `gguf_switchboard_inference_latency_seconds` | Histogram | End-to-end inference latency |
+| `gguf_switchboard_model_load_latency_seconds` | Histogram | Model cold-start time |
+| `gguf_switchboard_active_requests` | Gauge | Current in-flight requests |
+| `gguf_switchboard_loaded_model` | Gauge | Whether a model is loaded (0/1) |
+| `gguf_switchboard_backend_healthy` | Gauge | Backend health status (0/1) |
+| `gguf_switchboard_streaming_requests` | Gauge | Active streaming connections |
 
 ### Structured Logging
 
@@ -628,7 +628,7 @@ Set `RUST_LOG` to control verbosity:
 ```bash
 RUST_LOG=info          # Default
 RUST_LOG=debug         # Verbose
-RUST_LOG=openai_runtime=debug,tower_http=info  # Per-crate
+RUST_LOG=gguf_switchboard=debug,tower_http=info  # Per-crate
 ```
 
 ## Benchmarks
@@ -669,7 +669,7 @@ time curl -s http://localhost:9090/v1/chat/completions \
 .
 ├── Cargo.toml              # Dependencies and build config
 ├── config.toml             # Example configuration
-├── openai-runtime.service  # Systemd unit file
+├── gguf-switchboard.service  # Systemd unit file
 ├── .github/workflows/
 │   ├── ci.yml              # CI: check, clippy, build, test
 │   └── release.yml         # Multi-platform release builds

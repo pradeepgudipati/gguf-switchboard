@@ -1,5 +1,5 @@
 [package]
-name = "openai-runtime"
+name = "gguf-switchboard"
 version = "0.1.0"
 edition = "2024"
 description = "A 100% OpenAI API compatible local inference runtime"
@@ -10,7 +10,7 @@ keywords = ["openai", "llm", "inference", "runtime", "gguf"]
 categories = ["command-line-utilities", "web-programming::http-server"]
 
 [[bin]]
-name = "openai-runtime"
+name = "gguf-switchboard"
 path = "src/main.rs"
 
 [dependencies]

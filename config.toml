@@ -1,4 +1,4 @@
-# OpenAI Runtime configuration
+# GGUF Switchboard configuration
 # See README.md for full documentation.
 
 # Address to bind the HTTP server
@@ -14,7 +14,7 @@ idle_timeout = 600
 default_backend = "llama.cpp"
 
 # Path to token usage SQLite database (defaults to token_usage.db)
-database_path = "/var/lib/openai-runtime/usage.db"
+database_path = "/var/lib/gguf-switchboard/usage.db"
 
 # ─── Models ───────────────────────────────────────────────────────────────────
 # Each [models.<id>] section defines a model that can be requested via

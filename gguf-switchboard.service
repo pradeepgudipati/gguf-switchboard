@@ -1,20 +1,20 @@
 [Unit]
-Description=OpenAI Runtime — OpenAI-compatible local inference server
+Description=GGUF Switchboard — OpenAI-compatible local inference server
 After=network.target
 Documentation=https://github.com/pradeepgudipati/gguf-switchboard
 
 [Service]
 Type=simple
-User=openai-runtime
-Group=openai-runtime
-ExecStart=/usr/local/bin/openai-runtime /etc/openai-runtime/config.toml
+User=gguf-switchboard
+Group=gguf-switchboard
+ExecStart=/usr/local/bin/gguf-switchboard /etc/gguf-switchboard/config.toml
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
 
 # Environment
 Environment=RUST_LOG=info
-EnvironmentFile=-/etc/openai-runtime/env
+EnvironmentFile=-/etc/gguf-switchboard/env
 
 # Hardening
 NoNewPrivileges=yes
