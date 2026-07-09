@@ -2,7 +2,7 @@
 # Deploy gguf-switchboard as a systemd service.
 #
 # Environment:
-#   MODELS_DIR   Directory containing .gguf files (overrides auto-detection)
+#   MODELS_DIR   Directory containing .gguf files (default: ~/models when present)
 #
 # Flags:
 #   --refresh-models   Regenerate /etc/gguf-switchboard/models.toml from disk
@@ -15,6 +15,7 @@ BRANCH="Dev"
 SERVICE_FILE="/etc/systemd/system/gguf-switchboard.service"
 CONFIG_FILE="/etc/gguf-switchboard/config.toml"
 MODELS_FILE="/etc/gguf-switchboard/models.toml"
+DEFAULT_MODELS_DIR="$HOME/models"
 
 read_config() {
     if [[ -r "$1" ]]; then
@@ -133,7 +134,7 @@ scan_common_models_dirs() {
     local configured="${1:-}"
     local -a found=()
     local candidate count
-    for candidate in /models "$HOME/.lmstudio/models" "$HOME/models" "/var/lib/gguf-switchboard/models"; do
+    for candidate in "$DEFAULT_MODELS_DIR" /models "$HOME/.lmstudio/models" "/var/lib/gguf-switchboard/models"; do
         count="$(count_gguf_files "$candidate")"
         if [[ "$count" -gt 0 ]]; then
             found+=("$candidate")
@@ -164,6 +165,11 @@ scan_common_models_dirs() {
 detect_models_dir() {
     if [[ -n "${MODELS_DIR:-}" ]]; then
         echo "$MODELS_DIR"
+        return 0
+    fi
+
+    if [[ -d "$DEFAULT_MODELS_DIR" ]]; then
+        echo "$DEFAULT_MODELS_DIR"
         return 0
     fi
 
@@ -229,7 +235,35 @@ print_models_dir_hints() {
     fi
 
     echo "    To regenerate models.toml from disk:"
-    echo "    MODELS_DIR=$refresh_dirs ./deploy.sh --refresh-models"
+    if [[ -d "$DEFAULT_MODELS_DIR" ]]; then
+        echo "    ./deploy.sh --refresh-models"
+    else
+        echo "    MODELS_DIR=$refresh_dirs ./deploy.sh --refresh-models"
+    fi
+}
+
+ensure_config_toml() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo "==> Copying default config to $CONFIG_FILE..."
+        sudo cp config.toml "$CONFIG_FILE"
+        CONFIG_CREATED=true
+        return
+    fi
+
+    if grep -qE '^models_file\s*=' "$CONFIG_FILE" 2>/dev/null; then
+        return
+    fi
+
+    echo "==> Upgrading $CONFIG_FILE to use models_file (replacing legacy inline model definitions)..."
+    sudo cp config.toml "$CONFIG_FILE"
+}
+
+stop_port_conflicts() {
+    if systemctl is-active --quiet openai-runtime 2>/dev/null; then
+        echo "==> Stopping openai-runtime (port 9090 conflict with gguf-switchboard)..."
+        sudo systemctl stop openai-runtime || true
+        sudo systemctl disable openai-runtime 2>/dev/null || true
+    fi
 }
 
 generate_models_toml() {
@@ -354,7 +388,7 @@ Options:
   --refresh-models   Regenerate /etc/gguf-switchboard/models.toml from GGUF files on disk
 
 Environment:
-  MODELS_DIR         Directory containing .gguf files (overrides auto-detection)
+  MODELS_DIR         Directory containing .gguf files (default: ~/models when present)
   GGUF_SWITCHBOARD_DIR  Repo checkout path (default: ~/gguf-switchboard)
 EOF
             exit 0
@@ -431,14 +465,12 @@ EOF
     echo "==> Service created and enabled."
 fi
 
-# Copy default config if missing
-if [[ ! -f "$CONFIG_FILE" ]]; then
-    echo "==> Copying default config to $CONFIG_FILE..."
-    sudo cp config.toml "$CONFIG_FILE"
-    CONFIG_CREATED=true
-fi
+# Copy or upgrade config to the current models_file-based format
+ensure_config_toml
 
 generate_models_toml "$REFRESH_MODELS"
+
+stop_port_conflicts
 
 echo "==> Stopping service..."
 sudo systemctl stop gguf-switchboard || true
@@ -455,7 +487,7 @@ BIND_ADDR="${BIND_ADDR:-0.0.0.0:9090}"
 BASE_URL="http://${BIND_ADDR/0.0.0.0/localhost}"
 
 echo "==> Waiting for health check..."
-for i in {1..15}; do
+for i in {1..30}; do
     sleep 1
     if curl -sf "${BASE_URL}/health" > /dev/null 2>&1; then
         echo ""
@@ -475,8 +507,8 @@ for i in {1..15}; do
             print_models_from_config "$CONFIG_FILE"
         fi
         if [[ "$CONFIG_CREATED" == "true" ]]; then
-            echo "==> Next step: place GGUF files in models_dir (default /models),"
-            echo "    set models_dir in $MODELS_FILE if needed, then re-run:"
+            echo "==> Next step: place GGUF files in ~/models (or set MODELS_DIR),"
+            echo "    then re-run:"
             echo "    MODELS_DIR=/path/to/models ./deploy.sh --refresh-models"
             echo "    Or edit $CONFIG_FILE / $MODELS_FILE manually and restart:"
             echo "    sudo systemctl restart gguf-switchboard"
@@ -486,9 +518,9 @@ for i in {1..15}; do
         fi
         exit 0
     fi
-    echo "    waiting... ($i/15)"
+    echo "    waiting... ($i/30)"
 done
 
-echo "==> FAILED: service did not become healthy in 15s"
+echo "==> FAILED: service did not become healthy in 30s"
 journalctl -u gguf-switchboard --no-pager -n 10
 exit 1

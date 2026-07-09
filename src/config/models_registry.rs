@@ -323,7 +323,8 @@ fn is_llama_cpp_loadable_gguf(path: &Path) -> bool {
     }
 }
 
-/// Resolve every directory listed in `models_dir` (comma-separated). No fallbacks.
+/// Resolve every directory listed in `models_dir` (comma-separated).
+/// Missing directories are skipped with a warning.
 pub fn resolve_models_dirs(configured: &str) -> Result<Vec<PathBuf>, RuntimeError> {
     let dirs = parse_models_dirs(configured);
     if dirs.is_empty() {
@@ -332,21 +333,93 @@ pub fn resolve_models_dirs(configured: &str) -> Result<Vec<PathBuf>, RuntimeErro
         ));
     }
 
+    let mut resolved = Vec::new();
     let mut missing = Vec::new();
-    for dir in &dirs {
-        if !dir.is_dir() {
+    for dir in dirs {
+        if dir.is_dir() {
+            resolved.push(dir);
+        } else {
             missing.push(dir.display().to_string());
         }
     }
 
-    if !missing.is_empty() {
+    for path in &missing {
+        tracing::warn!(
+            configured = %configured,
+            missing = %path,
+            "Skipping models_dir entry because the directory does not exist"
+        );
+    }
+
+    if resolved.is_empty() {
         return Err(RuntimeError::ConfigError(format!(
             "Models directory does not exist: {}",
             missing.join(", ")
         )));
     }
 
-    Ok(dirs)
+    Ok(resolved)
+}
+
+fn is_embedding_like_alias(alias: &str) -> bool {
+    let lower = alias.to_ascii_lowercase();
+    lower.contains("embed") || lower.contains("granite-embedding")
+}
+
+fn priority_preference_score(alias: &str) -> u8 {
+    if is_embedding_like_alias(alias) {
+        return 0;
+    }
+    let lower = alias.to_ascii_lowercase();
+    if lower.contains("gemma-4-e4b") {
+        return 10;
+    }
+    if lower.contains("gemma") || lower.contains("qwen") || lower.contains("llama") {
+        return 5;
+    }
+    1
+}
+
+fn default_priority_index(models: &[RegistryEntry]) -> Option<usize> {
+    models
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| priority_preference_score(&entry.alias) > 0)
+        .max_by_key(|(_, entry)| priority_preference_score(&entry.alias))
+        .map(|(index, _)| index)
+}
+
+fn assign_default_priority(
+    registry: &mut ModelsRegistry,
+    models_dirs: &[PathBuf],
+    merge_from: Option<&ModelsRegistry>,
+) {
+    if registry.models.iter().any(|entry| entry.priority) {
+        return;
+    }
+
+    if let Some(existing) = merge_from
+        && let Some(prev_priority) = existing.models.iter().find(|entry| entry.priority)
+    {
+        let prev_key = normalize_file_key(models_dirs, &prev_priority.file);
+        if let Some(entry) = registry
+            .models
+            .iter_mut()
+            .find(|entry| normalize_file_key(models_dirs, &entry.file) == prev_key)
+        {
+            entry.priority = true;
+            return;
+        }
+    }
+
+    if let Some(index) = default_priority_index(&registry.models) {
+        registry.models[index].priority = true;
+        return;
+    }
+
+    if let Some(entry) = registry.models.first_mut() {
+        entry.priority = true;
+    }
 }
 
 fn resolve_model_path(models_dirs: &[PathBuf], file: &str) -> Result<String, RuntimeError> {
@@ -442,10 +515,11 @@ impl ModelsRegistry {
         };
 
         let mut registry = ModelsRegistry {
-            defaults: RegistryDefaults {
-                models_dir: dirs.trim().to_string(),
-                llama_server,
-                ..base_defaults
+            defaults: {
+                let mut defaults = base_defaults;
+                defaults.models_dir = dirs.trim().to_string();
+                defaults.llama_server = llama_server;
+                defaults
             },
             auto_discover: merge_from.map(|e| e.auto_discover).unwrap_or(true),
             models: Vec::new(),
@@ -504,9 +578,7 @@ impl ModelsRegistry {
             });
         }
 
-        if !registry.models.iter().any(|entry| entry.priority) {
-            registry.models[0].priority = true;
-        }
+        assign_default_priority(&mut registry, &models_dirs, merge_from);
 
         Ok(registry)
     }
@@ -1032,6 +1104,20 @@ mod tests {
         assert!(models.contains_key("meta-llama-3.1-8b"));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn resolve_models_dirs_skips_missing_entries() {
+        let home = std::env::temp_dir().join("gguf-switchboard-partial-models-dir");
+        let existing = home.join("exists");
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(&existing).unwrap();
+
+        let configured = format!("/missing-models-dir,{}", existing.display());
+        let resolved = resolve_models_dirs(&configured).unwrap();
+        assert_eq!(resolved, vec![existing]);
+
+        std::fs::remove_dir_all(&home).ok();
     }
 
     #[test]
