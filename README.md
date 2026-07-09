@@ -665,7 +665,25 @@ time curl -s http://localhost:9090/v1/chat/completions \
 
 ### vs llama-swap
 
-Both gguf-switchboard and [llama-swap](https://github.com/mostlygeek/llama-swap) are thin proxies in front of `llama-server` — neither one runs inference itself, so token-generation speed is identical between them by construction. The only thing worth measuring is the proxy layer: request overhead, model-swap latency, memory footprint, and behavior under concurrent load. That's where Rust (no GC, no runtime scheduler) vs Go (concurrent GC, goroutine scheduler) could plausibly show a difference — most likely in idle/under-load memory footprint and tail latency (p95/p99) under concurrency, less likely in average-case latency, since both are I/O-bound waiting on the same `llama-server` child process either way.
+[llama-swap](https://github.com/mostlygeek/llama-swap) (Go) is the closest comparable project — a single-binary proxy that swaps `llama-server` processes on demand. gguf-switchboard (Rust) solves the same core problem but the two have diverged on feature scope:
+
+| Feature | llama-swap | gguf-switchboard |
+|---|---|---|
+| Backends supported | Any OpenAI-compatible server (llama.cpp, vllm, tabbyAPI, stable-diffusion.cpp, ...) | llama.cpp only |
+| Concurrent models | Yes — custom "swap matrix" DSL / groups run multiple models at once | No — one model loaded at a time |
+| GPU VRAM-pressure eviction | No — unload is TTL-based only | Yes — monitors VRAM and evicts proactively before OOM |
+| Context-size OOM fallback | No | Yes — auto-retries a failed load at a lower `-c` |
+| Persistent usage tracking | Live dashboard metrics (not a queryable history API) | Yes — `/v1/usage` backed by SQLite, queryable per-model |
+| Web dashboard | Yes — playground, live token metrics, request/response inspection, live log streaming | No — Swagger UI only (API docs, not a monitoring dashboard) |
+| API key / auth | Yes — `apiKeys` config restricts endpoint access | No — no auth on any endpoint |
+| Model aliasing | Yes — `aliases` map friendly names to real model ids | No |
+| Request filtering | Yes — `filters`/`stripParams`/`setParams` rewrite requests per model | No |
+| Startup preload | Yes — explicit `hooks` | Only incidental, via the idle-timeout priority-model watcher (~30s after boot, not deterministic) |
+| Custom stop command | Yes — `cmdStop` (e.g. graceful Docker/Podman stop) | No |
+| Other API surfaces | Anthropic `/messages`, image gen (SDAPI), reranking, infilling | OpenAI-only: chat, completions, embeddings, responses, audio |
+| Remote CLI log streaming | Yes | No — stdout JSON logs only |
+
+Both are thin proxies in front of `llama-server` — neither one runs inference itself, so token-generation speed is identical between them by construction. The only thing worth measuring is the proxy layer: request overhead, model-swap latency, memory footprint, and behavior under concurrent load. That's where Rust (no GC, no runtime scheduler) vs Go (concurrent GC, goroutine scheduler) could plausibly show a difference — most likely in idle/under-load memory footprint and tail latency (p95/p99) under concurrency, less likely in average-case latency, since both are I/O-bound waiting on the same `llama-server` child process either way.
 
 [`scripts/bench-vs-llama-swap.sh`](scripts/bench-vs-llama-swap.sh) runs both tools back-to-back against the same `llama-server` binary and the same model(s), and reports:
 

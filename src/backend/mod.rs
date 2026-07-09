@@ -52,7 +52,7 @@ pub trait Backend: Send + Sync {
         request: EmbeddingRequest,
     ) -> Result<EmbeddingResponse, RuntimeError>;
     /// The model id this backend serves.
-    fn name(&self) -> &str;
+    fn _name(&self) -> &str;
     /// The engine type (e.g. "llama.cpp").
     fn _backend_type(&self) -> &str;
     /// The base URL for the backend's OpenAI-compatible API.
