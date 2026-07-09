@@ -105,6 +105,13 @@ echo "==> Checking out $BRANCH..."
 git fetch origin "$BRANCH" 2>/dev/null || true
 git checkout "$BRANCH" 2>/dev/null || git checkout -B "$BRANCH" "origin/$BRANCH"
 
+if [[ -n "$(git status --porcelain)" ]]; then
+    STASH_LABEL="deploy-auto-stash-$(date +%Y%m%d-%H%M%S)"
+    echo "==> Local changes detected; stashing as '$STASH_LABEL'..."
+    git stash push --include-untracked --message "$STASH_LABEL" >/dev/null
+    echo "==> Stashed local changes. (Use 'git stash list' to review.)"
+fi
+
 echo "==> Pulling latest changes..."
 git pull origin "$BRANCH"
 
