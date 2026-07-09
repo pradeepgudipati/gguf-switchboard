@@ -58,6 +58,7 @@ pub async fn responses(
 
     let start = std::time::Instant::now();
     let backend = state.scheduler.ensure_loaded(&request.model).await?;
+    let model_id = request.model.clone();
 
     // Convert Responses API input to Chat Completion messages
     let mut messages = Vec::new();
@@ -132,6 +133,7 @@ pub async fn responses(
         // finishes, not when the handler returns.
         let active_guard = ActiveGuard;
 
+        let model_for_stream = model_id.clone();
         let mapped = stream.map(move |chunk| match chunk {
             Ok(c) => {
                 let text = c
@@ -157,7 +159,7 @@ pub async fn responses(
                     "id": response_id,
                     "object": "response",
                     "created_at": c.created,
-                    "model": c.model,
+                    "model": model_for_stream.clone(),
                     "output": output,
                     "status": status,
                 });
@@ -210,7 +212,7 @@ pub async fn responses(
             id: response_id,
             object: "response".to_string(),
             created_at: Utc::now().timestamp(),
-            model: chat_response.model,
+            model: model_id,
             output: vec![ResponseOutput {
                 r#type: "message".to_string(),
                 id: format!("msg_{}", Uuid::new_v4().simple()),

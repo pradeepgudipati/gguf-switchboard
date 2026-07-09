@@ -46,11 +46,13 @@ pub async fn embeddings(
 
     let start = std::time::Instant::now();
     let backend = state.scheduler.ensure_loaded(&request.model).await?;
-    let response = backend.embeddings(request).await?;
+    let model_id = request.model.clone();
+    let mut response = backend.embeddings(request).await?;
+    response.model = model_id.clone();
 
     // Record token usage
     let _ = state.token_db.record(
-        &response.model,
+        &model_id,
         "/v1/embeddings",
         response.usage.prompt_tokens,
         0,
