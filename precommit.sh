@@ -4,6 +4,19 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
+if ! command -v cargo >/dev/null 2>&1; then
+    # Git hooks can run in a non-login shell with a minimal PATH.
+    if [[ -f "$HOME/.cargo/env" ]]; then
+        # shellcheck source=/dev/null
+        source "$HOME/.cargo/env"
+    fi
+fi
+
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "cargo: command not found. Install Rust/Cargo or add it to PATH." >&2
+    exit 127
+fi
+
 echo "→ cargo fmt --check"
 cargo fmt --all -- --check
 
