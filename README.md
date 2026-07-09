@@ -73,7 +73,7 @@ This project does one job well: **local GPU scheduling and model lifecycle**.
 
 | Layer | Responsibility |
 |-------|----------------|
-| **[OmniRoute](https://github.com/pradeepgudipati/omniroute)** | Provider routing, fallbacks, retries across cloud and local endpoints |
+| **[OmniRoute](https://github.com/diegosouzapw/OmniRoute)** / **[LiteLLM](https://www.litellm.ai/)** | Provider routing, fallbacks, retries across cloud and local endpoints |
 | **gguf-switchboard** (this project) | Local GPU scheduling, process lifecycle, model loading/unloading |
 | **Client tools** (Cursor, Cline, Codex, Open WebUI, etc.) | Talk to gguf-switchboard as a normal OpenAI server — no special integration needed |
 
@@ -662,6 +662,26 @@ time curl -s http://localhost:9090/v1/chat/completions \
     -d '{"model":"local-qwen-coder","messages":[{"role":"user","content":"Hi"}],"max_tokens":10}' \
     > /dev/null
 ```
+
+### vs llama-swap
+
+Both gguf-switchboard and [llama-swap](https://github.com/mostlygeek/llama-swap) are thin proxies in front of `llama-server` — neither one runs inference itself, so token-generation speed is identical between them by construction. The only thing worth measuring is the proxy layer: request overhead, model-swap latency, memory footprint, and behavior under concurrent load. That's where Rust (no GC, no runtime scheduler) vs Go (concurrent GC, goroutine scheduler) could plausibly show a difference — most likely in idle/under-load memory footprint and tail latency (p95/p99) under concurrency, less likely in average-case latency, since both are I/O-bound waiting on the same `llama-server` child process either way.
+
+[`scripts/bench-vs-llama-swap.sh`](scripts/bench-vs-llama-swap.sh) runs both tools back-to-back against the same `llama-server` binary and the same model(s), and reports:
+
+- Request latency (avg/p50/p95/p99) on a warm model
+- Model-swap latency (A→B→A round trips)
+- Proxy process RSS, idle and under load
+- Throughput under concurrent load (via [`hey`](https://github.com/rakyll/hey) if installed)
+
+```bash
+LLAMA_SERVER_BIN=/usr/local/bin/llama-server \
+MODEL_A_PATH=/models/model-a.gguf \
+MODEL_B_PATH=/models/model-b.gguf \
+./scripts/bench-vs-llama-swap.sh
+```
+
+It builds `gguf-switchboard` if needed and downloads a `llama-swap` release binary automatically if one isn't found. Results land in `.bench/results-<timestamp>/report.md`. No numbers are published here — they depend entirely on your GPU, CPU, and models, so run it on your own hardware.
 
 ## Project Structure
 
