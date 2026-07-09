@@ -1,4 +1,4 @@
-# OpenAI Runtime
+# gguf-switchboard
 
 ![gguf-switchboard demo](gguf-switchboard-demo.gif)
 
@@ -18,6 +18,7 @@ Several tools address parts of this problem. None combine OpenAI compatibility, 
 |------|:----------:|:-------------------:|:----------------:|:------------:|--------------|
 | **Ollama** | Yes | Yes | Partial — keeps models resident | Yes | Close, but limited GPU scheduling control |
 | **llama.cpp** (`llama-server`) | Yes | Manual — one process per model | No — you manage start/stop | Yes | Low-level; you own process and port management |
+| **llama-swap** | Yes | Yes | Yes — swaps on request; not VRAM-pressure aware | Yes | Single-binary, easy install; no idle timeout, VRAM monitoring, or usage tracking |
 | **vLLM** | Yes | Yes | Yes — multi-model on large GPUs | No (HuggingFace weights) | Excellent for datacenter GPUs, not GGUF workflows |
 | **LocalAI** | Yes | Yes | Partial — not VRAM-pressure aware | Yes | Closest alternative, but not designed for eviction under memory pressure |
 | **Open WebUI** | Yes (proxy) | Via backend | Depends on backend | Via backend | UI layer — not a model scheduler |
@@ -26,8 +27,9 @@ Several tools address parts of this problem. None combine OpenAI compatibility, 
 
 ### Why existing tools fall short
 
+- **llama-swap** is the closest single-binary alternative — download, configure, run, done. It swaps llama-server processes on request. What it lacks: no VRAM pressure monitoring, no context-size fallback on OOM, no idle timeout / priority model, no usage tracking.
 - **Ollama** gets close — drop-in model names, OpenAI-compatible API, GGUF support — but you have limited control over GPU scheduling. Models tend to stay resident; switching under VRAM pressure is opaque.
-- **LocalAI** is the closest full-stack alternative, supporting many backends and formats. It is not designed for proactive eviction when GPU memory is under pressure; you still manage capacity yourself.
+- **LocalAI** is a full-stack alternative supporting many backends and formats. It is not designed for proactive eviction when GPU memory is under pressure; you still manage capacity yourself.
 - **LiteLLM** is an excellent API gateway for routing, fallbacks, and retries across cloud and local providers. It does not spawn backends, load GGUF weights, or manage GPU memory — that is not its job.
 
 The gap: a tool that treats **model loading as a scheduling problem** on constrained local GPU hardware, not just an API compatibility layer.
@@ -51,7 +53,7 @@ The result: one endpoint, many models, zero manual process management.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                       OpenAI Runtime                         │
+│                      gguf-switchboard                        │
 │                                                              │
 │  /v1/chat/completions  ─┐                                    │
 │  /v1/completions       ─┤                                    │
@@ -71,7 +73,7 @@ This project does one job well: **local GPU scheduling and model lifecycle**.
 
 | Layer | Responsibility |
 |-------|----------------|
-| **[OmniRoute](https://github.com/pradeepgudipati/omniroute)** | Provider routing, fallbacks, retries across cloud and local endpoints |
+| **[OmniRoute](https://github.com/diegosouzapw/OmniRoute)** / **[LiteLLM](https://www.litellm.ai/)** | Provider routing, fallbacks, retries across cloud and local endpoints |
 | **gguf-switchboard** (this project) | Local GPU scheduling, process lifecycle, model loading/unloading |
 | **Client tools** (Cursor, Cline, Codex, Open WebUI, etc.) | Talk to gguf-switchboard as a normal OpenAI server — no special integration needed |
 
@@ -103,17 +105,45 @@ Point your IDE or agent at `http://localhost:9090/v1`, set a model name from you
 
 ## Quick Start
 
-### Install & run
+### Download a prebuilt binary
+
+Grab the latest binary from [GitHub Releases](https://github.com/pradeepgudipati/gguf-switchboard/releases/latest) — no Rust toolchain required:
+
+```bash
+# Linux x86_64
+curl -fsSL https://github.com/pradeepgudipati/gguf-switchboard/releases/latest/download/gguf-switchboard-linux-amd64 \
+  -o gguf-switchboard && chmod +x gguf-switchboard
+
+# Linux ARM64
+curl -fsSL https://github.com/pradeepgudipati/gguf-switchboard/releases/latest/download/gguf-switchboard-linux-arm64 \
+  -o gguf-switchboard && chmod +x gguf-switchboard
+
+# macOS Apple Silicon
+curl -fsSL https://github.com/pradeepgudipati/gguf-switchboard/releases/latest/download/gguf-switchboard-darwin-arm64 \
+  -o gguf-switchboard && chmod +x gguf-switchboard
+```
+
+Copy `config.toml` from this repo, point it at your `llama-server` binary and GGUF model paths, then run:
+
+```bash
+./gguf-switchboard config.toml
+```
+
+Explore the API at **http://localhost:9090/swagger-ui/**.
+
+### Install as a systemd service
+
+If you want the runtime to start on boot and restart on failure, `deploy.sh` handles everything:
 
 ```bash
 ./deploy.sh
 ```
 
-The script clones (if needed), checks out `Dev`, installs build dependencies and Rust, builds the release binary, creates `/etc/openai-runtime/config.toml` from the template if missing, installs the systemd service, and starts the server on `0.0.0.0:9090`.
+The script installs build dependencies and Rust (if needed), builds the release binary, creates `/etc/gguf-switchboard/config.toml` from the template if missing, installs the systemd service, and starts the server on `0.0.0.0:9090`.
 
 On completion it prints a table of **available models** (ID, display name, priority/loaded state) plus links to Swagger UI and health endpoints.
 
-**Post-install:** Edit `/etc/openai-runtime/config.toml` to point at your `llama-server` binary and GGUF model paths, then re-run:
+**Post-install:** Edit `/etc/gguf-switchboard/config.toml` to point at your `llama-server` binary and GGUF model paths, then re-run:
 
 ```bash
 ./deploy.sh
@@ -122,10 +152,8 @@ On completion it prints a table of **available models** (ID, display name, prior
 Or restart only:
 
 ```bash
-sudo systemctl restart openai-runtime
+sudo systemctl restart gguf-switchboard
 ```
-
-Explore the API at **http://localhost:9090/swagger-ui/** (Swagger UI).
 
 ### Fresh machine (no clone yet)
 
@@ -247,7 +275,7 @@ This is the effective context limit for clients (Cursor, Cline, Continue, etc.) 
 **After changing `-c`**, restart the runtime (or trigger a model reload) so `llama-server` picks up the new value:
 
 ```bash
-sudo systemctl restart openai-runtime
+sudo systemctl restart gguf-switchboard
 # or
 ./deploy.sh
 ```
@@ -295,18 +323,18 @@ The native install is recommended because the runtime spawns `llama-server` as a
 ./deploy.sh
 ```
 
-Edit `/etc/openai-runtime/config.toml` to match your `llama-server` path and GGUF models, then re-run `./deploy.sh` or restart:
+Edit `/etc/gguf-switchboard/config.toml` to match your `llama-server` path and GGUF models, then re-run `./deploy.sh` or restart:
 
 ```bash
 ./deploy.sh
 # or
-sudo systemctl restart openai-runtime
+sudo systemctl restart gguf-switchboard
 ```
 
 ```bash
 # Check status
-sudo systemctl status openai-runtime
-sudo journalctl -u openai-runtime -f
+sudo systemctl status gguf-switchboard
+sudo journalctl -u gguf-switchboard -f
 ```
 
 ### How It Works
@@ -316,7 +344,7 @@ Client Request
      │
      ▼
 ┌──────────────────────────────────────────────────┐
-│              OpenAI Runtime (:9090)               │
+│             gguf-switchboard (:9090)              │
 │                                                   │
 │  1. Request arrives for model "X"                 │
 │  2. If model "Y" loaded → SIGTERM "Y"             │
@@ -432,15 +460,17 @@ curl http://localhost:9090/v1/responses \
 
 ### API Explorer (Swagger UI)
 
-After `./deploy.sh` completes, open the interactive API docs in your browser:
+After starting the runtime, open the interactive API docs in your browser:
 
 - **Swagger UI:** http://localhost:9090/swagger-ui/
 - **OpenAPI spec:** http://localhost:9090/api-docs/openapi.json
 - **Root redirect:** http://localhost:9090/ → Swagger UI
 
+![Swagger UI with model dropdown](docs/swagger-ui.png)
+
 All endpoints are listed and testable from the Swagger UI — health, models, chat completions, embeddings, usage, and more.
 
-A **Model** dropdown appears in the top bar (like the Authorize token). The selected model is persisted in the browser and applied automatically to every API request that accepts a `model` field — chat, completions, embeddings, responses, audio, usage filters, and model lookups.
+A **Model** dropdown appears in the top bar (like the Authorize button). The selected model is persisted in the browser and applied automatically to every API request that accepts a `model` field — chat, completions, embeddings, responses, audio, usage filters, and model lookups.
 
 ### Health & Status
 
@@ -570,13 +600,13 @@ In `~/.continue/config.json`:
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `openai_runtime_requests_total` | Counter | Total HTTP requests |
-| `openai_runtime_inference_latency_seconds` | Histogram | End-to-end inference latency |
-| `openai_runtime_model_load_latency_seconds` | Histogram | Model cold-start time |
-| `openai_runtime_active_requests` | Gauge | Current in-flight requests |
-| `openai_runtime_loaded_model` | Gauge | Whether a model is loaded (0/1) |
-| `openai_runtime_backend_healthy` | Gauge | Backend health status (0/1) |
-| `openai_runtime_streaming_requests` | Gauge | Active streaming connections |
+| `gguf_switchboard_requests_total` | Counter | Total HTTP requests |
+| `gguf_switchboard_inference_latency_seconds` | Histogram | End-to-end inference latency |
+| `gguf_switchboard_model_load_latency_seconds` | Histogram | Model cold-start time |
+| `gguf_switchboard_active_requests` | Gauge | Current in-flight requests |
+| `gguf_switchboard_loaded_model` | Gauge | Whether a model is loaded (0/1) |
+| `gguf_switchboard_backend_healthy` | Gauge | Backend health status (0/1) |
+| `gguf_switchboard_streaming_requests` | Gauge | Active streaming connections |
 
 ### Structured Logging
 
@@ -598,7 +628,7 @@ Set `RUST_LOG` to control verbosity:
 ```bash
 RUST_LOG=info          # Default
 RUST_LOG=debug         # Verbose
-RUST_LOG=openai_runtime=debug,tower_http=info  # Per-crate
+RUST_LOG=gguf_switchboard=debug,tower_http=info  # Per-crate
 ```
 
 ## Benchmarks
@@ -633,13 +663,33 @@ time curl -s http://localhost:9090/v1/chat/completions \
     > /dev/null
 ```
 
+### vs llama-swap
+
+Both gguf-switchboard and [llama-swap](https://github.com/mostlygeek/llama-swap) are thin proxies in front of `llama-server` — neither one runs inference itself, so token-generation speed is identical between them by construction. The only thing worth measuring is the proxy layer: request overhead, model-swap latency, memory footprint, and behavior under concurrent load. That's where Rust (no GC, no runtime scheduler) vs Go (concurrent GC, goroutine scheduler) could plausibly show a difference — most likely in idle/under-load memory footprint and tail latency (p95/p99) under concurrency, less likely in average-case latency, since both are I/O-bound waiting on the same `llama-server` child process either way.
+
+[`scripts/bench-vs-llama-swap.sh`](scripts/bench-vs-llama-swap.sh) runs both tools back-to-back against the same `llama-server` binary and the same model(s), and reports:
+
+- Request latency (avg/p50/p95/p99) on a warm model
+- Model-swap latency (A→B→A round trips)
+- Proxy process RSS, idle and under load
+- Throughput under concurrent load (via [`hey`](https://github.com/rakyll/hey) if installed)
+
+```bash
+LLAMA_SERVER_BIN=/usr/local/bin/llama-server \
+MODEL_A_PATH=/models/model-a.gguf \
+MODEL_B_PATH=/models/model-b.gguf \
+./scripts/bench-vs-llama-swap.sh
+```
+
+It builds `gguf-switchboard` if needed and downloads a `llama-swap` release binary automatically if one isn't found. Results land in `.bench/results-<timestamp>/report.md`. No numbers are published here — they depend entirely on your GPU, CPU, and models, so run it on your own hardware.
+
 ## Project Structure
 
 ```
 .
 ├── Cargo.toml              # Dependencies and build config
 ├── config.toml             # Example configuration
-├── openai-runtime.service  # Systemd unit file
+├── gguf-switchboard.service  # Systemd unit file
 ├── .github/workflows/
 │   ├── ci.yml              # CI: check, clippy, build, test
 │   └── release.yml         # Multi-platform release builds

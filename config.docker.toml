@@ -2,7 +2,7 @@ bind = "0.0.0.0:9090"
 startup_timeout = 120
 idle_timeout = 600
 default_backend = "llama.cpp"
-database_path = "/var/lib/openai-runtime/usage.db"
+database_path = "/var/lib/gguf-switchboard/usage.db"
 
 memory_warning_threshold = 85
 memory_critical_threshold = 95

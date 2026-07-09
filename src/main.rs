@@ -50,7 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!(
         bind = %config.bind,
         backend = %config.default_backend,
-        "Starting OpenAI Runtime"
+        "Starting GGUF Switchboard"
     );
 
     let db_path = config
@@ -114,6 +114,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Shutting down scheduler");
     scheduler.shutdown().await?;
 
-    info!("OpenAI Runtime stopped");
+    info!("GGUF Switchboard stopped");
     Ok(())
 }
