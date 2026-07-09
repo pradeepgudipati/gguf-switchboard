@@ -261,7 +261,7 @@ impl Backend for LlamaCppBackend {
         Ok(response)
     }
 
-    fn name(&self) -> &str {
+    fn _name(&self) -> &str {
         &self.model_id
     }
 
