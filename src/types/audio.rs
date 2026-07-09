@@ -27,7 +27,7 @@ pub struct TranscriptionRequest {
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[schema(example = json!({
     "model": "gemma-4-e4b",
-    "input": "Hello from the OpenAI Runtime speech API.",
+    "input": "Hello from the GGUF Switchboard speech API.",
     "voice": "alloy",
     "response_format": "mp3"
 }))]

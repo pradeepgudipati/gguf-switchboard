@@ -57,13 +57,22 @@ pub async fn completions(
 
     let start = std::time::Instant::now();
     let backend = state.scheduler.ensure_loaded(&request.model).await?;
+    let model_id = request.model.clone();
 
     if request.stream == Some(true) {
         STREAMING_REQUESTS.inc();
 
         let stream = backend.completions_stream(request).await?;
+
+        // Record streaming request (token counts not available in stream mode)
+        let _ = state
+            .token_db
+            .record(&model_id, "/v1/completions", 0, 0, 0, None);
+
+        let model_for_stream = model_id.clone();
         let mapped = stream.map(move |chunk| match chunk {
-            Ok(c) => {
+            Ok(mut c) => {
+                c.model = model_for_stream.clone();
                 let json = serde_json::to_string(&c).unwrap_or_default();
                 Ok::<_, std::convert::Infallible>(format!("data: {json}\n\n"))
             }
@@ -101,11 +110,12 @@ pub async fn completions(
             .unwrap())
     } else {
         let _guard = ActiveGuard;
-        let response = backend.completions(request).await?;
+        let mut response = backend.completions(request).await?;
+        response.model = model_id.clone();
 
         // Record token usage (completions endpoint uses prompt_tokens from usage)
         let _ = state.token_db.record(
-            &response.model,
+            &model_id,
             "/v1/completions",
             response.usage.prompt_tokens,
             response.usage.completion_tokens,

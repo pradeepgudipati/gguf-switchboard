@@ -21,7 +21,7 @@ use crate::state::AppState;
 #[derive(OpenApi)]
 #[openapi(
     info(
-        title = "OpenAI Runtime",
+        title = "GGUF Switchboard",
         description = "100% OpenAI API compatible local inference runtime",
         version = env!("CARGO_PKG_VERSION")
     ),

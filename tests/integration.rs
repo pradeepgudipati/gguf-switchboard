@@ -1,10 +1,10 @@
-use openai_runtime::config::Config;
-use openai_runtime::types::audio::{SpeechRequest, TranscriptionRequest};
-use openai_runtime::types::chat::{ChatCompletionRequest, ChatMessage, Content, Role};
-use openai_runtime::types::completions::{CompletionRequest, Prompt};
-use openai_runtime::types::embeddings::{EmbeddingInput, EmbeddingRequest};
-use openai_runtime::types::responses::{ResponseInput, ResponseRequest};
-use openai_runtime::types::{ListModelsResponse, ModelInfo, Usage};
+use gguf_switchboard::config::Config;
+use gguf_switchboard::types::audio::{SpeechRequest, TranscriptionRequest};
+use gguf_switchboard::types::chat::{ChatCompletionRequest, ChatMessage, Content, Role};
+use gguf_switchboard::types::completions::{CompletionRequest, Prompt};
+use gguf_switchboard::types::embeddings::{EmbeddingInput, EmbeddingRequest};
+use gguf_switchboard::types::responses::{ResponseInput, ResponseRequest};
+use gguf_switchboard::types::{ListModelsResponse, ModelInfo, Usage};
 
 #[test]
 fn test_config_load_from_str() {
@@ -26,7 +26,7 @@ priority = true
 
     // Write temp file and load
     let dir = std::env::temp_dir();
-    let path = dir.join("test-openai-runtime-config.toml");
+    let path = dir.join("test-gguf-switchboard-config.toml");
     std::fs::write(&path, toml).unwrap();
 
     let config = Config::load(path.to_str().unwrap()).unwrap();
@@ -55,7 +55,7 @@ default_backend = "llama.cpp"
 "#;
 
     let dir = std::env::temp_dir();
-    let path = dir.join("test-openai-runtime-empty.toml");
+    let path = dir.join("test-gguf-switchboard-empty.toml");
     std::fs::write(&path, toml).unwrap();
 
     let result = Config::load(path.to_str().unwrap());
@@ -264,7 +264,7 @@ fn test_transcription_request_serialization() {
 fn test_speech_request_serialization() {
     let request = SpeechRequest {
         model: "gemma-4-e4b".to_string(),
-        input: "Hello from the OpenAI Runtime speech API.".to_string(),
+        input: "Hello from the GGUF Switchboard speech API.".to_string(),
         voice: Some("alloy".to_string()),
         response_format: Some("mp3".to_string()),
         speed: None,
@@ -277,7 +277,7 @@ fn test_speech_request_serialization() {
     let deserialized: SpeechRequest = serde_json::from_str(&json).unwrap();
     assert_eq!(
         deserialized.input,
-        "Hello from the OpenAI Runtime speech API."
+        "Hello from the GGUF Switchboard speech API."
     );
 }
 
