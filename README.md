@@ -1,10 +1,11 @@
 # gguf-switchboard
+### an OpenAI-compatible GGUF runtime
 
 ![gguf-switchboard demo](gguf-switchboard-demo.gif)
 
-<sub>[▶ Watch with audio](gguf-switchboard-demo-linkedin.mp4)</sub>
+<sub>[▶ Watch with audio](demo.mp4)</sub>
 
-A **GPU-aware GGUF model scheduler** with a **100% OpenAI API-compatible** endpoint. Dynamically loads and unloads models on demand — point any OpenAI SDK or tool at it (Python, Node, Cursor, Cline, Continue) and it Just Works.
+A **[llama-swap](https://github.com/mostlygeek/llama-swap) alternative in Rust** with VRAM-pressure eviction, context auto-fallback, Swagger UI, and built-in usage tracking. Point any OpenAI SDK or tool at it (Python, Node, Cursor, Cline, Continue) and swap GGUF models on demand — no manual process or port juggling.
 
 ## Why
 
@@ -12,23 +13,23 @@ When running local LLMs, you typically manage models manually: start `llama-serv
 
 ### Landscape comparison
 
-Several tools address parts of this problem. None combine OpenAI compatibility, GGUF support, and GPU-aware model lifecycle management in one place. The closest alternative is **[llama-swap](https://github.com/mostlygeek/llama-swap)** — see the [detailed comparison](#vs-llama-swap) below.
+**[llama-swap](https://github.com/mostlygeek/llama-swap)** is the closest mature alternative for on-demand model swapping. gguf-switchboard targets the same problem — single endpoint, swap on request — and adds VRAM-pressure eviction, context OOM fallback, and usage history. Trade-off: llama.cpp only (no multi-backend swap matrix or web dashboard). See the [detailed comparison](#vs-llama-swap) below.
 
 | Tool | OpenAI API | Loads by model name | Auto unload/load | GGUF support | VRAM-aware scheduling | Worth using? |
 |------|:----------:|:-------------------:|:----------------:|:------------:|:---------------------:|--------------|
-| **Ollama** | Yes | Yes | Partial — keeps models resident | Yes | No | Close, but limited GPU scheduling control |
+| **Ollama** | Yes | Yes | Yes — `keep_alive` unloads idle models; not VRAM-pressure aware | Yes | No | Easy drop-in; auto-unload is TTL-based, not scheduler-driven |
 | **llama.cpp** (`llama-server`) | Yes | Manual — one process per model | No — you manage start/stop | Yes | No | Low-level; you own process and port management |
-| **[llama-swap](https://github.com/mostlygeek/llama-swap)** | Yes | Yes | Yes — swaps on request (TTL-based) | Yes | No | **Closest peer** — single Go binary, multi-backend, web dashboard; lacks VRAM-pressure eviction, idle priority model, context OOM fallback, and `/v1/usage` history |
-| **vLLM** | Yes | Yes | Yes — multi-model on large GPUs | No (HuggingFace weights) | Partial | Excellent for datacenter GPUs, not GGUF workflows |
+| **[llama-swap](https://github.com/mostlygeek/llama-swap)** | Yes | Yes | Yes — swaps on request (TTL-based) | Yes | No | **Mature swap proxy** — multi-backend, swap matrix, web dashboard; no VRAM-pressure eviction, context OOM fallback, or `/v1/usage` history |
+| **vLLM** | Yes | Yes (pre-loaded) | No — serves loaded models; not on-demand swap | No (HuggingFace weights) | Partial — memory-efficient serving | Datacenter / multi-tenant throughput; not GGUF or per-request model lifecycle |
 | **LocalAI** | Yes | Yes | Partial — not VRAM-pressure aware | Yes | No | Full-stack alternative; not designed for proactive eviction under memory pressure |
 | **Open WebUI** | Yes (proxy) | Via backend | Depends on backend | Via backend | Via backend | UI layer — not a model scheduler |
 | **LiteLLM** | Yes | Routes only | No — does not load models | Via providers | No | API router, not a model loader |
-| **gguf-switchboard** (this project) | Yes | Yes | Yes — swap + idle priority model | Yes | Yes | Built for constrained GPUs: VRAM eviction, `vram_gb` context sizing, `models.json` registry, usage tracking |
+| **gguf-switchboard** (this project) | Yes | Yes | Yes — swap + idle priority model | Yes | Yes | **llama-swap alternative (Rust)** — VRAM eviction, context auto-fallback, Swagger UI, usage tracking; llama.cpp-only |
 
 ### Why existing tools fall short
 
 - **llama-swap** is the closest single-binary alternative — download, configure, run, done. It swaps llama-server processes on request. What it lacks: no VRAM pressure monitoring, no context-size fallback on OOM, no idle timeout / priority model, no usage tracking.
-- **Ollama** gets close — drop-in model names, OpenAI-compatible API, GGUF support — but you have limited control over GPU scheduling. Models tend to stay resident; switching under VRAM pressure is opaque.
+- **Ollama** unloads idle models via `keep_alive`, but you do not get explicit swap-on-request scheduling or VRAM-pressure eviction — models can still sit resident longer than you expect on tight GPUs.
 - **LocalAI** is a full-stack alternative supporting many backends and formats. It is not designed for proactive eviction when GPU memory is under pressure; you still manage capacity yourself.
 - **LiteLLM** is an excellent API gateway for routing, fallbacks, and retries across cloud and local providers. It does not spawn backends, load GGUF weights, or manage GPU memory — that is not its job.
 
@@ -36,7 +37,7 @@ The gap: a tool that treats **model loading as a scheduling problem** on constra
 
 ### What makes this different
 
-gguf-switchboard is a **GPU-aware model scheduler**. It presents a single OpenAI-compatible endpoint and decides which model should be loaded based on incoming requests and available VRAM — your tools never manage processes or ports.
+gguf-switchboard is a **llama-swap-style swap proxy in Rust**, extended for constrained GPUs: VRAM-pressure eviction, automatic context-size fallback on OOM, an idle priority model, and `/v1/usage` history. It presents a single OpenAI-compatible endpoint and decides which model should be loaded based on incoming requests and available VRAM — your tools never manage processes or ports.
 
 ```
 OpenAI Request
@@ -107,12 +108,32 @@ Point your IDE or agent at `http://localhost:9090/v1`, set a model name from you
 
 ## Quick Start
 
-### Fresh machine
+Install from the **[latest release](https://github.com/pradeepgudipati/gguf-switchboard/releases/latest)** on `main` (prebuilt Linux binaries), or build from source.
+
+### Prebuilt binary (Linux)
+
+```bash
+# amd64 (see Releases page for arm64 and checksums)
+curl -fsSL -o gguf-switchboard \
+  https://github.com/pradeepgudipati/gguf-switchboard/releases/latest/download/gguf-switchboard-linux-amd64
+chmod +x gguf-switchboard
+
+git clone --branch main https://github.com/pradeepgudipati/gguf-switchboard.git
+cd gguf-switchboard
+
+# Copy config templates, point models_dir at your GGUF folder, then:
+./gguf-switchboard discover-models ~/models -o models.toml
+./gguf-switchboard config.toml
+```
+
+Explore the API at **http://localhost:9090/swagger-ui/**.
+
+### Fresh machine (build from source)
 
 Clone the repo, review `deploy.sh`, then run it from the checkout. The script builds from source and optionally installs a systemd service — no remote pipe-to-bash.
 
 ```bash
-git clone https://github.com/pradeepgudipati/gguf-switchboard.git
+git clone --branch main https://github.com/pradeepgudipati/gguf-switchboard.git
 cd gguf-switchboard
 ./deploy.sh
 ```
@@ -124,7 +145,7 @@ cd gguf-switchboard
 If you only want a local binary (no `sudo`, no systemd):
 
 ```bash
-git clone https://github.com/pradeepgudipati/gguf-switchboard.git
+git clone --branch main https://github.com/pradeepgudipati/gguf-switchboard.git
 cd gguf-switchboard
 cargo build --release
 
@@ -154,7 +175,7 @@ Explore the API at **http://localhost:9090/swagger-ui/**.
 - **Config:** Keep `config.toml` and `models.toml` in the repo checkout; no need for `/etc/gguf-switchboard`.
 
 ```bash
-git clone https://github.com/pradeepgudipati/gguf-switchboard.git
+git clone --branch main https://github.com/pradeepgudipati/gguf-switchboard.git
 cd gguf-switchboard
 cargo build --release
 
@@ -281,7 +302,7 @@ models_dir = "/models"                        # Root directory for GGUF files
 llama_server = "/usr/local/bin/llama-server"  # Backend binary (auto-detected on discover)
 host = "127.0.0.1"                            # llama-server bind host
 base_port = 8081                              # First model port; others increment from here
-context_size = 65536                          # Fallback -c when VRAM heuristics do not apply
+context_size = 16384                          # Safe default for consumer GPUs; raise if you have VRAM headroom
 ngl = 999                                     # Default -ngl (GPU layers)
 backend = "llama.cpp"
 
@@ -305,7 +326,7 @@ priority = true           # Auto-load after idle_timeout (only one should be tru
 | `defaults.models_dir` | Directory (or comma-separated directories) scanned for llama.cpp-loadable GGUF files |
 | `defaults.llama_server` | Path to `llama-server` binary |
 | `defaults.base_port` | Starting port; model at index *N* uses `base_port + N` unless `port` is set |
-| `defaults.context_size` | Fallback context window when `vram_gb` heuristics do not apply |
+| `defaults.context_size` | Fallback/ceiling context window when `vram_gb` heuristics do not apply (default `16384`; raise for 24 GB+ GPUs) |
 | `auto_discover` | When `true`, any `.gguf` under `models_dir` not listed in `[[models]]` is registered at runtime |
 | `[[models]].alias` | Short id used in API requests (`model` field) |
 | `[[models]].file` | GGUF filename relative to `models_dir`, or absolute path |
@@ -508,7 +529,7 @@ args = [
     "-m", "/models/gemma-3-4b.gguf",
     "--host", "127.0.0.1",
     "--port", "8081",
-    "-c", "65536",
+    "-c", "16384",
     "-ngl", "999",
 ]
 backend_url = "http://127.0.0.1:8081/v1"
@@ -523,7 +544,7 @@ args = [
     "-m", "/models/qwen2.5-coder-7b.gguf",
     "--host", "127.0.0.1",
     "--port", "8082",
-    "-c", "65536",
+    "-c", "16384",
     "-ngl", "999",
 ]
 backend_url = "http://127.0.0.1:8082/v1"
@@ -559,7 +580,7 @@ Per-model context is chosen in this order:
 
 1. `context_size` on the `[[models]]` entry (explicit override)
 2. **VRAM heuristic** from `vram_gb` in `config.toml` (default `12`) using model file size and kind
-3. `defaults.context_size` in `models.toml` as the ceiling/fallback
+3. `defaults.context_size` in `models.toml` as the ceiling/fallback (bundled default **`16384`** — raise to `32768` or `65536` in `models.toml` if you have spare VRAM)
 
 ```toml
 # config.toml — set to your GPU VRAM (RTX 3060 = 12)

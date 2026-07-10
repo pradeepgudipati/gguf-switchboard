@@ -21,7 +21,8 @@ llama_server = "/usr/local/bin/llama-server"
 host = "127.0.0.1"
 base_port = 8081
 # Fallback context when VRAM heuristics do not apply; see config.toml `vram_gb`.
-context_size = 65536
+# 16384 is safe on most consumer GPUs — raise to 32768/65536 if you have headroom.
+context_size = 16384
 ngl = 999
 backend = "llama.cpp"
 

@@ -8,7 +8,7 @@ models_dir = "/models"
 llama_server = "/usr/local/bin/llama-server"
 host = "127.0.0.1"
 base_port = 8081
-context_size = 65536
+context_size = 16384
 ngl = 999
 backend = "llama.cpp"
 
