@@ -40,3 +40,18 @@
   outline: 2px solid #49cc90;
   outline-offset: 1px;
 }
+
+.registry-json-link {
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  padding: 5px 10px;
+  border-radius: 4px;
+  border: 1px solid rgba(73, 204, 144, 0.4);
+  background: rgba(0, 0, 0, 0.15);
+}
+
+.registry-json-link:hover {
+  background: rgba(73, 204, 144, 0.25);
+}

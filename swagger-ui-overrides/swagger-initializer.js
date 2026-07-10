@@ -1,6 +1,8 @@
 window.onload = function() {
   const MODEL_STORAGE_KEY = 'gguf-switchboard-swagger-model';
   let selectedModel = localStorage.getItem(MODEL_STORAGE_KEY) || '';
+  const userEditedBodies = new WeakSet();
+  const initializedBodies = new WeakSet();
 
   function isSwaggerPlaceholder(value) {
     return value === 'string' || value === null || value === undefined;
@@ -159,7 +161,7 @@ window.onload = function() {
         max_tokens: 2048,
         stream: false
       };
-  }
+    }
     if (path === '/v1/completions') {
       return {
         model: resolvedModel,
@@ -201,55 +203,49 @@ window.onload = function() {
     return null;
   }
 
-  function updateVisibleModelFields(model) {
+  function markBodyEditor(textarea) {
+    if (!textarea) return;
+    textarea.addEventListener('input', function() {
+      userEditedBodies.add(textarea);
+    }, { once: false });
+  }
+
+  function initializeRequestBody(textarea, path, model) {
+    if (!textarea || initializedBodies.has(textarea) || userEditedBodies.has(textarea)) {
+      return;
+    }
+
+    markBodyEditor(textarea);
+
+    try {
+      var json = JSON.parse(textarea.value || '{}');
+      if (!json || typeof json !== 'object') return;
+
+      var sanitized = sanitizeRequestBody(json, path);
+      if (model && 'model' in sanitized) {
+        sanitized.model = model;
+      }
+      textarea.value = JSON.stringify(sanitized, null, 2);
+      initializedBodies.add(textarea);
+    } catch (e) {
+      var fallback = defaultRequestBody(path, model);
+      if (fallback) {
+        textarea.value = JSON.stringify(fallback, null, 2);
+        initializedBodies.add(textarea);
+      }
+    }
+  }
+
+  function updateModelFieldOnly(model) {
     if (!model) return;
 
-    document.querySelectorAll('textarea').forEach(function(textarea) {
-      if (!textarea.closest('.opblock-body, .body-param')) return;
+    document.querySelectorAll('.opblock-body textarea, .body-param textarea').forEach(function(textarea) {
+      if (userEditedBodies.has(textarea)) return;
       try {
         const json = JSON.parse(textarea.value);
-        if (!json || typeof json !== 'object') return;
-
-        var opblock = textarea.closest('.opblock');
-        var path = '';
-        if (opblock) {
-          var pathNode = opblock.querySelector('.opblock-summary-path');
-          if (pathNode) {
-            path = (pathNode.getAttribute('data-path') || pathNode.textContent || '').trim();
-          }
-        }
-
-        if (Array.isArray(json.messages)) {
-          var sanitized = sanitizeRequestBody(json, '/v1/chat/completions');
-          if (model) sanitized.model = model;
-          textarea.value = JSON.stringify(sanitized, null, 2);
-          textarea.dispatchEvent(new Event('input', { bubbles: true }));
-        } else if ('prompt' in json) {
-          var completionBody = sanitizeRequestBody(json, '/v1/completions');
-          if (model) completionBody.model = model;
-          textarea.value = JSON.stringify(completionBody, null, 2);
-          textarea.dispatchEvent(new Event('input', { bubbles: true }));
-        } else if ('input' in json && !('voice' in json)) {
-          var endpoint = path.indexOf('/responses') !== -1 ? '/v1/responses' : '/v1/embeddings';
-          var inputBody = sanitizeRequestBody(json, endpoint);
-          if (model) inputBody.model = model;
-          textarea.value = JSON.stringify(inputBody, null, 2);
-          textarea.dispatchEvent(new Event('input', { bubbles: true }));
-        } else if ('file' in json) {
-          var transcriptionBody = sanitizeRequestBody(json, '/v1/audio/transcriptions');
-          if (model) transcriptionBody.model = model;
-          textarea.value = JSON.stringify(transcriptionBody, null, 2);
-          textarea.dispatchEvent(new Event('input', { bubbles: true }));
-        } else if ('voice' in json || (path.indexOf('/audio/speech') !== -1 && 'input' in json)) {
-          var speechBody = sanitizeRequestBody(json, '/v1/audio/speech');
-          if (model) speechBody.model = model;
-          textarea.value = JSON.stringify(speechBody, null, 2);
-          textarea.dispatchEvent(new Event('input', { bubbles: true }));
-        } else if ('model' in json) {
-          json.model = model;
-          textarea.value = JSON.stringify(json, null, 2);
-          textarea.dispatchEvent(new Event('input', { bubbles: true }));
-        }
+        if (!json || typeof json !== 'object' || !('model' in json)) return;
+        json.model = model;
+        textarea.value = JSON.stringify(json, null, 2);
       } catch (e) {
         /* not JSON */
       }
@@ -259,7 +255,6 @@ window.onload = function() {
       .querySelectorAll('input[data-param-name="model"], tr[data-param-name="model"] input')
       .forEach(function(input) {
         input.value = model;
-        input.dispatchEvent(new Event('input', { bubbles: true }));
       });
 
     document
@@ -268,8 +263,22 @@ window.onload = function() {
       )
       .forEach(function(input) {
         input.value = model;
-        input.dispatchEvent(new Event('input', { bubbles: true }));
       });
+  }
+
+  function pathFromOpblock(opblock) {
+    if (!opblock) return '';
+    var pathNode = opblock.querySelector('.opblock-summary-path');
+    if (!pathNode) return '';
+    return (pathNode.getAttribute('data-path') || pathNode.textContent || '').trim();
+  }
+
+  function initializeVisibleBodies(model) {
+    document.querySelectorAll('.opblock.is-open textarea').forEach(function(textarea) {
+      if (!textarea.closest('.opblock-body, .body-param')) return;
+      var path = pathFromOpblock(textarea.closest('.opblock'));
+      initializeRequestBody(textarea, path, model);
+    });
   }
 
   function injectModelSelector(models) {
@@ -316,28 +325,33 @@ window.onload = function() {
       } else {
         localStorage.removeItem(MODEL_STORAGE_KEY);
       }
-      updateVisibleModelFields(selectedModel);
+      updateModelFieldOnly(selectedModel);
     });
+
+    const registryLink = document.createElement('a');
+    registryLink.id = 'registry-json-download';
+    registryLink.href = '/v1/models/registry.json';
+    registryLink.download = 'models.json';
+    registryLink.textContent = 'models.json';
+    registryLink.title = 'Download portable model registry JSON';
+    registryLink.className = 'registry-json-link';
 
     bar.appendChild(label);
     bar.appendChild(select);
+    bar.appendChild(registryLink);
     wrapper.appendChild(bar);
 
     if (selectedModel) {
-      updateVisibleModelFields(selectedModel);
+      updateModelFieldOnly(selectedModel);
     }
 
-    let debounceTimer;
-    const observer = new MutationObserver(function() {
-      clearTimeout(debounceTimer);
-      debounceTimer = setTimeout(function() {
-        if (selectedModel) updateVisibleModelFields(selectedModel);
-      }, 200);
-    });
-    const root = document.getElementById('swagger-ui');
-    if (root) {
-      observer.observe(root, { childList: true, subtree: true });
-    }
+    document.getElementById('swagger-ui').addEventListener('click', function(event) {
+      var tryIt = event.target.closest('.btn.try-out__btn, .try-out__btn');
+      if (!tryIt) return;
+      setTimeout(function() {
+        initializeVisibleBodies(selectedModel);
+      }, 0);
+    }, true);
   }
 
   function fetchModelsAndInject() {
@@ -386,7 +400,7 @@ window.onload = function() {
 
       try {
         const url = new URL(request.url, window.location.origin);
-        if (url.pathname.startsWith('/v1/models/') && url.pathname !== '/v1/models') {
+        if (url.pathname.startsWith('/v1/models/') && url.pathname !== '/v1/models' && url.pathname !== '/v1/models/registry.json') {
           url.pathname = '/v1/models/' + encodeURIComponent(selectedModel);
           request.url = url.pathname + url.search;
         }

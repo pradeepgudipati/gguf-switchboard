@@ -11,10 +11,13 @@ set -euo pipefail
 
 REPO_URL="https://github.com/pradeepgudipati/gguf-switchboard.git"
 REPO_DIR="${GGUF_SWITCHBOARD_DIR:-$HOME/gguf-switchboard}"
-BRANCH="Dev"
+BRANCH="main"
 SERVICE_FILE="/etc/systemd/system/gguf-switchboard.service"
-CONFIG_FILE="/etc/gguf-switchboard/config.toml"
-MODELS_FILE="/etc/gguf-switchboard/models.toml"
+CONFIG_DIR="${GGUF_SWITCHBOARD_CONFIG_DIR:-/etc/gguf-switchboard}"
+CONFIG_FILE="${CONFIG_DIR}/config.toml"
+MODELS_FILE="${CONFIG_DIR}/models.toml"
+LOCAL_REGISTRY_TOML="models.local.toml"
+LOCAL_REGISTRY_JSON="models.local.json"
 DEFAULT_MODELS_DIR="$HOME/models"
 
 read_config() {
@@ -258,11 +261,27 @@ ensure_config_toml() {
     sudo cp config.toml "$CONFIG_FILE"
 }
 
-stop_port_conflicts() {
-    if systemctl is-active --quiet openai-runtime 2>/dev/null; then
-        echo "==> Stopping openai-runtime (port 9090 conflict with gguf-switchboard)..."
-        sudo systemctl stop openai-runtime || true
-        sudo systemctl disable openai-runtime 2>/dev/null || true
+sync_registry_to_repo() {
+    if [[ ! -r "$MODELS_FILE" ]]; then
+        return 0
+    fi
+
+    echo "==> Syncing registry to repo ($LOCAL_REGISTRY_TOML, $LOCAL_REGISTRY_JSON)..."
+    if [[ -w "$MODELS_FILE" ]]; then
+        cp "$MODELS_FILE" "$LOCAL_REGISTRY_TOML"
+    else
+        sudo cat "$MODELS_FILE" > "$LOCAL_REGISTRY_TOML"
+    fi
+
+    local json_source="${MODELS_FILE%.toml}.json"
+    if [[ -r "$json_source" ]]; then
+        if [[ -w "$json_source" ]]; then
+            cp "$json_source" "$LOCAL_REGISTRY_JSON"
+        else
+            sudo cat "$json_source" > "$LOCAL_REGISTRY_JSON"
+        fi
+    elif [[ -x ./target/release/gguf-switchboard ]]; then
+        ./target/release/gguf-switchboard export-registry "$LOCAL_REGISTRY_TOML" -o "$LOCAL_REGISTRY_JSON" || true
     fi
 }
 
@@ -302,7 +321,13 @@ generate_models_toml() {
 
     if "${discover_cmd[@]}"; then
         sudo cp "$generated" "$MODELS_FILE"
-        rm -f "$generated"
+        cp "$generated" "$LOCAL_REGISTRY_TOML"
+        local generated_json="${generated/.toml/.json}"
+        if [[ -f "$generated_json" ]]; then
+            sudo cp "$generated_json" "${MODELS_FILE%.toml}.json"
+            cp "$generated_json" "$LOCAL_REGISTRY_JSON"
+        fi
+        rm -f "$generated" "$generated_json"
         echo "==> Installed $MODELS_FILE"
         return 0
     fi
@@ -388,8 +413,9 @@ Options:
   --refresh-models   Regenerate /etc/gguf-switchboard/models.toml from GGUF files on disk
 
 Environment:
-  MODELS_DIR         Directory containing .gguf files (default: ~/models when present)
-  GGUF_SWITCHBOARD_DIR  Repo checkout path (default: ~/gguf-switchboard)
+  MODELS_DIR                Directory containing .gguf files (default: ~/models when present)
+  GGUF_SWITCHBOARD_DIR      Repo checkout path (default: ~/gguf-switchboard)
+  GGUF_SWITCHBOARD_CONFIG_DIR  Config directory (default: /etc/gguf-switchboard)
 EOF
             exit 0
             ;;
@@ -434,7 +460,7 @@ cargo clean -p utoipa-swagger-ui 2>/dev/null || true
 cargo build --release
 
 echo "==> Ensuring runtime directories..."
-sudo mkdir -p /etc/gguf-switchboard /var/lib/gguf-switchboard
+sudo mkdir -p "$CONFIG_DIR" /var/lib/gguf-switchboard
 sudo chown "$(whoami)":"$(whoami)" /var/lib/gguf-switchboard
 
 CONFIG_CREATED=false
@@ -445,7 +471,7 @@ if [[ ! -f "$SERVICE_FILE" ]]; then
 
     sudo tee "$SERVICE_FILE" > /dev/null <<EOF
 [Unit]
-Description=GGUF Switchboard - Local LLM Inference Server
+Description=GGUF Switchboard - GPU-aware local GGUF model scheduler
 After=network.target
 
 [Service]
@@ -469,8 +495,7 @@ fi
 ensure_config_toml
 
 generate_models_toml "$REFRESH_MODELS"
-
-stop_port_conflicts
+sync_registry_to_repo
 
 echo "==> Stopping service..."
 sudo systemctl stop gguf-switchboard || true
@@ -496,6 +521,7 @@ for i in {1..30}; do
         echo "  Swagger UI:  ${BASE_URL}/swagger-ui/"
         echo "               (use the Model dropdown in the top bar — applies to all APIs)"
         echo "  OpenAPI spec:  ${BASE_URL}/api-docs/openapi.json"
+        echo "  Model registry: ${BASE_URL}/v1/models/registry.json"
         echo "  Health:        ${BASE_URL}/health"
         echo "  Status:        ${BASE_URL}/status"
         echo ""

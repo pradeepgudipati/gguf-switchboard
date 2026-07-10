@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, State};
+use axum::http::header;
+use axum::response::IntoResponse;
 use chrono::Utc;
 
 use crate::errors::RuntimeError;
@@ -57,4 +59,22 @@ pub async fn get_model(
         return Err(RuntimeError::ModelNotFound(model_id));
     }
     Ok(Json(ModelInfo::new(model_id)))
+}
+
+/// Download the portable model registry as JSON (shared across local AI tools).
+#[utoipa::path(
+    get,
+    path = "/v1/models/registry.json",
+    tag = "models",
+    responses(
+        (status = 200, description = "Portable model registry JSON", content_type = "application/json")
+    )
+)]
+pub async fn registry_json(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, RuntimeError> {
+    Ok((
+        [(header::CONTENT_TYPE, "application/json")],
+        state.registry_json.clone(),
+    ))
 }

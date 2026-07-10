@@ -16,6 +16,11 @@ target
 # Benchmark scratch dir (scripts/bench-vs-llama-swap.sh): downloaded binaries + results
 .bench/
 
+# Deploy-time registry copies (synced from /etc/gguf-switchboard by deploy.sh)
+models.local.toml
+models.local.json
+
+
 # RustRover
 #  JetBrains specific template is maintained in a separate JetBrains.gitignore that can
 #  be found at https://github.com/github/gitignore/blob/main/Global/JetBrains.gitignore

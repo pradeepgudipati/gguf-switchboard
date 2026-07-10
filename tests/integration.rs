@@ -335,7 +335,7 @@ fn test_models_registry_discover_and_expand() {
     assert!(registry.models.iter().any(|m| m.alias == "qwen3.5-9b"));
     assert!(registry.models.iter().any(|m| m.alias == "gemma-3-4b"));
 
-    let expanded = registry.expand("llama.cpp").unwrap();
+    let expanded = registry.expand("llama.cpp", 12).unwrap();
     assert_eq!(expanded.len(), 2);
     assert!(expanded.contains_key("qwen3.5-9b"));
 

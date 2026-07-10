@@ -2,11 +2,11 @@
 name = "gguf-switchboard"
 version = "0.1.0"
 edition = "2024"
-description = "A 100% OpenAI API compatible local inference runtime"
+description = "GPU-aware GGUF model scheduler with an OpenAI-compatible API"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/pradeepgudipati/gguf-switchboard"
-keywords = ["openai", "llm", "inference", "runtime", "gguf"]
+keywords = ["gguf", "llama-cpp", "openai-api", "local-llm", "model-swap", "llm-inference"]
 categories = ["command-line-utilities", "web-programming::http-server"]
 
 [[bin]]
