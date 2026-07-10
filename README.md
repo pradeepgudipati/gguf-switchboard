@@ -4,7 +4,7 @@
 
 <sub>[▶ Watch with audio](gguf-switchboard-demo-linkedin.mp4)</sub>
 
-A **100% OpenAI API-compatible** local inference runtime that dynamically loads and unloads GGUF models on demand. Point any OpenAI SDK or tool at it — Python, Node, Cursor, Cline, Continue — and it Just Works.
+A **GPU-aware GGUF model scheduler** with a **100% OpenAI API-compatible** endpoint. Dynamically loads and unloads models on demand — point any OpenAI SDK or tool at it (Python, Node, Cursor, Cline, Continue) and it Just Works.
 
 ## Why
 
@@ -12,18 +12,18 @@ When running local LLMs, you typically manage models manually: start `llama-serv
 
 ### Landscape comparison
 
-Several tools address parts of this problem. None combine OpenAI compatibility, GGUF support, and GPU-aware model lifecycle management in one place.
+Several tools address parts of this problem. None combine OpenAI compatibility, GGUF support, and GPU-aware model lifecycle management in one place. The closest alternative is **[llama-swap](https://github.com/mostlygeek/llama-swap)** — see the [detailed comparison](#vs-llama-swap) below.
 
-| Tool | OpenAI API | Loads by model name | Auto unload/load | GGUF support | Worth using? |
-|------|:----------:|:-------------------:|:----------------:|:------------:|--------------|
-| **Ollama** | Yes | Yes | Partial — keeps models resident | Yes | Close, but limited GPU scheduling control |
-| **llama.cpp** (`llama-server`) | Yes | Manual — one process per model | No — you manage start/stop | Yes | Low-level; you own process and port management |
-| **llama-swap** | Yes | Yes | Yes — swaps on request; not VRAM-pressure aware | Yes | Single-binary, easy install; no idle timeout, VRAM monitoring, or usage tracking |
-| **vLLM** | Yes | Yes | Yes — multi-model on large GPUs | No (HuggingFace weights) | Excellent for datacenter GPUs, not GGUF workflows |
-| **LocalAI** | Yes | Yes | Partial — not VRAM-pressure aware | Yes | Closest alternative, but not designed for eviction under memory pressure |
-| **Open WebUI** | Yes (proxy) | Via backend | Depends on backend | Via backend | UI layer — not a model scheduler |
-| **LiteLLM** | Yes | Routes only | No — does not load models | Via providers | API router, not a model loader |
-| **gguf-switchboard** | Yes | Yes | Yes — GPU-aware eviction | Yes | Built specifically for this problem |
+| Tool | OpenAI API | Loads by model name | Auto unload/load | GGUF support | VRAM-aware scheduling | Worth using? |
+|------|:----------:|:-------------------:|:----------------:|:------------:|:---------------------:|--------------|
+| **Ollama** | Yes | Yes | Partial — keeps models resident | Yes | No | Close, but limited GPU scheduling control |
+| **llama.cpp** (`llama-server`) | Yes | Manual — one process per model | No — you manage start/stop | Yes | No | Low-level; you own process and port management |
+| **[llama-swap](https://github.com/mostlygeek/llama-swap)** | Yes | Yes | Yes — swaps on request (TTL-based) | Yes | No | **Closest peer** — single Go binary, multi-backend, web dashboard; lacks VRAM-pressure eviction, idle priority model, context OOM fallback, and `/v1/usage` history |
+| **vLLM** | Yes | Yes | Yes — multi-model on large GPUs | No (HuggingFace weights) | Partial | Excellent for datacenter GPUs, not GGUF workflows |
+| **LocalAI** | Yes | Yes | Partial — not VRAM-pressure aware | Yes | No | Full-stack alternative; not designed for proactive eviction under memory pressure |
+| **Open WebUI** | Yes (proxy) | Via backend | Depends on backend | Via backend | Via backend | UI layer — not a model scheduler |
+| **LiteLLM** | Yes | Routes only | No — does not load models | Via providers | No | API router, not a model loader |
+| **gguf-switchboard** (this project) | Yes | Yes | Yes — swap + idle priority model | Yes | Yes | Built for constrained GPUs: VRAM eviction, `vram_gb` context sizing, `models.json` registry, usage tracking |
 
 ### Why existing tools fall short
 
@@ -81,7 +81,7 @@ Point your IDE or agent at `http://localhost:9090/v1`, set a model name from you
 
 ### What you get
 
-- **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/responses`, `/v1/models`, `/v1/audio/*`
+- **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/responses`, `/v1/models`, `/v1/models/registry.json`, `/v1/audio/*`
 - **llama.cpp backend** — spawns and manages `llama-server` child processes
 - **Automatic model loading/unloading** — models come up on first request, no manual restarts
 - **LRU eviction** — unloads the least-recently-used model when capacity is reached
@@ -94,7 +94,9 @@ Point your IDE or agent at `http://localhost:9090/v1`, set a model name from you
 
 ## Features
 
-- **Drop-in OpenAI API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/responses`, `/v1/models`, `/v1/audio/*`
+- **Drop-in OpenAI API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/responses`, `/v1/models`, `/v1/models/registry.json`, `/v1/audio/*`
+- **Portable model registry** — `models.json` export for sharing across local AI tools
+- **VRAM-aware context sizing** — `vram_gb` in `config.toml` sizes per-model `-c` automatically
 - **Dynamic model loading** — models are loaded/unloaded on demand; no restart needed
 - **LRU eviction** — automatically unloads the least-recently-used model when capacity is reached
 - **Priority model** — auto-loads your preferred model after a configurable idle timeout
@@ -105,44 +107,70 @@ Point your IDE or agent at `http://localhost:9090/v1`, set a model name from you
 
 ## Quick Start
 
-### Download a prebuilt binary
+### Fresh machine
 
-Grab the latest binary from [GitHub Releases](https://github.com/pradeepgudipati/gguf-switchboard/releases/latest) — no Rust toolchain required:
+Clone the repo, review `deploy.sh`, then run it from the checkout. The script builds from source and optionally installs a systemd service — no remote pipe-to-bash.
 
 ```bash
-# Linux x86_64
-curl -fsSL https://github.com/pradeepgudipati/gguf-switchboard/releases/latest/download/gguf-switchboard-linux-amd64 \
-  -o gguf-switchboard && chmod +x gguf-switchboard
-
-# Linux ARM64
-curl -fsSL https://github.com/pradeepgudipati/gguf-switchboard/releases/latest/download/gguf-switchboard-linux-arm64 \
-  -o gguf-switchboard && chmod +x gguf-switchboard
-
-# macOS Apple Silicon
-curl -fsSL https://github.com/pradeepgudipati/gguf-switchboard/releases/latest/download/gguf-switchboard-darwin-arm64 \
-  -o gguf-switchboard && chmod +x gguf-switchboard
+git clone https://github.com/pradeepgudipati/gguf-switchboard.git
+cd gguf-switchboard
+./deploy.sh
 ```
 
-Copy `config.toml` and `models.toml` from this repo, point them at your `llama-server` binary and GGUF model directory, then run:
+`deploy.sh` installs build dependencies and Rust (if needed), compiles the release binary, creates `/etc/gguf-switchboard/config.toml` from the template if missing, **auto-generates `/etc/gguf-switchboard/models.toml` on first install** from your GGUF directory, **syncs a copy to `models.local.toml` / `models.local.json` in the repo** (gitignored), installs the systemd service, and starts the server on `0.0.0.0:9090`.
+
+### Build without systemd
+
+If you only want a local binary (no `sudo`, no systemd):
 
 ```bash
-# Optional: auto-generate models.toml from your GGUF folder
-./gguf-switchboard discover-models /models -o models.toml
+git clone https://github.com/pradeepgudipati/gguf-switchboard.git
+cd gguf-switchboard
+cargo build --release
 
-./gguf-switchboard config.toml
+# Optional: auto-generate models.toml + models.json from your GGUF folder
+./target/release/gguf-switchboard discover-models /models -o models.toml
+
+./target/release/gguf-switchboard config.toml
 ```
 
 Explore the API at **http://localhost:9090/swagger-ui/**.
 
-### Install as a systemd service
+### macOS
 
-If you want the runtime to start on boot and restart on failure, `deploy.sh` handles everything:
+`deploy.sh` is **Linux-only** — it installs a **systemd** service (`systemctl`, `/etc/systemd/system/`, `journalctl`), which macOS does not have. On a Mac, use [Build without systemd](#build-without-systemd) above instead.
+
+| Step | Linux (`deploy.sh`) | macOS |
+|------|---------------------|-------|
+| Clone + `cargo build` | Yes | Yes |
+| Model discovery (`discover-models`) | Yes | Yes |
+| systemd install / auto-start | Yes | No — use a terminal or your own `launchd` plist |
+| Auto-install build deps (`apt-get`) | Yes | No — install Xcode CLI tools; `jq` via Homebrew if needed |
+
+**Notes for Mac:**
+
+- **Bash:** `deploy.sh` uses Bash 4+ syntax. macOS ships Bash 3.2 at `/bin/bash`. If you ever run the script on Mac for the build steps only, use Homebrew bash — but prefer `cargo build` directly instead.
+- **GPU:** Use a **Metal** build of `llama-server` (llama.cpp). NVIDIA CUDA paths in docs are Linux-oriented.
+- **Config:** Keep `config.toml` and `models.toml` in the repo checkout; no need for `/etc/gguf-switchboard`.
 
 ```bash
-./deploy.sh
+git clone https://github.com/pradeepgudipati/gguf-switchboard.git
+cd gguf-switchboard
+cargo build --release
+
+./target/release/gguf-switchboard discover-models ~/models -o models.toml
+./target/release/gguf-switchboard config.toml
 ```
 
-The script installs build dependencies and Rust (if needed), builds the release binary, creates `/etc/gguf-switchboard/config.toml` from the template if missing, **auto-generates `/etc/gguf-switchboard/models.toml` on first install** from your GGUF directory, installs the systemd service, and starts the server on `0.0.0.0:9090`.
+### Install as a systemd service
+
+If you want gguf-switchboard to start on boot and restart on failure, run `deploy.sh` from a git checkout (see [Fresh machine](#fresh-machine) above). It performs the same build and registry steps, plus systemd installation.
+
+Keep config next to the repo instead of `/etc/gguf-switchboard`:
+
+```bash
+GGUF_SWITCHBOARD_CONFIG_DIR="$PWD" ./deploy.sh
+```
 
 On first deploy (no existing `models.toml`), discovery scans for `.gguf` files, assigns aliases and ports, and detects `llama-server` on your PATH. Override the scan directory with `MODELS_DIR`:
 
@@ -158,7 +186,7 @@ MODELS_DIR=/models ./deploy.sh --refresh-models
 
 On completion it prints a table of **available models** (ID, display name, priority/loaded state) plus links to Swagger UI and health endpoints.
 
-**Post-install:** Edit `/etc/gguf-switchboard/models.toml` to tweak aliases or priorities, then restart:
+**Post-install:** Edit `models.toml` (under `$CONFIG_DIR`, default `/etc/gguf-switchboard/`) to tweak aliases, `kind`, `enabled`, or `extra_args`, then restart:
 
 ```bash
 sudo systemctl restart gguf-switchboard
@@ -166,16 +194,11 @@ sudo systemctl restart gguf-switchboard
 
 Re-run `./deploy.sh --refresh-models` to pick up new GGUF files while preserving your customizations (merged by file path).
 
-### Fresh machine (no clone yet)
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/pradeepgudipati/gguf-switchboard/Dev/deploy.sh | bash
-```
-
 ### Prerequisites
 
-- Ubuntu/Debian (for `apt`; other distros: install equivalent build deps manually)
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) built with server support
+- **Linux (recommended for `deploy.sh`):** Ubuntu/Debian (for `apt`; other distros: install equivalent build deps manually)
+- **macOS:** Xcode Command Line Tools; build and run from source (see [macOS](#macos) above) — `deploy.sh` does not install a service
+- [llama.cpp](https://github.com/ggerganov/llama.cpp) built with server support (Metal on Apple Silicon, CUDA on NVIDIA Linux)
 - A GGUF model file (configure paths in config after install)
 
 Rust is installed automatically if missing.
@@ -210,54 +233,143 @@ Client Request
 
 ## Configuration
 
-Configuration is a TOML file (default: `config.toml`):
+Configuration is split across two files:
 
-### Model Configuration
+| File | Purpose |
+|------|---------|
+| **`config.toml`** | Server bind address, idle timeout, GPU VRAM, database path |
+| **`models.toml`** | Model registry — aliases, GGUF paths, priorities, per-model overrides |
 
-Day-to-day model setup lives in **`models.toml`**, referenced from `config.toml`:
+Production paths (default): `/etc/gguf-switchboard/config.toml` and `/etc/gguf-switchboard/models.toml`.  
+After `deploy.sh`, machine-specific copies are synced to **`models.local.toml`** and **`models.local.json`** in the repo (gitignored).
+
+Override the config directory:
+
+```bash
+GGUF_SWITCHBOARD_CONFIG_DIR="$HOME/gguf-switchboard" ./deploy.sh
+```
+
+### Server configuration (`config.toml`)
 
 ```toml
-# config.toml
+bind = "0.0.0.0:9090"
+startup_timeout = 60
+idle_timeout = 600
+default_backend = "llama.cpp"
+
+# GPU VRAM in GB — sizes per-model context (-c) when not set in models.toml
+# RTX 3060 = 12; lower if you share VRAM with a display or other apps
+vram_gb = 12
+
+database_path = "/var/lib/gguf-switchboard/usage.db"
+
+# Model registry (TOML or portable JSON)
 models_file = "models.toml"
 ```
 
 If `models_file` is omitted but a sibling `models.toml` exists next to your config, it is loaded automatically.
 
-#### `models.toml` structure
+See [Context size (`-c`)](#context-size-c) for how `vram_gb` affects per-model `-c` values.
+
+### Model configuration (`models.toml`)
 
 ```toml
+version = 1
+
 [defaults]
 models_dir = "/models"                        # Root directory for GGUF files
 llama_server = "/usr/local/bin/llama-server"  # Backend binary (auto-detected on discover)
 host = "127.0.0.1"                            # llama-server bind host
 base_port = 8081                              # First model port; others increment from here
-context_size = 65536                          # Default -c passed to llama-server
+context_size = 65536                          # Fallback -c when VRAM heuristics do not apply
 ngl = 999                                     # Default -ngl (GPU layers)
 backend = "llama.cpp"
 
 auto_discover = true    # Also register any .gguf under models_dir not listed in [[models]]
 
 [[models]]
-alias = "gemma-code"    # API model id — use this in Cursor, Cline, etc.
-file = "gemma-3-4b.gguf"  # Relative to models_dir, or an absolute path
-display_name = "Gemma 3 Coding Model"  # Shown in /v1/models (optional)
-priority = true         # Auto-load after idle_timeout (optional)
-# port = 8085           # Override auto-assigned port (optional)
-# context_size = 32768  # Override defaults.context_size for this model (optional)
+alias = "gemma-4-e4b"     # API model id — use this in Cursor, Cline, etc.
+file = "gemma-4-E4B-it-Q4_K_M.gguf"
+display_name = "Gemma 4 E4B"
+kind = "chat"             # chat | coder | vision | embedding (inferred when omitted)
+enabled = true            # false = hide from /v1/models and scheduling
+priority = true           # Auto-load after idle_timeout (only one should be true)
+# port = 8085             # Override auto-assigned port (optional)
+# context_size = 32768    # Override VRAM-based default from config.toml vram_gb (optional)
+# extra_args = ["--jinja"]  # Extra llama-server flags (optional)
 ```
 
 | Field | Description |
 |-------|-------------|
+| `version` | Registry schema version (currently `1`) |
 | `defaults.models_dir` | Directory (or comma-separated directories) scanned for llama.cpp-loadable GGUF files |
 | `defaults.llama_server` | Path to `llama-server` binary |
 | `defaults.base_port` | Starting port; model at index *N* uses `base_port + N` unless `port` is set |
-| `defaults.context_size` | Default context window (`-c`) for all models |
+| `defaults.context_size` | Fallback context window when `vram_gb` heuristics do not apply |
 | `auto_discover` | When `true`, any `.gguf` under `models_dir` not listed in `[[models]]` is registered at runtime |
 | `[[models]].alias` | Short id used in API requests (`model` field) |
 | `[[models]].file` | GGUF filename relative to `models_dir`, or absolute path |
 | `[[models]].display_name` | Human-readable name; defaults to a title-cased alias |
+| `[[models]].kind` | `chat`, `coder`, `vision`, or `embedding` — inferred from alias/file when omitted |
+| `[[models]].enabled` | When `false`, model is omitted from `/v1/models` and scheduling |
 | `[[models]].priority` | If `true`, this model loads automatically after `idle_timeout` |
 | `[[models]].port` | Override the auto-assigned backend port |
+| `[[models]].context_size` | Override per-model `-c` (otherwise sized from `vram_gb`) |
+| `[[models]].extra_args` | Extra flags appended to `llama-server` launch args |
+
+Duplicate `[[models]]` entries (same alias or file) are merged automatically on load and during `discover-models --merge`. Only one model may be `priority = true`; extras are cleared with a warning.
+
+#### Portable `models.json`
+
+`discover-models` writes a sibling **`models.json`** alongside `models.toml`. The running server also exposes it at:
+
+```bash
+curl http://localhost:9090/v1/models/registry.json -o models.json
+```
+
+Example shape:
+
+```json
+{
+  "version": 1,
+  "models_dir": "/home/pradeep/models",
+  "models": [
+    {
+      "id": "gemma-4-e4b",
+      "file": "gemma-4-E4B-it-Q4_K_M.gguf",
+      "display_name": "Gemma 4 E4B",
+      "kind": "chat",
+      "enabled": true,
+      "priority": true,
+      "context_size": null,
+      "tags": ["chat", "priority"]
+    }
+  ]
+}
+```
+
+Export manually:
+
+```bash
+./gguf-switchboard export-registry /etc/gguf-switchboard/models.toml -o models.json
+```
+
+`models_file` in `config.toml` may also point directly at a **`models.json`** registry (portable subset — no `llama_server` / port defaults; those fall back to built-in defaults).
+
+After `deploy.sh`, copies land in the repo as **`models.local.toml`** and **`models.local.json`** (gitignored) so `git pull` updates do not conflict with your machine-specific registry.
+
+#### `kind` inference
+
+When `kind` is omitted on a `[[models]]` entry, it is inferred from the alias and filename:
+
+| Pattern in alias/file | Inferred `kind` |
+|-----------------------|-----------------|
+| `embed`, `granite-embedding` | `embedding` |
+| `-vl`, `vision`, `mmproj` | `vision` |
+| `coder`, `-code` | `coder` |
+| (default) | `chat` |
+
+Set `enabled = false` to keep a model in the registry but hide it from `/v1/models` and scheduling (useful for vision models missing an `mmproj` sidecar, or models you are still downloading).
 
 #### Port assignment
 
@@ -320,9 +432,10 @@ When generation runs:
 1. Builds the release binary (required before `discover-models`)
 2. Detects the models directory (see below)
 3. Runs `discover-models` to scan for `.gguf` files
-4. Merges with the existing `/etc/gguf-switchboard/models.toml` when present — your custom `alias`, `display_name`, `priority`, `port`, and `context_size` are preserved per file
-5. Installs the result to `/etc/gguf-switchboard/models.toml`
-6. Prints a table of configured models after the service is healthy
+4. Merges with the existing registry when present — preserves `alias`, `display_name`, `priority`, `port`, `context_size`, `kind`, `enabled`, and `extra_args` per file; **duplicate alias/file entries are deduplicated**
+5. Installs the result to `$CONFIG_DIR/models.toml` and writes sibling **`models.json`**
+6. Syncs copies to **`models.local.toml`** / **`models.local.json`** in the repo (gitignored)
+7. Prints a table of configured models after the service is healthy
 
 **Models directory detection**:
 
@@ -337,25 +450,30 @@ Set `models_dir` in `models.toml` or pass `MODELS_DIR` when models live outside 
 MODELS_DIR=/path/to/models ./deploy.sh --refresh-models
 ```
 
-#### `discover-models` CLI
+#### `discover-models` and `export-registry` CLI
 
 Generate or refresh `models.toml` without a full deploy:
 
 ```bash
-# Fresh discover from a directory
+# Fresh discover from a directory (also writes models.json)
 ./gguf-switchboard discover-models /models -o models.toml
 
 # Merge with an existing registry (preserves customizations by file path)
 ./gguf-switchboard discover-models /models -o models.toml --merge models.toml
+
+# Export portable JSON from an existing registry
+./gguf-switchboard export-registry /etc/gguf-switchboard/models.toml -o models.json
 ```
 
-The command:
+`discover-models`:
 
 - Recursively scans for `.gguf` files
 - Detects `llama-server` via `command -v llama-server` (falls back to `/usr/local/bin/llama-server`)
-- Writes `[defaults]` and `[[models]]` entries with aliases and display names
+- Writes `version = 1`, `[defaults]`, and `[[models]]` entries with aliases, display names, and inferred `kind`
 - Sets `auto_discover = true` on fresh output
-- Marks the first model as `priority` unless an existing merge already defines one
+- Writes a sibling **`models.json`** next to the output TOML path
+- Marks the first suitable model as `priority` unless an existing merge already defines one (embedding models are never auto-priority)
+- Deduplicates entries with the same alias or file on merge
 
 #### Docker (`models.docker.toml`)
 
@@ -363,11 +481,13 @@ For Docker deployments, use `models.docker.toml` (mounted by `docker-compose` al
 
 #### Customizing aliases and priorities
 
-1. Edit `models.toml` — set `alias`, `display_name`, and `priority` on `[[models]]` entries
+1. Edit `models.toml` — set `alias`, `display_name`, `priority`, `kind`, `enabled`, `context_size`, or `extra_args` on `[[models]]` entries
 2. Re-run `./deploy.sh --refresh-models` (or `discover-models --merge`) to pick up new GGUF files while keeping your edits
 3. Restart the service: `sudo systemctl restart gguf-switchboard`
 
-Only one model should have `priority = true` (the idle-timeout default). If none is set after discovery, the first model is marked priority.
+Only one model should have `priority = true` (the idle-timeout default). If multiple are set, the runtime keeps the first and clears the rest with a warning. If none is set after discovery, the best-matching chat model is marked priority (embeddings are skipped).
+
+**Tip — Llama 3.1 tool-call behavior:** Meta Llama 3.1 Instruct models may emit JSON function calls instead of plain answers. Add a system prompt in API requests, or set per-model `extra_args = ["--jinja"]` in `models.toml` and use an explicit `context_size` if needed.
 
 ### Inline model config (advanced)
 
@@ -378,6 +498,7 @@ bind = "0.0.0.0:9090"        # Address to listen on
 startup_timeout = 60           # Max seconds to wait for model health
 idle_timeout = 600             # Seconds before priority model auto-loads
 default_backend = "llama.cpp"  # Default backend engine
+vram_gb = 12                   # GPU VRAM for context sizing (see models.toml path)
 
 [models.local-gemma-code]
 backend = "llama.cpp"
@@ -418,7 +539,8 @@ priority = false
 | `startup_timeout` | Seconds to wait for a backend to become healthy |
 | `idle_timeout` | Seconds of inactivity before the priority model loads |
 | `default_backend` | Fallback backend engine name |
-| `models_file` | Path to simplified model registry (`models.toml`) |
+| `vram_gb` | GPU VRAM in GB — sizes per-model `-c` when not set in `models.toml` (default: `12` for RTX 3060) |
+| `models_file` | Path to model registry (`models.toml` or `models.json`) |
 | `models.<id>.backend` | Engine type (`llama.cpp`) |
 | `models.<id>.display_name` | Human-readable name shown in `/v1/models` |
 | `models.<id>.command` | Path to the backend binary |
@@ -433,17 +555,26 @@ priority = false
 
 ### Context size (`-c`)
 
-All models in the bundled configs default to a **65536-token** context window via the `-c` flag passed to `llama-server`:
+Per-model context is chosen in this order:
+
+1. `context_size` on the `[[models]]` entry (explicit override)
+2. **VRAM heuristic** from `vram_gb` in `config.toml` (default `12`) using model file size and kind
+3. `defaults.context_size` in `models.toml` as the ceiling/fallback
 
 ```toml
-args = [
-    # ...
-    "-c", "65536",
-    # ...
-]
+# config.toml — set to your GPU VRAM (RTX 3060 = 12)
+vram_gb = 12
 ```
 
-This is the effective context limit for clients (Cursor, Cline, Continue, etc.) — not whatever context size the IDE UI may advertise.
+Typical results with `vram_gb = 12` (when `context_size` is not set per model):
+
+| Model class | Suggested `-c` |
+|-------------|----------------|
+| Embedding | 8192 |
+| 8B chat (Q4, ~5 GB file) | 32768 |
+| 30B MoE / large GGUF (≥12 GB file) | 16384 |
+
+Explicit `context_size` on a `[[models]]` entry always wins. Inline `[models.*]` blocks in `config.toml` use whatever `-c` you set in `args` directly.
 
 **After changing `-c`**, restart the runtime (or trigger a model reload) so `llama-server` picks up the new value:
 
@@ -616,7 +747,11 @@ curl http://localhost:9090/v1/embeddings \
 After deploy, `./deploy.sh` prints configured models in the terminal. You can also query the API:
 
 ```bash
+# OpenAI-compatible model list (enabled models only)
 curl http://localhost:9090/v1/models
+
+# Portable registry JSON (all entries, with kind/tags)
+curl http://localhost:9090/v1/models/registry.json
 ```
 
 ### Responses API
@@ -637,13 +772,14 @@ After starting the runtime, open the interactive API docs in your browser:
 
 - **Swagger UI:** http://localhost:9090/swagger-ui/
 - **OpenAPI spec:** http://localhost:9090/api-docs/openapi.json
+- **Model registry JSON:** http://localhost:9090/v1/models/registry.json
 - **Root redirect:** http://localhost:9090/ → Swagger UI
 
 ![Swagger UI with model dropdown](docs/swagger-ui.png)
 
 All endpoints are listed and testable from the Swagger UI — health, models, chat completions, embeddings, usage, and more.
 
-A **Model** dropdown appears in the top bar (like the Authorize button). The selected model is persisted in the browser and applied automatically to every API request that accepts a `model` field — chat, completions, embeddings, responses, audio, usage filters, and model lookups.
+A **Model** dropdown and **models.json** download link appear in the top bar. The selected model is persisted in the browser and applied to the `model` field on send. Request body textareas are editable — your changes are preserved until you edit them again; only Swagger placeholder values are sanitized when a request is sent.
 
 ### Health & Status
 
@@ -879,17 +1015,22 @@ It builds `gguf-switchboard` if needed and downloads a `llama-swap` release bina
 ```
 .
 ├── Cargo.toml              # Dependencies and build config
-├── config.toml             # Server configuration
+├── config.toml             # Server configuration (bind, vram_gb, models_file)
 ├── config.docker.toml      # Docker server configuration
-├── models.toml             # Model registry (aliases → GGUF files)
+├── models.toml             # Model registry template (aliases → GGUF files)
 ├── models.docker.toml      # Docker model registry
+├── models.local.toml       # Deploy-synced registry copy (gitignored)
+├── models.local.json       # Portable registry export (gitignored)
+├── deploy.sh               # Build, install, discover models, sync registry
 ├── gguf-switchboard.service  # Systemd unit file
+├── swagger-ui-overrides/   # Swagger UI customizations (model picker, editable payloads)
 ├── .github/workflows/
-│   ├── ci.yml              # CI: check, clippy, build, test
-│   └── release.yml         # Multi-platform release builds
+│   └── ci.yml              # CI: check, clippy, build, test; release builds on version tags
 └── src/
-    ├── main.rs             # Entry point, signal handling
-    ├── config/mod.rs       # TOML configuration loading
+    ├── main.rs             # Entry point; discover-models / export-registry CLI
+    ├── config/
+    │   ├── mod.rs          # config.toml loading (vram_gb, models_file)
+    │   └── models_registry.rs  # models.toml/json registry, VRAM context sizing
     ├── errors/mod.rs       # OpenAI-compatible error responses
     ├── types/              # Request/response type definitions
     │   ├── mod.rs          # Shared types (ModelInfo, Usage, etc.)
@@ -912,7 +1053,7 @@ It builds `gguf-switchboard` if needed and downloads a `llama-swap` release bina
         ├── chat.rs         # POST /v1/chat/completions
         ├── completions.rs  # POST /v1/completions
         ├── embeddings.rs   # POST /v1/embeddings
-        ├── models.rs       # GET /v1/models
+        ├── models.rs       # GET /v1/models, /v1/models/registry.json
         ├── responses.rs    # POST /v1/responses
         ├── audio.rs        # POST /v1/audio/*
         ├── health.rs       # GET /health, /status

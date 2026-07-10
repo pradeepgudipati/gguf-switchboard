@@ -25,10 +25,16 @@ pub struct Config {
     /// Path to the token usage SQLite database
     #[serde(default)]
     pub database_path: Option<String>,
-    /// Optional path to a simplified models registry (`models.toml`).
+    /// GPU VRAM in GB used to size default context windows per model (default: 12).
+    #[serde(default = "default_vram_gb")]
+    pub vram_gb: u32,
+    /// Optional path to a simplified models registry (`models.toml` or `models.json`).
     /// When set, model entries are expanded from that file at load time.
     #[serde(default)]
     pub models_file: Option<String>,
+    /// Portable JSON export of the model registry (generated at startup).
+    #[serde(skip, default)]
+    pub registry_json: String,
     /// Model definitions keyed by model id (inline in config, or expanded from `models_file`)
     #[serde(default)]
     pub models: HashMap<String, ModelConfig>,
@@ -75,6 +81,10 @@ fn default_idle_timeout() -> u64 {
 
 fn default_backend() -> String {
     "llama.cpp".to_string()
+}
+
+fn default_vram_gb() -> u32 {
+    12
 }
 
 fn default_memory_warning_threshold() -> u8 {
@@ -129,7 +139,7 @@ impl Config {
         if let Some(models_path) = models_file {
             let resolved = resolve_relative_to_config(config_path, &models_path);
             let registry = ModelsRegistry::load(&resolved)?;
-            let expanded = registry.expand(&self.default_backend)?;
+            let expanded = registry.expand(&self.default_backend, self.vram_gb)?;
             if !self.models.is_empty() {
                 tracing::warn!(
                     models_file = %resolved,
@@ -137,7 +147,11 @@ impl Config {
                 );
             }
             self.models = expanded;
-            self.models_file = Some(resolved);
+            self.models_file = Some(resolved.clone());
+            self.registry_json =
+                serde_json::to_string_pretty(&registry.to_json_export()).map_err(|e| {
+                    RuntimeError::ConfigError(format!("Failed to serialize models JSON: {e}"))
+                })?;
         }
 
         Ok(())

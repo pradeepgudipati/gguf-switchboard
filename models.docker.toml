@@ -1,6 +1,8 @@
 # Docker model registry — short aliases for API requests.
 # Mounted by docker-compose alongside config.docker.toml.
 
+version = 1
+
 [defaults]
 models_dir = "/models"
 llama_server = "/usr/local/bin/llama-server"

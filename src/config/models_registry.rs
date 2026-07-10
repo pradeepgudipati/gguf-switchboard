@@ -6,9 +6,15 @@ use serde::{Deserialize, Serialize};
 use super::ModelConfig;
 use crate::errors::RuntimeError;
 
+fn default_registry_version() -> u32 {
+    1
+}
+
 /// Simplified model registry — short aliases instead of full GGUF paths in API requests.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelsRegistry {
+    #[serde(default = "default_registry_version")]
+    pub version: u32,
     #[serde(default)]
     pub defaults: RegistryDefaults,
     /// When true, every `.gguf` file under `defaults.models_dir` is registered
@@ -38,6 +44,10 @@ pub struct RegistryDefaults {
     pub backend: String,
 }
 
+fn default_enabled() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct RegistryEntry {
     /// Short model id used in API requests (e.g. `gemma-code`).
@@ -48,6 +58,12 @@ pub struct RegistryEntry {
     /// Human-readable name for `/v1/models`. Defaults to a title-cased alias.
     #[serde(default)]
     pub display_name: Option<String>,
+    /// Model role: `chat`, `coder`, `vision`, or `embedding`. Inferred from alias/file when omitted.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// When false, the model is omitted from scheduling and `/v1/models`.
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
     #[serde(default)]
     pub priority: bool,
     /// Override the auto-assigned backend port.
@@ -56,6 +72,39 @@ pub struct RegistryEntry {
     /// Override `defaults.context_size` for this model.
     #[serde(default)]
     pub context_size: Option<u32>,
+    /// Extra `llama-server` flags appended after the default args (e.g. `--jinja`).
+    #[serde(default)]
+    pub extra_args: Vec<String>,
+}
+
+impl RegistryEntry {
+    pub fn effective_kind(&self) -> String {
+        self.kind
+            .clone()
+            .unwrap_or_else(|| infer_kind(&self.alias, &self.file))
+    }
+}
+
+/// Portable JSON export shared across tools (Open WebUI, scripts, etc.).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelsJsonExport {
+    pub version: u32,
+    pub models_dir: String,
+    pub models: Vec<ModelsJsonEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelsJsonEntry {
+    pub id: String,
+    pub file: String,
+    pub display_name: String,
+    pub kind: String,
+    pub enabled: bool,
+    pub priority: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_size: Option<u32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub tags: Vec<String>,
 }
 
 impl Default for RegistryDefaults {
@@ -366,6 +415,156 @@ fn is_embedding_like_alias(alias: &str) -> bool {
     lower.contains("embed") || lower.contains("granite-embedding")
 }
 
+fn infer_kind(alias: &str, file: &str) -> String {
+    let combined = format!("{alias} {file}").to_ascii_lowercase();
+    if combined.contains("embed") {
+        "embedding".to_string()
+    } else if combined.contains("-vl") || combined.contains("vision") || combined.contains("mmproj")
+    {
+        "vision".to_string()
+    } else if combined.contains("coder") || combined.contains("-code") {
+        "coder".to_string()
+    } else {
+        "chat".to_string()
+    }
+}
+
+fn dedupe_registry_entries(entries: &mut Vec<RegistryEntry>) {
+    let mut by_file = HashMap::new();
+    for entry in entries.drain(..) {
+        let key = entry.file.clone();
+        by_file
+            .entry(key)
+            .and_modify(|existing: &mut RegistryEntry| {
+                merge_registry_entry(existing, &entry);
+            })
+            .or_insert(entry);
+    }
+
+    let mut by_alias = HashMap::new();
+    for entry in by_file.into_values() {
+        let key = entry.alias.clone();
+        by_alias
+            .entry(key)
+            .and_modify(|existing: &mut RegistryEntry| {
+                merge_registry_entry(existing, &entry);
+            })
+            .or_insert(entry);
+    }
+
+    let mut deduped: Vec<RegistryEntry> = by_alias.into_values().collect();
+    deduped.sort_by(|a, b| a.alias.cmp(&b.alias));
+    *entries = deduped;
+}
+
+fn merge_registry_entry(target: &mut RegistryEntry, incoming: &RegistryEntry) {
+    if target.display_name.is_none() {
+        target.display_name = incoming.display_name.clone();
+    }
+    if target.kind.is_none() {
+        target.kind = incoming.kind.clone();
+    }
+    if target.port.is_none() {
+        target.port = incoming.port;
+    }
+    if target.context_size.is_none() {
+        target.context_size = incoming.context_size;
+    }
+    if incoming.priority {
+        target.priority = true;
+    }
+    if !incoming.enabled {
+        target.enabled = false;
+    }
+    if target.extra_args.is_empty() {
+        target.extra_args = incoming.extra_args.clone();
+    }
+}
+
+fn normalize_priority_entries(entries: &mut [RegistryEntry]) {
+    let priority_indices: Vec<usize> = entries
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.priority)
+        .map(|(index, _)| index)
+        .collect();
+
+    if priority_indices.len() <= 1 {
+        return;
+    }
+
+    tracing::warn!(
+        count = priority_indices.len(),
+        kept = priority_indices[0],
+        "Multiple priority models configured; keeping only the first"
+    );
+
+    for (index, entry) in entries.iter_mut().enumerate() {
+        if index != priority_indices[0] {
+            entry.priority = false;
+        }
+    }
+}
+
+fn file_size_gb(path: &str) -> Option<f64> {
+    std::fs::metadata(path)
+        .ok()
+        .map(|meta| meta.len() as f64 / 1_073_741_824.0)
+}
+
+/// Suggest a context window (`-c`) from available VRAM and model file size.
+pub fn suggest_context_size(
+    vram_gb: u32,
+    entry: &RegistryEntry,
+    model_path: &str,
+    default_context: u32,
+) -> u32 {
+    if let Some(context_size) = entry.context_size {
+        return context_size;
+    }
+
+    let kind = entry.effective_kind();
+    if kind == "embedding" {
+        return 8192.min(default_context);
+    }
+
+    let size_gb = file_size_gb(model_path).unwrap_or(5.0);
+    let vram = f64::from(vram_gb.max(1));
+
+    if size_gb >= 12.0 || entry.alias.contains("30b") || entry.alias.contains("70b") {
+        return if vram <= 12.0 { 16384 } else { 32768 };
+    }
+    if size_gb >= 8.0 {
+        return if vram <= 12.0 { 16384 } else { 32768 };
+    }
+    if vram <= 8.0 {
+        return 16384;
+    }
+    if vram <= 12.0 {
+        return 32768;
+    }
+    default_context.min(65536)
+}
+
+fn json_sibling_path(toml_path: &str) -> String {
+    if let Some(idx) = toml_path.rfind(".toml") {
+        format!("{}json{}", &toml_path[..idx], &toml_path[idx + 5..])
+    } else {
+        format!("{toml_path}.json")
+    }
+}
+
+fn tags_for_entry(entry: &RegistryEntry) -> Vec<String> {
+    let mut tags = vec![entry.effective_kind()];
+    if entry.priority {
+        tags.push("priority".to_string());
+    }
+    if !entry.enabled {
+        tags.push("disabled".to_string());
+    }
+    tags
+}
+
 fn priority_preference_score(alias: &str) -> u8 {
     if is_embedding_like_alias(alias) {
         return 0;
@@ -463,10 +662,82 @@ fn build_existing_file_map(
 
 impl ModelsRegistry {
     pub fn load(path: &str) -> Result<Self, RuntimeError> {
+        if path.ends_with(".json") {
+            return Self::load_json(path);
+        }
+        Self::load_toml(path)
+    }
+
+    fn load_toml(path: &str) -> Result<Self, RuntimeError> {
         let content = std::fs::read_to_string(path).map_err(|e| {
             RuntimeError::ConfigError(format!("Failed to read models file '{path}': {e}"))
         })?;
-        toml::from_str(&content).map_err(RuntimeError::from)
+        let mut registry: ModelsRegistry = toml::from_str(&content).map_err(RuntimeError::from)?;
+        dedupe_registry_entries(&mut registry.models);
+        normalize_priority_entries(&mut registry.models);
+        Ok(registry)
+    }
+
+    fn load_json(path: &str) -> Result<Self, RuntimeError> {
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            RuntimeError::ConfigError(format!("Failed to read models file '{path}': {e}"))
+        })?;
+        let export: ModelsJsonExport =
+            serde_json::from_str(&content).map_err(RuntimeError::from)?;
+        Self::from_json_export(export)
+    }
+
+    pub fn from_json_export(export: ModelsJsonExport) -> Result<Self, RuntimeError> {
+        let mut registry = ModelsRegistry {
+            version: export.version,
+            defaults: RegistryDefaults {
+                models_dir: export.models_dir,
+                ..RegistryDefaults::default()
+            },
+            auto_discover: false,
+            models: export
+                .models
+                .into_iter()
+                .map(|entry| RegistryEntry {
+                    alias: entry.id,
+                    file: entry.file,
+                    display_name: Some(entry.display_name),
+                    kind: Some(entry.kind),
+                    enabled: entry.enabled,
+                    priority: entry.priority,
+                    port: None,
+                    context_size: entry.context_size,
+                    extra_args: Vec::new(),
+                })
+                .collect(),
+        };
+        dedupe_registry_entries(&mut registry.models);
+        normalize_priority_entries(&mut registry.models);
+        Ok(registry)
+    }
+
+    pub fn to_json_export(&self) -> ModelsJsonExport {
+        ModelsJsonExport {
+            version: self.version,
+            models_dir: self.defaults.models_dir.clone(),
+            models: self
+                .models
+                .iter()
+                .map(|entry| ModelsJsonEntry {
+                    id: entry.alias.clone(),
+                    file: entry.file.clone(),
+                    display_name: entry
+                        .display_name
+                        .clone()
+                        .unwrap_or_else(|| display_name_from_alias(&entry.alias)),
+                    kind: entry.effective_kind(),
+                    enabled: entry.enabled,
+                    priority: entry.priority,
+                    context_size: entry.context_size,
+                    tags: tags_for_entry(entry),
+                })
+                .collect(),
+        }
     }
 
     pub fn write(&self, path: &str) -> Result<(), RuntimeError> {
@@ -475,6 +746,17 @@ impl ModelsRegistry {
         })?;
         std::fs::write(path, content).map_err(|e| {
             RuntimeError::ConfigError(format!("Failed to write models file '{path}': {e}"))
+        })?;
+        self.write_json(&json_sibling_path(path))?;
+        Ok(())
+    }
+
+    pub fn write_json(&self, path: &str) -> Result<(), RuntimeError> {
+        let content = serde_json::to_string_pretty(&self.to_json_export()).map_err(|e| {
+            RuntimeError::ConfigError(format!("Failed to serialize models JSON: {e}"))
+        })?;
+        std::fs::write(path, content).map_err(|e| {
+            RuntimeError::ConfigError(format!("Failed to write models JSON '{path}': {e}"))
         })?;
         Ok(())
     }
@@ -521,6 +803,7 @@ impl ModelsRegistry {
                 defaults.llama_server = llama_server;
                 defaults
             },
+            version: merge_from.map(|e| e.version).unwrap_or(1),
             auto_discover: merge_from.map(|e| e.auto_discover).unwrap_or(true),
             models: Vec::new(),
         };
@@ -558,27 +841,36 @@ impl ModelsRegistry {
                     alias,
                     file,
                     display_name: existing.display_name.clone(),
+                    kind: existing.kind.clone(),
+                    enabled: existing.enabled,
                     priority: existing.priority,
                     port: existing.port,
                     context_size: existing.context_size,
+                    extra_args: existing.extra_args.clone(),
                 });
                 continue;
             }
 
             let mut alias = alias_from_filename(&path);
             alias = dedupe_alias(&alias, &mut used_aliases);
+            let kind = infer_kind(&alias, &file);
 
             registry.models.push(RegistryEntry {
                 alias: alias.clone(),
                 file,
                 display_name: Some(display_name_from_alias(&alias)),
+                kind: Some(kind),
+                enabled: true,
                 priority: false,
                 port: None,
                 context_size: None,
+                extra_args: Vec::new(),
             });
         }
 
+        dedupe_registry_entries(&mut registry.models);
         assign_default_priority(&mut registry, &models_dirs, merge_from);
+        normalize_priority_entries(&mut registry.models);
 
         Ok(registry)
     }
@@ -587,6 +879,7 @@ impl ModelsRegistry {
     pub fn expand(
         &self,
         fallback_backend: &str,
+        vram_gb: u32,
     ) -> Result<HashMap<String, ModelConfig>, RuntimeError> {
         let models_dirs = resolve_models_dirs(&self.defaults.models_dir)?;
 
@@ -635,17 +928,25 @@ impl ModelsRegistry {
 
                 let mut alias = alias_from_filename(&path);
                 alias = dedupe_alias(&alias, &mut used_aliases);
+                let kind = infer_kind(&alias, &file);
 
                 entries.push(RegistryEntry {
                     alias: alias.clone(),
                     file,
                     display_name: Some(display_name_from_alias(&alias)),
+                    kind: Some(kind),
+                    enabled: true,
                     priority: false,
                     port: None,
                     context_size: None,
+                    extra_args: Vec::new(),
                 });
             }
         }
+
+        entries.retain(|entry| entry.enabled);
+        dedupe_registry_entries(&mut entries);
+        normalize_priority_entries(&mut entries);
 
         if entries.is_empty() {
             return Err(RuntimeError::ConfigError(
@@ -668,7 +969,22 @@ impl ModelsRegistry {
             let port = entry
                 .port
                 .unwrap_or(self.defaults.base_port.saturating_add(index as u16));
-            let context_size = entry.context_size.unwrap_or(self.defaults.context_size);
+            let context_size =
+                suggest_context_size(vram_gb, entry, &model_path, self.defaults.context_size);
+
+            let mut args = vec![
+                "-m".to_string(),
+                model_path,
+                "--host".to_string(),
+                self.defaults.host.clone(),
+                "--port".to_string(),
+                port.to_string(),
+                "-c".to_string(),
+                context_size.to_string(),
+                "-ngl".to_string(),
+                self.defaults.ngl.to_string(),
+            ];
+            args.extend(entry.extra_args.clone());
 
             let config = ModelConfig {
                 backend: backend.clone(),
@@ -677,18 +993,7 @@ impl ModelsRegistry {
                     .clone()
                     .unwrap_or_else(|| display_name_from_alias(&entry.alias)),
                 command: self.defaults.llama_server.clone(),
-                args: vec![
-                    "-m".to_string(),
-                    model_path,
-                    "--host".to_string(),
-                    self.defaults.host.clone(),
-                    "--port".to_string(),
-                    port.to_string(),
-                    "-c".to_string(),
-                    context_size.to_string(),
-                    "-ngl".to_string(),
-                    self.defaults.ngl.to_string(),
-                ],
+                args,
                 backend_url: format!("http://{}:{}/v1", self.defaults.host, port),
                 health_url: format!("http://{}:{}/health", self.defaults.host, port),
                 priority: entry.priority,
@@ -909,6 +1214,7 @@ mod tests {
         write_minimal_gguf(&dir.join("qwen2.5-coder-7b.gguf"), "qwen2");
 
         let existing = ModelsRegistry {
+            version: 1,
             defaults: RegistryDefaults {
                 models_dir: dir.to_string_lossy().into_owned(),
                 base_port: 9000,
@@ -920,17 +1226,23 @@ mod tests {
                     alias: "gemma-code".to_string(),
                     file: "gemma-3-4b.gguf".to_string(),
                     display_name: Some("Gemma 3 Coding Model".to_string()),
+                    kind: None,
+                    enabled: true,
                     priority: true,
                     port: None,
                     context_size: None,
+                    extra_args: Vec::new(),
                 },
                 RegistryEntry {
                     alias: "legacy-missing".to_string(),
                     file: "removed.gguf".to_string(),
                     display_name: Some("Removed".to_string()),
+                    kind: None,
+                    enabled: true,
                     priority: false,
                     port: None,
                     context_size: None,
+                    extra_args: Vec::new(),
                 },
             ],
         };
@@ -963,6 +1275,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         let existing = ModelsRegistry {
+            version: 1,
             defaults: RegistryDefaults {
                 models_dir: "/old".to_string(),
                 ..RegistryDefaults::default()
@@ -972,9 +1285,12 @@ mod tests {
                 alias: "demo".to_string(),
                 file: "demo.gguf".to_string(),
                 display_name: Some("Demo".to_string()),
+                kind: None,
+                enabled: true,
                 priority: true,
                 port: None,
                 context_size: None,
+                extra_args: Vec::new(),
             }],
         };
 
@@ -997,6 +1313,7 @@ mod tests {
         write_minimal_gguf(&model_path, "llama");
 
         let registry = ModelsRegistry {
+            version: 1,
             defaults: RegistryDefaults {
                 models_dir: dir.to_string_lossy().into_owned(),
                 base_port: 9001,
@@ -1008,13 +1325,16 @@ mod tests {
                 alias: "test".to_string(),
                 file: "test-model.gguf".to_string(),
                 display_name: Some("Test Model".to_string()),
+                kind: None,
+                enabled: true,
                 priority: true,
                 port: None,
-                context_size: None,
+                context_size: Some(4096),
+                extra_args: Vec::new(),
             }],
         };
 
-        let models = registry.expand("llama.cpp").unwrap();
+        let models = registry.expand("llama.cpp", 12).unwrap();
         let cfg = models.get("test").unwrap();
         assert_eq!(cfg.display_name, "Test Model");
         assert!(cfg.args.contains(&"-m".to_string()));
@@ -1064,6 +1384,7 @@ mod tests {
     #[test]
     fn expand_errors_when_configured_models_dir_is_missing() {
         let registry = ModelsRegistry {
+            version: 1,
             defaults: RegistryDefaults {
                 models_dir: "/nonexistent-models-root".to_string(),
                 ..RegistryDefaults::default()
@@ -1072,7 +1393,7 @@ mod tests {
             models: Vec::new(),
         };
 
-        let err = registry.expand("llama.cpp").unwrap_err().to_string();
+        let err = registry.expand("llama.cpp", 12).unwrap_err().to_string();
         assert!(err.contains("does not exist"));
     }
 
@@ -1084,6 +1405,7 @@ mod tests {
         write_minimal_gguf(&dir.join("Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf"), "llama");
 
         let registry = ModelsRegistry {
+            version: 1,
             defaults: RegistryDefaults {
                 models_dir: dir.to_string_lossy().into_owned(),
                 ..RegistryDefaults::default()
@@ -1093,13 +1415,16 @@ mod tests {
                 alias: "llama-3".to_string(),
                 file: "llama-3.2-3b.gguf".to_string(),
                 display_name: Some("Llama 3.2 3B".to_string()),
+                kind: None,
+                enabled: true,
                 priority: true,
                 port: None,
                 context_size: None,
+                extra_args: Vec::new(),
             }],
         };
 
-        let models = registry.expand("llama.cpp").unwrap();
+        let models = registry.expand("llama.cpp", 12).unwrap();
         assert_eq!(models.len(), 1);
         assert!(models.contains_key("meta-llama-3.1-8b"));
 
@@ -1159,7 +1484,7 @@ mod tests {
                 .all(|entry| Path::new(&entry.file).is_absolute())
         );
 
-        let expanded = registry.expand("llama.cpp").unwrap();
+        let expanded = registry.expand("llama.cpp", 12).unwrap();
         assert_eq!(expanded.len(), 2);
 
         std::fs::remove_dir_all(&root).ok();
@@ -1175,6 +1500,7 @@ mod tests {
         write_minimal_gguf(&nested.join("extra-model.gguf"), "llama");
 
         let registry = ModelsRegistry {
+            version: 1,
             defaults: RegistryDefaults {
                 models_dir: dir.to_string_lossy().into_owned(),
                 ..RegistryDefaults::default()
@@ -1184,17 +1510,75 @@ mod tests {
                 alias: "listed".to_string(),
                 file: "listed.gguf".to_string(),
                 display_name: Some("Listed".to_string()),
+                kind: None,
+                enabled: true,
                 priority: true,
                 port: None,
                 context_size: None,
+                extra_args: Vec::new(),
             }],
         };
 
-        let models = registry.expand("llama.cpp").unwrap();
+        let models = registry.expand("llama.cpp", 12).unwrap();
         assert_eq!(models.len(), 2);
         assert!(models.contains_key("listed"));
         assert!(models.contains_key("extra-model"));
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn dedupe_registry_entries_by_alias_and_file() {
+        let mut entries = vec![
+            RegistryEntry {
+                alias: "qwen3-vl-8b".to_string(),
+                file: "Qwen3-VL-8B-Instruct-Q4_K_M.gguf".to_string(),
+                display_name: Some("First".to_string()),
+                kind: None,
+                enabled: true,
+                priority: false,
+                port: None,
+                context_size: None,
+                extra_args: Vec::new(),
+            },
+            RegistryEntry {
+                alias: "qwen3-vl-8b".to_string(),
+                file: "Qwen3-VL-8B-Instruct-Q4_K_M.gguf".to_string(),
+                display_name: Some("Duplicate".to_string()),
+                kind: None,
+                enabled: true,
+                priority: true,
+                port: None,
+                context_size: None,
+                extra_args: Vec::new(),
+            },
+        ];
+
+        dedupe_registry_entries(&mut entries);
+        normalize_priority_entries(&mut entries);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].display_name.as_deref(), Some("First"));
+        assert!(entries[0].priority);
+    }
+
+    #[test]
+    fn suggest_context_size_uses_vram_for_small_models() {
+        let entry = RegistryEntry {
+            alias: "gemma-4-e4b".to_string(),
+            file: "gemma-4-E4B-it-Q4_K_M.gguf".to_string(),
+            display_name: None,
+            kind: Some("chat".to_string()),
+            enabled: true,
+            priority: false,
+            port: None,
+            context_size: None,
+            extra_args: Vec::new(),
+        };
+
+        assert_eq!(
+            suggest_context_size(12, &entry, "/tmp/gemma-4-E4B-it-Q4_K_M.gguf", 65536),
+            32768
+        );
     }
 }

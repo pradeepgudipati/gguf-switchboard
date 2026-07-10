@@ -1,5 +1,5 @@
 [Unit]
-Description=GGUF Switchboard — OpenAI-compatible local inference server
+Description=GGUF Switchboard — GPU-aware local GGUF model scheduler
 After=network.target
 Documentation=https://github.com/pradeepgudipati/gguf-switchboard
 

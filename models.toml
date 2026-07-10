@@ -1,13 +1,18 @@
-# GGUF Switchboard model registry
+# GGUF Switchboard model registry (schema version 1)
 #
-# Use short aliases in API requests (e.g. "gemma-code") instead of full GGUF filenames.
+# Use short aliases in API requests (e.g. "gemma-4-e4b") instead of full GGUF filenames.
 # Link this file from config.toml:  models_file = "models.toml"
 #
 # Generate automatically from configured model directories:
 #   ./gguf-switchboard discover-models /path/to/models -o models.toml
 #
+# discover-models also writes a portable models.json alongside this file.
+# deploy.sh syncs the production registry to models.local.toml / models.local.json.
+#
 # Multiple directories (comma-separated):
 #   models_dir = "/models,/home/you/extra-gguf"
+
+version = 1
 
 [defaults]
 # Root directory (or comma-separated directories) scanned for llama.cpp-loadable GGUF files.
@@ -15,6 +20,7 @@ models_dir = "/models"
 llama_server = "/usr/local/bin/llama-server"
 host = "127.0.0.1"
 base_port = 8081
+# Fallback context when VRAM heuristics do not apply; see config.toml `vram_gb`.
 context_size = 65536
 ngl = 999
 backend = "llama.cpp"
@@ -27,7 +33,11 @@ auto_discover = true
 # specific files. Any other .gguf under models_dir is picked up by auto_discover.
 #
 # [[models]]
-# alias = "gemma-code"
-# file = "gemma-3-4b.gguf"
-# display_name = "Gemma 3 Coding Model"
-# priority = true
+# alias = "gemma-4-e4b"
+# file = "gemma-4-E4B-it-Q4_K_M.gguf"
+# display_name = "Gemma 4 E4B"
+# kind = "chat"              # chat | coder | vision | embedding (inferred when omitted)
+# enabled = true             # false = hide from /v1/models and scheduling
+# priority = true            # auto-load after idle_timeout (only one should be true)
+# context_size = 32768       # override VRAM-based default from config.toml vram_gb
+# extra_args = ["--jinja"]   # appended to llama-server launch args

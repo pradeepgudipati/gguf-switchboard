@@ -6,10 +6,10 @@ concurrency:
 
 on:
   push:
-    branches: [Dev]
+    branches: [main, Dev]
     tags: ["v*"]
   pull_request:
-    branches: [Dev]
+    branches: [main, Dev]
 
 permissions:
   contents: write
@@ -23,7 +23,7 @@ env:
 jobs:
   ci:
     name: CI
-    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/Dev' || startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/Dev' || startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5

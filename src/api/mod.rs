@@ -22,7 +22,7 @@ use crate::state::AppState;
 #[openapi(
     info(
         title = "GGUF Switchboard",
-        description = "100% OpenAI API compatible local inference runtime",
+        description = "GPU-aware GGUF model scheduler with an OpenAI-compatible API",
         version = env!("CARGO_PKG_VERSION")
     ),
     paths(
@@ -31,6 +31,7 @@ use crate::state::AppState;
         metrics::metrics,
         models::list_models,
         models::get_model,
+        models::registry_json,
         chat::chat_completions,
         completions::completions,
         embeddings::embeddings,
@@ -142,6 +143,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             axum::routing::post(embeddings::embeddings),
         )
         .route("/v1/models", axum::routing::get(models::list_models))
+        .route(
+            "/v1/models/registry.json",
+            axum::routing::get(models::registry_json),
+        )
         .route(
             "/v1/models/{model_id}",
             axum::routing::get(models::get_model),

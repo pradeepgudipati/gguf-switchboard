@@ -45,6 +45,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return run_discover_models(&args);
     }
 
+    if args.len() >= 3 && args[1] == "export-registry" {
+        return run_export_registry(&args);
+    }
+
     let config_path = args
         .get(1)
         .cloned()
@@ -181,6 +185,8 @@ fn run_discover_models(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         println!("Discovered {discovered_count} model(s) in {models_dir}");
     }
     println!("Wrote {output}");
+    let json_output = json_sibling_path_for_output(&output);
+    println!("Wrote {json_output}");
     if let Some(ref merge_path) = merge_from {
         println!("Merged customizations from {merge_path}");
     }
@@ -199,4 +205,39 @@ fn run_discover_models(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     println!("Point config.toml at the registry with: models_file = \"{output}\"");
 
     Ok(())
+}
+
+fn run_export_registry(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let input = args
+        .get(2)
+        .ok_or("export-registry: missing input path (models.toml)")?;
+    let mut output = json_sibling_path_for_output(input);
+
+    let mut i = 3;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" | "--output" => {
+                if let Some(path) = args.get(i + 1) {
+                    output = path.clone();
+                    i += 2;
+                } else {
+                    return Err("export-registry: missing value for --output".into());
+                }
+            }
+            arg => return Err(format!("export-registry: unknown argument '{arg}'").into()),
+        }
+    }
+
+    let registry = ModelsRegistry::load(input)?;
+    registry.write_json(&output)?;
+    println!("Exported {output}");
+    Ok(())
+}
+
+fn json_sibling_path_for_output(toml_path: &str) -> String {
+    if let Some(idx) = toml_path.rfind(".toml") {
+        format!("{}json{}", &toml_path[..idx], &toml_path[idx + 5..])
+    } else {
+        format!("{toml_path}.json")
+    }
 }
