@@ -1,8 +1,8 @@
 [package]
 name = "gguf-switchboard"
-version = "0.1.0"
+version = "0.1.2"
 edition = "2024"
-description = "GPU-aware GGUF model scheduler with an OpenAI-compatible API"
+description = "llama-swap alternative in Rust — OpenAI-compatible GGUF runtime with VRAM-pressure eviction, context auto-fallback, and usage tracking"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/pradeepgudipati/gguf-switchboard"

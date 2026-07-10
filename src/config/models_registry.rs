@@ -138,7 +138,7 @@ fn default_base_port() -> u16 {
 }
 
 fn default_context_size() -> u32 {
-    65536
+    16384
 }
 
 fn default_ngl() -> u32 {
