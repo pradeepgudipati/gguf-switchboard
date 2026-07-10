@@ -5,7 +5,11 @@
 
 <sub>[▶ Watch with audio](demo.mp4)</sub>
 
-A **[llama-swap](https://github.com/mostlygeek/llama-swap) alternative in Rust** with VRAM-pressure eviction, context auto-fallback, Swagger UI, and built-in usage tracking. Point any OpenAI SDK or tool at it (Python, Node, Cursor, Cline, Continue) and swap GGUF models on demand — no manual process or port juggling.
+A **[llama-swap](https://github.com/mostlygeek/llama-swap) alternative in Rust** with system memory-pressure eviction, OOM-only context fallback, Swagger UI, and built-in usage tracking. Point any OpenAI SDK or tool at it (Python, Node, Cursor, Cline, Continue) and swap GGUF models on demand — no manual process or port juggling.
+
+## Project status
+
+**Experimental** — designed for single-GPU home labs and development machines on a **trusted LAN**. One model is loaded at a time (single-slot swapping). System RAM is monitored for pressure eviction; `vram_gb` sizes context heuristically from model file size, not live GPU telemetry. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for endpoint coverage.
 
 ## Why
 
@@ -13,23 +17,23 @@ When running local LLMs, you typically manage models manually: start `llama-serv
 
 ### Landscape comparison
 
-**[llama-swap](https://github.com/mostlygeek/llama-swap)** is the closest mature alternative for on-demand model swapping. gguf-switchboard targets the same problem — single endpoint, swap on request — and adds VRAM-pressure eviction, context OOM fallback, and usage history. Trade-off: llama.cpp only (no multi-backend swap matrix or web dashboard). See the [detailed comparison](#vs-llama-swap) below.
+**[llama-swap](https://github.com/mostlygeek/llama-swap)** is the closest mature alternative for on-demand model swapping. gguf-switchboard targets the same problem — single endpoint, swap on request — and adds memory-pressure eviction, context reduction on OOM, and usage history. Trade-off: llama.cpp only (no multi-backend swap matrix or web dashboard). See the [detailed comparison](#vs-llama-swap) below.
 
-| Tool | OpenAI API | Loads by model name | Auto unload/load | GGUF support | VRAM-aware scheduling | Worth using? |
+| Tool | OpenAI API | Loads by model name | Auto unload/load | GGUF support | Memory-pressure scheduling | Worth using? |
 |------|:----------:|:-------------------:|:----------------:|:------------:|:---------------------:|--------------|
-| **Ollama** | Yes | Yes | Yes — `keep_alive` unloads idle models; not VRAM-pressure aware | Yes | No | Easy drop-in; auto-unload is TTL-based, not scheduler-driven |
+| **Ollama** | Yes | Yes | Yes — `keep_alive` unloads idle models; not memory-pressure aware | Yes | No | Easy drop-in; auto-unload is TTL-based, not scheduler-driven |
 | **llama.cpp** (`llama-server`) | Yes | Manual — one process per model | No — you manage start/stop | Yes | No | Low-level; you own process and port management |
-| **[llama-swap](https://github.com/mostlygeek/llama-swap)** | Yes | Yes | Yes — swaps on request (TTL-based) | Yes | No | **Mature swap proxy** — multi-backend, swap matrix, web dashboard; no VRAM-pressure eviction, context OOM fallback, or `/v1/usage` history |
+| **[llama-swap](https://github.com/mostlygeek/llama-swap)** | Yes | Yes | Yes — swaps on request (TTL-based) | Yes | No | **Mature swap proxy** — multi-backend, swap matrix, web dashboard; no memory-pressure eviction, context reduction on OOM, or `/v1/usage` history |
 | **vLLM** | Yes | Yes (pre-loaded) | No — serves loaded models; not on-demand swap | No (HuggingFace weights) | Partial — memory-efficient serving | Datacenter / multi-tenant throughput; not GGUF or per-request model lifecycle |
-| **LocalAI** | Yes | Yes | Partial — not VRAM-pressure aware | Yes | No | Full-stack alternative; not designed for proactive eviction under memory pressure |
+| **LocalAI** | Yes | Yes | Partial — not memory-pressure aware | Yes | No | Full-stack alternative; not designed for proactive eviction under memory pressure |
 | **Open WebUI** | Yes (proxy) | Via backend | Depends on backend | Via backend | Via backend | UI layer — not a model scheduler |
 | **LiteLLM** | Yes | Routes only | No — does not load models | Via providers | No | API router, not a model loader |
-| **gguf-switchboard** (this project) | Yes | Yes | Yes — swap + idle priority model | Yes | Yes | **llama-swap alternative (Rust)** — VRAM eviction, context auto-fallback, Swagger UI, usage tracking; llama.cpp-only |
+| **gguf-switchboard** (this project) | Yes | Yes | Yes — single-slot swap + idle priority model | Yes | Yes (system RAM) | **llama-swap alternative (Rust)** — memory eviction, OOM context fallback, Swagger UI, usage tracking; llama.cpp-only |
 
 ### Why existing tools fall short
 
-- **llama-swap** is the closest single-binary alternative — download, configure, run, done. It swaps llama-server processes on request. What it lacks: no VRAM pressure monitoring, no context-size fallback on OOM, no idle timeout / priority model, no usage tracking.
-- **Ollama** unloads idle models via `keep_alive`, but you do not get explicit swap-on-request scheduling or VRAM-pressure eviction — models can still sit resident longer than you expect on tight GPUs.
+- **llama-swap** is the closest single-binary alternative — download, configure, run, done. It swaps llama-server processes on request. What it lacks: no system memory pressure monitoring, no context-size reduction on OOM, no idle timeout / priority model, no usage tracking.
+- **Ollama** unloads idle models via `keep_alive`, but you do not get explicit swap-on-request scheduling or memory-pressure eviction — models can still sit resident longer than you expect on tight GPUs.
 - **LocalAI** is a full-stack alternative supporting many backends and formats. It is not designed for proactive eviction when GPU memory is under pressure; you still manage capacity yourself.
 - **LiteLLM** is an excellent API gateway for routing, fallbacks, and retries across cloud and local providers. It does not spawn backends, load GGUF weights, or manage GPU memory — that is not its job.
 
@@ -37,7 +41,7 @@ The gap: a tool that treats **model loading as a scheduling problem** on constra
 
 ### What makes this different
 
-gguf-switchboard is a **llama-swap-style swap proxy in Rust**, extended for constrained GPUs: VRAM-pressure eviction, automatic context-size fallback on OOM, an idle priority model, and `/v1/usage` history. It presents a single OpenAI-compatible endpoint and decides which model should be loaded based on incoming requests and available VRAM — your tools never manage processes or ports.
+gguf-switchboard is a **llama-swap-style swap proxy in Rust**, extended for constrained GPUs: memory-pressure eviction, automatic context-size reduction on OOM, an idle priority model, and `/v1/usage` history. It presents a single OpenAI-compatible endpoint and swaps one model at a time based on incoming requests — your tools never manage processes or ports.
 
 ```
 OpenAI Request
@@ -59,7 +63,7 @@ The result: one endpoint, many models, zero manual process management.
 │  /v1/chat/completions  ─┐                                    │
 │  /v1/completions       ─┤                                    │
 │  /v1/embeddings        ─┼──▶ Scheduler ──▶ Backend          │
-│  /v1/responses         ─┤      (LRU)       (llama.cpp)      │
+│  /v1/responses         ─┤   (single-slot)    (llama.cpp)      │
 │  /v1/audio/*           ─┘                                    │
 │                                                              │
 │  Dynamic model loading: A→B→A without restart                │
@@ -82,11 +86,11 @@ Point your IDE or agent at `http://localhost:9090/v1`, set a model name from you
 
 ### What you get
 
-- **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/responses`, `/v1/models`, `/v1/models/registry.json`, `/v1/audio/*`
+- **OpenAI-compatible API** — see [compatibility matrix](docs/COMPATIBILITY.md) for endpoint and feature coverage
 - **llama.cpp backend** — spawns and manages `llama-server` child processes
 - **Automatic model loading/unloading** — models come up on first request, no manual restarts
-- **LRU eviction** — unloads the least-recently-used model when capacity is reached
-- **GPU VRAM awareness** — monitors memory pressure and evicts before OOM
+- **Single-slot model swapping** — one model loaded at a time; switches drain in-flight requests first
+- **System memory-pressure monitoring** — unloads the active model when system RAM crosses the critical threshold
 - **Health checks with loaded model name** — `/health` and `/status` report which model is active
 - **SSE streaming** — full `text/event-stream` support with proper `[DONE]` termination
 - **Prometheus metrics** — request counts, latency histograms, model load times at `/metrics`
@@ -97,14 +101,14 @@ Point your IDE or agent at `http://localhost:9090/v1`, set a model name from you
 
 - **Drop-in OpenAI API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/responses`, `/v1/models`, `/v1/models/registry.json`, `/v1/audio/*`
 - **Portable model registry** — `models.json` export for sharing across local AI tools
-- **VRAM-aware context sizing** — `vram_gb` in `config.toml` sizes per-model `-c` automatically
+- **Context sizing heuristic** — `vram_gb` in `config.toml` estimates per-model `-c` from model file size (not live GPU telemetry)
 - **Dynamic model loading** — models are loaded/unloaded on demand; no restart needed
-- **LRU eviction** — automatically unloads the least-recently-used model when capacity is reached
+- **Single-slot swapping** — one resident model; failed switches roll back to the previous model
 - **Priority model** — auto-loads your preferred model after a configurable idle timeout
 - **SSE streaming** — full `text/event-stream` support with proper `[DONE]` termination
 - **Prometheus metrics** — request counts, latency histograms, active request gauges
 - **Graceful shutdown** — SIGTERM/SIGINT handling with backend cleanup
-- **Production-ready** — structured JSON logging, request IDs, error responses matching OpenAI format
+- **Structured logging** — JSON logs, request IDs, OpenAI-shaped error responses
 
 ## Quick Start
 
@@ -233,7 +237,7 @@ Client Request
 ┌──────────┐    ┌───────────────┐    ┌──────────────┐
 │  Axum    │───▶│   Scheduler   │───▶│   Backend    │
 │  Router  │    │               │    │  (llama.cpp) │
-│          │    │ • LRU queue   │    │              │
+│          │    │ • swap slot   │    │              │
 │ /v1/...  │    │ • Load lock   │    │ • child proc │
 │ /health  │    │ • Priority    │    │ • health ck  │
 │ /metrics │    │   watcher     │    │ • HTTP proxy │
@@ -560,7 +564,7 @@ priority = false
 | `startup_timeout` | Seconds to wait for a backend to become healthy |
 | `idle_timeout` | Seconds of inactivity before the priority model loads |
 | `default_backend` | Fallback backend engine name |
-| `vram_gb` | GPU VRAM in GB — sizes per-model `-c` when not set in `models.toml` (default: `12` for RTX 3060) |
+| `vram_gb` | Assumed GPU capacity in GB — heuristic for per-model `-c` when not set in `models.toml` (default: `12` for RTX 3060); does not query live GPU memory |
 | `models_file` | Path to model registry (`models.toml` or `models.json`) |
 | `models.<id>.backend` | Engine type (`llama.cpp`) |
 | `models.<id>.display_name` | Human-readable name shown in `/v1/models` |
@@ -572,14 +576,16 @@ priority = false
 | `memory_warning_threshold` | RAM usage % that logs a warning |
 | `memory_critical_threshold` | RAM usage % that auto-unloads the active model |
 | `memory_check_interval_secs` | Seconds between RAM pressure checks |
-| `context_fallback_min` | Lowest `-c` value used when auto-reducing context after a failed load |
+| `context_fallback_min` | Lowest `-c` value used when auto-reducing context after an OOM-class load failure |
+| `switch_drain_timeout_secs` | Seconds to wait for in-flight requests before switching models (default `120`) |
+| `priority_load_cooldown_secs` | Seconds to skip priority-model reload after a failed load (default `300`) |
 
 ### Context size (`-c`)
 
 Per-model context is chosen in this order:
 
 1. `context_size` on the `[[models]]` entry (explicit override)
-2. **VRAM heuristic** from `vram_gb` in `config.toml` (default `12`) using model file size and kind
+2. **Capacity heuristic** from `vram_gb` in `config.toml` (default `12`) using model file size and kind
 3. `defaults.context_size` in `models.toml` as the ceiling/fallback (bundled default **`16384`** — raise to `32768` or `65536` in `models.toml` if you have spare VRAM)
 
 ```toml
@@ -607,7 +613,7 @@ sudo systemctl restart gguf-switchboard
 
 **VRAM tradeoff:** larger context uses more GPU memory. On constrained GPUs (e.g. 12 GB), you may need to lower `-c` per model if loads fail or you hit OOM — especially for larger quantised models.
 
-**Automatic fallback:** if a model fails to start or never becomes healthy (for example due to insufficient VRAM for a large `-c`), the runtime halves the context size and retries until it succeeds or reaches `context_fallback_min` (default `8192`). The reduced value applies for the rest of the process lifetime (it is not written back to `config.toml`).
+**Automatic fallback:** when a model load fails with an OOM-class error (detected from stderr), the runtime halves the context size and retries until it succeeds or reaches `context_fallback_min` (default `8192`). Missing files, port conflicts, and other non-OOM failures do not reduce context. The reduced value applies for the rest of the process lifetime (it is not written back to `config.toml`).
 
 ```toml
 context_fallback_min = 8192
@@ -1001,8 +1007,8 @@ time curl -s http://localhost:9090/v1/chat/completions \
 |---|---|---|
 | Backends supported | Any OpenAI-compatible server (llama.cpp, vllm, tabbyAPI, stable-diffusion.cpp, ...) | llama.cpp only |
 | Concurrent models | Yes — custom "swap matrix" DSL / groups run multiple models at once | No — one model loaded at a time |
-| GPU VRAM-pressure eviction | No — unload is TTL-based only | Yes — monitors VRAM and evicts proactively before OOM |
-| Context-size OOM fallback | No | Yes — auto-retries a failed load at a lower `-c` |
+| System memory-pressure eviction | No — unload is TTL-based only | Yes — monitors system RAM and unloads at critical threshold |
+| context-size reduction on OOM | No | Yes — auto-retries only on OOM-class failures at a lower `-c` |
 | Persistent usage tracking | Live dashboard metrics (not a queryable history API) | Yes — `/v1/usage` backed by SQLite, queryable per-model |
 | Web dashboard | Yes — playground, live token metrics, request/response inspection, live log streaming | No — Swagger UI only (API docs, not a monitoring dashboard) |
 | API key / auth | Yes — `apiKeys` config restricts endpoint access | No — no auth on any endpoint |
@@ -1043,15 +1049,17 @@ It builds `gguf-switchboard` if needed and downloads a `llama-swap` release bina
 ├── models.local.toml       # Deploy-synced registry copy (gitignored)
 ├── models.local.json       # Portable registry export (gitignored)
 ├── deploy.sh               # Build, install, discover models, sync registry
+├── CHANGELOG.md            # Version index (details in releases/)
+├── releases/               # Per-tag release notes (published to GitHub Releases by CI)
 ├── gguf-switchboard.service  # Systemd unit file
 ├── swagger-ui-overrides/   # Swagger UI customizations (model picker, editable payloads)
 ├── .github/workflows/
-│   └── ci.yml              # CI: check, clippy, build, test; release builds on version tags
+│   └── ci.yml              # CI: check, clippy, build, test; publishes releases/ notes on version tags
 └── src/
     ├── main.rs             # Entry point; discover-models / export-registry CLI
     ├── config/
     │   ├── mod.rs          # config.toml loading (vram_gb, models_file)
-    │   └── models_registry.rs  # models.toml/json registry, VRAM context sizing
+    │   └── models_registry.rs  # models.toml/json registry, context sizing heuristic
     ├── errors/mod.rs       # OpenAI-compatible error responses
     ├── types/              # Request/response type definitions
     │   ├── mod.rs          # Shared types (ModelInfo, Usage, etc.)
@@ -1063,7 +1071,7 @@ It builds `gguf-switchboard` if needed and downloads a `llama-swap` release bina
     ├── backend/
     │   ├── mod.rs          # Backend trait definition
     │   └── llama_cpp.rs    # llama.cpp backend implementation
-    ├── scheduler/mod.rs    # Core scheduler with LRU + priority
+    ├── scheduler/mod.rs    # Single-slot swapping, priority model, memory watcher
     ├── state/mod.rs        # Shared application state
     ├── memory/mod.rs       # System memory pressure monitoring
     ├── db/mod.rs           # Token usage tracking (SQLite)
