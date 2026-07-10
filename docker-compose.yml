@@ -4,8 +4,9 @@ services:
     ports:
       - "9090:9090"
     volumes:
-      # Config
+      # Config + model registry
       - ./config.docker.toml:/home/appuser/config.toml:ro
+      - ./models.docker.toml:/home/appuser/models.docker.toml:ro
       # Persist token usage database
       - runtime-data:/var/lib/gguf-switchboard
       # Mount llama-server binary from host

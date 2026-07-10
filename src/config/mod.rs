@@ -1,6 +1,11 @@
+mod models_registry;
+
 use std::collections::HashMap;
+use std::path::Path;
 
 use serde::Deserialize;
+
+pub use models_registry::ModelsRegistry;
 
 use crate::errors::RuntimeError;
 
@@ -20,7 +25,12 @@ pub struct Config {
     /// Path to the token usage SQLite database
     #[serde(default)]
     pub database_path: Option<String>,
-    /// Model definitions keyed by model id
+    /// Optional path to a simplified models registry (`models.toml`).
+    /// When set, model entries are expanded from that file at load time.
+    #[serde(default)]
+    pub models_file: Option<String>,
+    /// Model definitions keyed by model id (inline in config, or expanded from `models_file`)
+    #[serde(default)]
     pub models: HashMap<String, ModelConfig>,
     /// Percentage of RAM usage at which a warning is logged (default 85).
     #[serde(default = "default_memory_warning_threshold")]
@@ -89,13 +99,48 @@ impl Config {
         let content = std::fs::read_to_string(path).map_err(|e| {
             RuntimeError::ConfigError(format!("Failed to read config file '{path}': {e}"))
         })?;
-        let config: Config = toml::from_str(&content)?;
+        let mut config: Config = toml::from_str(&content)?;
+        config.resolve_models(path)?;
         if config.models.is_empty() {
             return Err(RuntimeError::ConfigError(
-                "Configuration must define at least one model".to_string(),
+                "Configuration must define at least one model (inline [models.*] or models_file)"
+                    .to_string(),
             ));
         }
         Ok(config)
+    }
+
+    fn resolve_models(&mut self, config_path: &str) -> Result<(), RuntimeError> {
+        let models_file = match &self.models_file {
+            Some(path) => Some(path.clone()),
+            None => {
+                let sibling = Path::new(config_path)
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .join("models.toml");
+                if sibling.is_file() {
+                    Some(sibling.to_string_lossy().into_owned())
+                } else {
+                    None
+                }
+            }
+        };
+
+        if let Some(models_path) = models_file {
+            let resolved = resolve_relative_to_config(config_path, &models_path);
+            let registry = ModelsRegistry::load(&resolved)?;
+            let expanded = registry.expand(&self.default_backend)?;
+            if !self.models.is_empty() {
+                tracing::warn!(
+                    models_file = %resolved,
+                    "models_file is set; inline [models.*] entries in config.toml are ignored"
+                );
+            }
+            self.models = expanded;
+            self.models_file = Some(resolved);
+        }
+
+        Ok(())
     }
 
     /// Return the model id of the priority model, if one is configured.
@@ -105,4 +150,18 @@ impl Config {
             .find(|(_, cfg)| cfg.priority)
             .map(|(id, _)| id.clone())
     }
+}
+
+fn resolve_relative_to_config(config_path: &str, models_path: &str) -> String {
+    let path = Path::new(models_path);
+    if path.is_absolute() {
+        return models_path.to_string();
+    }
+
+    Path::new(config_path)
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(path)
+        .to_string_lossy()
+        .into_owned()
 }

@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+# Deploy gguf-switchboard as a systemd service.
+#
+# Environment:
+#   MODELS_DIR   Directory containing .gguf files (default: ~/models when present)
+#
+# Flags:
+#   --refresh-models   Regenerate /etc/gguf-switchboard/models.toml from disk
+#
 set -euo pipefail
 
 REPO_URL="https://github.com/pradeepgudipati/gguf-switchboard.git"
@@ -6,6 +14,8 @@ REPO_DIR="${GGUF_SWITCHBOARD_DIR:-$HOME/gguf-switchboard}"
 BRANCH="Dev"
 SERVICE_FILE="/etc/systemd/system/gguf-switchboard.service"
 CONFIG_FILE="/etc/gguf-switchboard/config.toml"
+MODELS_FILE="/etc/gguf-switchboard/models.toml"
+DEFAULT_MODELS_DIR="$HOME/models"
 
 read_config() {
     if [[ -r "$1" ]]; then
@@ -20,9 +30,46 @@ print_models_from_config() {
     local config
     config="$(read_config "$file")"
 
+    local models_path=""
+    models_path="$(printf '%s\n' "$config" | awk -F'"' '/^models_file\s*=/ { print $2; exit }')"
+    if [[ -z "$models_path" ]]; then
+        local config_dir
+        config_dir="$(dirname "$file")"
+        if [[ -f "$config_dir/models.toml" ]]; then
+            models_path="$config_dir/models.toml"
+        fi
+    elif [[ "$models_path" != /* ]]; then
+        models_path="$(dirname "$file")/$models_path"
+    fi
+
     echo "==> Available models:"
     echo ""
     printf "  %-24s %-30s %s\n" "MODEL ID" "DISPLAY NAME" "STATE"
+
+    if [[ -n "$models_path" && -r "$models_path" ]]; then
+        while IFS= read -r block; do
+            [[ -z "$block" ]] && continue
+            local alias display_name priority state=""
+            alias="$(printf '%s\n' "$block" | awk -F'"' '/^alias = / { print $2; exit }')"
+            display_name="$(printf '%s\n' "$block" | awk -F'"' '/^display_name = / { print $2; exit }')"
+            priority="$(printf '%s\n' "$block" | awk '/^priority = / { print $3; exit }' | tr -d ' ')"
+            [[ "$priority" == "true" ]] && state="priority"
+            [[ -n "$alias" ]] && printf "  %-24s %-30s %s\n" "$alias" "${display_name:-—}" "$state"
+        done < <(awk '
+            BEGIN { block = "" }
+            /^\[\[models\]\]/ {
+                if (block != "") { print block; block = "" }
+                next
+            }
+            /^alias = / || /^display_name = / || /^priority = / {
+                block = block $0 "\n"
+            }
+            END { if (block != "") print block }
+        ' "$models_path")
+        echo ""
+        return
+    fi
+
     while IFS= read -r section; do
         local id="${section#[models.}"
         id="${id%]}"
@@ -41,6 +88,230 @@ print_models_from_config() {
         printf "  %-24s %-30s %s\n" "$id" "${display_name:-—}" "$state"
     done < <(printf '%s\n' "$config" | grep -E '^\[models\.')
     echo ""
+}
+
+read_models_dir_from_toml() {
+    local file="$1"
+    [[ -r "$file" ]] || return 1
+    awk -F'"' '/^models_dir\s*=/ { print $2; exit }' "$file"
+}
+
+is_discoverable_gguf_name() {
+    local name="${1,,}"
+    [[ "$name" == mmproj* || "$name" == mtp-* || "$name" == ggml-vocab* ]] && return 1
+    [[ "$name" == *-mmproj* || "$name" == *-lora* || "$name" == *-vocab.gguf ]] && return 1
+    return 0
+}
+
+count_gguf_files() {
+    local dir="$1"
+    local count=0
+    local file base
+    [[ -d "$dir" ]] || { echo 0; return; }
+    while IFS= read -r -d '' file; do
+        base="$(basename "$file")"
+        if is_discoverable_gguf_name "$base"; then
+            count=$((count + 1))
+        fi
+    done < <(find "$dir" -type f -iname '*.gguf' -print0 2>/dev/null)
+    echo "$count"
+}
+
+dir_in_models_dir_list() {
+    local needle="$1"
+    local configured="$2"
+    local part
+    IFS=',' read -ra parts <<< "$configured"
+    for part in "${parts[@]}"; do
+        part="${part#"${part%%[![:space:]]*}"}"
+        part="${part%"${part##*[![:space:]]}"}"
+        [[ "$part" == "$needle" ]] && return 0
+    done
+    return 1
+}
+
+scan_common_models_dirs() {
+    local configured="${1:-}"
+    local -a found=()
+    local candidate count
+    for candidate in "$DEFAULT_MODELS_DIR" /models "$HOME/.lmstudio/models" "/var/lib/gguf-switchboard/models"; do
+        count="$(count_gguf_files "$candidate")"
+        if [[ "$count" -gt 0 ]]; then
+            found+=("$candidate")
+        fi
+    done
+    if [[ -n "$configured" ]]; then
+        IFS=',' read -ra parts <<< "$configured"
+        for candidate in "${parts[@]}"; do
+            candidate="${candidate#"${candidate%%[![:space:]]*}"}"
+            candidate="${candidate%"${candidate##*[![:space:]]}"}"
+            [[ -z "$candidate" ]] && continue
+            if [[ -d "$candidate" ]] && count="$(count_gguf_files "$candidate")" && [[ "$count" -gt 0 ]]; then
+                local seen=false
+                for existing in "${found[@]}"; do
+                    [[ "$existing" == "$candidate" ]] && seen=true
+                done
+                [[ "$seen" == "false" ]] && found+=("$candidate")
+            fi
+        done
+    fi
+    if [[ "${#found[@]}" -eq 0 ]]; then
+        return 1
+    fi
+    local IFS=,
+    echo "${found[*]}"
+}
+
+detect_models_dir() {
+    if [[ -n "${MODELS_DIR:-}" ]]; then
+        echo "$MODELS_DIR"
+        return 0
+    fi
+
+    if [[ -d "$DEFAULT_MODELS_DIR" ]]; then
+        echo "$DEFAULT_MODELS_DIR"
+        return 0
+    fi
+
+    local configured=""
+    for candidate in "$MODELS_FILE" "models.toml"; do
+        if [[ -f "$candidate" ]]; then
+            configured="$(read_models_dir_from_toml "$candidate" || true)"
+            [[ -n "$configured" ]] && break
+        fi
+    done
+
+    if scanned="$(scan_common_models_dirs "$configured" 2>/dev/null || true)" && [[ -n "$scanned" ]]; then
+        echo "$scanned"
+        return 0
+    fi
+
+    if [[ -n "$configured" ]]; then
+        echo "$configured"
+        return 0
+    fi
+
+    return 1
+}
+
+print_models_dir_hints() {
+    local configured="${1:-}"
+    local scanned extra_dirs=() candidate count refresh_dirs=""
+
+    if [[ -z "$configured" ]]; then
+        configured="$(read_models_dir_from_toml "$MODELS_FILE" 2>/dev/null || read_models_dir_from_toml "models.toml" 2>/dev/null || true)"
+    fi
+
+    if [[ -n "$configured" ]]; then
+        echo "    Configured models_dir: $configured"
+    fi
+
+    scanned="$(scan_common_models_dirs "$configured" 2>/dev/null || true)"
+    if [[ -z "$scanned" ]]; then
+        echo "    No .gguf files found under common model directories."
+        echo "    Set MODELS_DIR=/path/to/models and re-run with --refresh-models."
+        return 0
+    fi
+
+    echo "    Directories with .gguf files on this host:"
+    IFS=',' read -ra scanned_parts <<< "$scanned"
+    for candidate in "${scanned_parts[@]}"; do
+        candidate="${candidate#"${candidate%%[![:space:]]*}"}"
+        candidate="${candidate%"${candidate##*[![:space:]]}"}"
+        count="$(count_gguf_files "$candidate")"
+        printf "      - %s (%s files)\n" "$candidate" "$count"
+        if [[ -n "$configured" ]] && ! dir_in_models_dir_list "$candidate" "$configured"; then
+            extra_dirs+=("$candidate")
+        fi
+    done
+
+    refresh_dirs="$scanned"
+    if [[ "${#extra_dirs[@]}" -gt 0 && -n "$configured" ]]; then
+        echo "    Note: some directories with models are not in configured models_dir."
+        refresh_dirs="$configured"
+        for candidate in "${extra_dirs[@]}"; do
+            refresh_dirs="$refresh_dirs,$candidate"
+        done
+    fi
+
+    echo "    To regenerate models.toml from disk:"
+    if [[ -d "$DEFAULT_MODELS_DIR" ]]; then
+        echo "    ./deploy.sh --refresh-models"
+    else
+        echo "    MODELS_DIR=$refresh_dirs ./deploy.sh --refresh-models"
+    fi
+}
+
+ensure_config_toml() {
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo "==> Copying default config to $CONFIG_FILE..."
+        sudo cp config.toml "$CONFIG_FILE"
+        CONFIG_CREATED=true
+        return
+    fi
+
+    if grep -qE '^models_file\s*=' "$CONFIG_FILE" 2>/dev/null; then
+        return
+    fi
+
+    echo "==> Upgrading $CONFIG_FILE to use models_file (replacing legacy inline model definitions)..."
+    sudo cp config.toml "$CONFIG_FILE"
+}
+
+stop_port_conflicts() {
+    if systemctl is-active --quiet openai-runtime 2>/dev/null; then
+        echo "==> Stopping openai-runtime (port 9090 conflict with gguf-switchboard)..."
+        sudo systemctl stop openai-runtime || true
+        sudo systemctl disable openai-runtime 2>/dev/null || true
+    fi
+}
+
+generate_models_toml() {
+    local refresh="${1:-false}"
+    local models_dir merge_source generated="models.toml.generated"
+    local -a discover_cmd
+
+    if [[ "$refresh" != "true" && -f "$MODELS_FILE" ]]; then
+        echo "==> Keeping existing $MODELS_FILE (pass --refresh-models to regenerate from disk)."
+        print_models_dir_hints
+        return 0
+    fi
+
+    merge_source=""
+    if [[ -f "$MODELS_FILE" ]]; then
+        merge_source="$MODELS_FILE"
+    elif [[ -f "models.toml" ]]; then
+        merge_source="models.toml"
+    fi
+
+    if ! models_dir="$(detect_models_dir)"; then
+        echo "==> Warning: Could not find a models directory."
+        echo "    Set MODELS_DIR or edit models_dir in models.toml, then re-run with --refresh-models."
+        if [[ ! -f "$MODELS_FILE" && -f "models.toml" ]]; then
+            echo "==> Copying template models.toml to $MODELS_FILE..."
+            sudo cp models.toml "$MODELS_FILE"
+        fi
+        return 0
+    fi
+
+    echo "==> Generating models.toml from $models_dir..."
+    discover_cmd=(./target/release/gguf-switchboard discover-models "$models_dir" -o "$generated")
+    if [[ -n "$merge_source" ]]; then
+        discover_cmd+=(--merge "$merge_source")
+    fi
+
+    if "${discover_cmd[@]}"; then
+        sudo cp "$generated" "$MODELS_FILE"
+        rm -f "$generated"
+        echo "==> Installed $MODELS_FILE"
+        return 0
+    fi
+
+    echo "==> Warning: discover-models failed; keeping existing models.toml if present."
+    rm -f "$generated"
+    if [[ ! -f "$MODELS_FILE" && -f "models.toml" ]]; then
+        sudo cp models.toml "$MODELS_FILE"
+    fi
 }
 
 print_models_from_status() {
@@ -101,9 +372,44 @@ ensure_repo() {
 
 ensure_repo
 
+REFRESH_MODELS=false
+for arg in "$@"; do
+    case "$arg" in
+        --refresh-models)
+            REFRESH_MODELS=true
+            ;;
+        -h|--help)
+            cat <<'EOF'
+Usage: ./deploy.sh [--refresh-models]
+
+Deploy gguf-switchboard as a systemd service.
+
+Options:
+  --refresh-models   Regenerate /etc/gguf-switchboard/models.toml from GGUF files on disk
+
+Environment:
+  MODELS_DIR         Directory containing .gguf files (default: ~/models when present)
+  GGUF_SWITCHBOARD_DIR  Repo checkout path (default: ~/gguf-switchboard)
+EOF
+            exit 0
+            ;;
+        *)
+            echo "Unknown option: $arg (try --help)" >&2
+            exit 1
+            ;;
+    esac
+done
+
 echo "==> Checking out $BRANCH..."
 git fetch origin "$BRANCH" 2>/dev/null || true
 git checkout "$BRANCH" 2>/dev/null || git checkout -B "$BRANCH" "origin/$BRANCH"
+
+if [[ -n "$(git status --porcelain)" ]]; then
+    STASH_LABEL="deploy-auto-stash-$(date +%Y%m%d-%H%M%S)"
+    echo "==> Local changes detected; stashing as '$STASH_LABEL'..."
+    git stash push --include-untracked --message "$STASH_LABEL" >/dev/null
+    echo "==> Stashed local changes. (Use 'git stash list' to review.)"
+fi
 
 echo "==> Pulling latest changes..."
 git pull origin "$BRANCH"
@@ -159,13 +465,12 @@ EOF
     echo "==> Service created and enabled."
 fi
 
-# Copy default config if missing
-if [[ ! -f "$CONFIG_FILE" ]]; then
-    echo "==> Copying default config to $CONFIG_FILE..."
-    sudo cp config.toml "$CONFIG_FILE"
-    CONFIG_CREATED=true
-    print_models_from_config "$CONFIG_FILE"
-fi
+# Copy or upgrade config to the current models_file-based format
+ensure_config_toml
+
+generate_models_toml "$REFRESH_MODELS"
+
+stop_port_conflicts
 
 echo "==> Stopping service..."
 sudo systemctl stop gguf-switchboard || true
@@ -182,7 +487,7 @@ BIND_ADDR="${BIND_ADDR:-0.0.0.0:9090}"
 BASE_URL="http://${BIND_ADDR/0.0.0.0/localhost}"
 
 echo "==> Waiting for health check..."
-for i in {1..15}; do
+for i in {1..30}; do
     sleep 1
     if curl -sf "${BASE_URL}/health" > /dev/null 2>&1; then
         echo ""
@@ -202,14 +507,20 @@ for i in {1..15}; do
             print_models_from_config "$CONFIG_FILE"
         fi
         if [[ "$CONFIG_CREATED" == "true" ]]; then
-            echo "==> Next step: edit $CONFIG_FILE with your llama-server path and GGUF model files,"
-            echo "    then restart: sudo systemctl restart gguf-switchboard"
+            echo "==> Next step: place GGUF files in ~/models (or set MODELS_DIR),"
+            echo "    then re-run:"
+            echo "    MODELS_DIR=/path/to/models ./deploy.sh --refresh-models"
+            echo "    Or edit $CONFIG_FILE / $MODELS_FILE manually and restart:"
+            echo "    sudo systemctl restart gguf-switchboard"
+        elif [[ "$REFRESH_MODELS" == "true" ]]; then
+            echo "==> models.toml was regenerated from disk."
+            echo "    Edit aliases, display_name, or priority in $MODELS_FILE as needed."
         fi
         exit 0
     fi
-    echo "    waiting... ($i/15)"
+    echo "    waiting... ($i/30)"
 done
 
-echo "==> FAILED: service did not become healthy in 15s"
+echo "==> FAILED: service did not become healthy in 30s"
 journalctl -u gguf-switchboard --no-pager -n 10
 exit 1

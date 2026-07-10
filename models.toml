@@ -1,0 +1,33 @@
+# GGUF Switchboard model registry
+#
+# Use short aliases in API requests (e.g. "gemma-code") instead of full GGUF filenames.
+# Link this file from config.toml:  models_file = "models.toml"
+#
+# Generate automatically from configured model directories:
+#   ./gguf-switchboard discover-models /path/to/models -o models.toml
+#
+# Multiple directories (comma-separated):
+#   models_dir = "/models,/home/you/extra-gguf"
+
+[defaults]
+# Root directory (or comma-separated directories) scanned for llama.cpp-loadable GGUF files.
+models_dir = "/models"
+llama_server = "/usr/local/bin/llama-server"
+host = "127.0.0.1"
+base_port = 8081
+context_size = 65536
+ngl = 999
+backend = "llama.cpp"
+
+# Register every llama.cpp-loadable .gguf under models_dir that is not listed below.
+# Sidecars (mmproj*, mtp-*), vocab files, LoRA adapters, and invalid GGUF files are skipped.
+auto_discover = true
+
+# Optional [[models]] entries pin aliases, display names, ports, or priority for
+# specific files. Any other .gguf under models_dir is picked up by auto_discover.
+#
+# [[models]]
+# alias = "gemma-code"
+# file = "gemma-3-4b.gguf"
+# display_name = "Gemma 3 Coding Model"
+# priority = true
