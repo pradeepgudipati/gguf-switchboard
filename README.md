@@ -7,11 +7,68 @@
 
 A **[llama-swap](https://github.com/mostlygeek/llama-swap) alternative in Rust** with system memory-pressure eviction, OOM-only context fallback, Swagger UI, and built-in usage tracking. Point any OpenAI SDK or tool at it (Python, Node, Cursor, Cline, Continue) and swap GGUF models on demand — no manual process or port juggling.
 
-## Project status
+## Features
+
+### Core capabilities
+
+- **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/responses`, `/v1/models`, `/v1/models/registry.json`, `/v1/audio/*`
+- **Swagger UI** — Explore and test the API at `http://localhost:9090/swagger-ui/`
+- **Auto-discovery of GGUF models** — Automatically scans configured directories at startup and registers all valid `.gguf` files; no manual model registry needed
+- **Dynamic model loading** — Models load/unload on demand; no restart needed
+- **Single-slot model swapping** — One resident model at a time; switches drain in-flight requests first, failed switches roll back automatically
+- **System memory-pressure monitoring** — Automatically unloads the active model when system RAM crosses the critical threshold
+- **Automatic priority model** — Your preferred model auto-loads after a configurable idle timeout, keeping it warm when the GPU is idle
+- **llama.cpp backend** — Spawns and manages `llama-server` child processes directly
+- **SSE streaming** — Full `text/event-stream` support with proper `[DONE]` termination
+- **Prometheus metrics** — Request counts, latency histograms, active request gauges at `/metrics`
+- **Health checks with status** — `/health` and `/status` endpoints report which model is currently loaded
+- **Context sizing heuristic** — `vram_gb` in `config.toml` estimates per-model `-c` from model file size (no live GPU telemetry required)
+- **Portable model registry** — `models.json` export for sharing configuration across local AI tools
+- **Graceful shutdown** — SIGTERM/SIGINT handling with automatic backend cleanup
+- **Structured logging** — JSON logs with request IDs and OpenAI-shaped error responses
+
+### How it works
+
+```
+OpenAI Request
+     │
+     ▼
+Requested model?
+     │
+     ├─ Already loaded? ──Yes──▶ Forward to backend
+     │
+     └─ No ──▶ Stop current model ──▶ Load requested model ──▶ Wait for healthy ──▶ Forward
+```
+
+**One endpoint, many models, zero manual process management.**
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      gguf-switchboard                        │
+│                                                              │
+│  /v1/chat/completions  ─┐                                    │
+│  /v1/completions       ─┤                                    │
+│  /v1/embeddings        ─┼──▶ Scheduler ──▶ Backend          │
+│  /v1/responses         ─┤   (single-slot)    (llama.cpp)      │
+│  /v1/audio/*           ─┘                                    │
+│                                                              │
+│  Dynamic model loading: A→B→A without restart                │
+│  Priority model auto-loads after configurable idle timeout   │
+│  Prometheus metrics at /metrics                              │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Why This Project
+
+### The problem
+
+When running local LLMs, you typically manage models manually: start `llama-server` for one model, stop it, start another. If you use multiple models — a code model in Cursor, a general model in Continue, an embedding model for search — you're juggling processes, ports, and GPU memory yourself.
+
+### Project status
 
 **Experimental** — designed for single-GPU home labs and development machines on a **trusted LAN**. One model is loaded at a time (single-slot swapping). System RAM is monitored for pressure eviction; `vram_gb` sizes context heuristically from model file size, not live GPU telemetry. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md) for endpoint coverage.
 
-## Why
+## Why Existing Tools Fall Short
 
 When running local LLMs, you typically manage models manually: start `llama-server` for one model, stop it, start another. If you use multiple models — a code model in Cursor, a general model in Continue, an embedding model for search — you're juggling processes, ports, and GPU memory yourself.
 
@@ -30,47 +87,25 @@ When running local LLMs, you typically manage models manually: start `llama-serv
 | **LiteLLM** | Yes | Routes only | No — does not load models | Via providers | No | API router, not a model loader |
 | **gguf-switchboard** (this project) | Yes | Yes | Yes — single-slot swap + idle priority model | Yes | Yes (system RAM) | **llama-swap alternative (Rust)** — memory eviction, OOM context fallback, Swagger UI, usage tracking; llama.cpp-only |
 
-### Why existing tools fall short
+### The gaps in existing tools
 
 - **llama-swap** is the closest single-binary alternative — download, configure, run, done. It swaps llama-server processes on request. What it lacks: no system memory pressure monitoring, no context-size reduction on OOM, no idle timeout / priority model, no usage tracking.
 - **Ollama** unloads idle models via `keep_alive`, but you do not get explicit swap-on-request scheduling or memory-pressure eviction — models can still sit resident longer than you expect on tight GPUs.
 - **LocalAI** is a full-stack alternative supporting many backends and formats. It is not designed for proactive eviction when GPU memory is under pressure; you still manage capacity yourself.
 - **LiteLLM** is an excellent API gateway for routing, fallbacks, and retries across cloud and local providers. It does not spawn backends, load GGUF weights, or manage GPU memory — that is not its job.
 
-The gap: a tool that treats **model loading as a scheduling problem** on constrained local GPU hardware, not just an API compatibility layer.
+**The core gap:** a tool that treats **model loading as a scheduling problem** on constrained local GPU hardware, not just an API compatibility layer.
 
-### What makes this different
+### What makes gguf-switchboard different
 
-gguf-switchboard is a **llama-swap-style swap proxy in Rust**, extended for constrained GPUs: memory-pressure eviction, automatic context-size reduction on OOM, an idle priority model, and `/v1/usage` history. It presents a single OpenAI-compatible endpoint and swaps one model at a time based on incoming requests — your tools never manage processes or ports.
+gguf-switchboard is a **llama-swap-style swap proxy in Rust**, extended for constrained GPUs with:
+- **Memory-pressure eviction** — monitors system RAM and unloads when thresholds are crossed
+- **Automatic context-size reduction** — on OOM, reduces context and retries (OOM-only fallback)
+- **Idle priority model** — keeps your preferred model warm automatically
+- **Built-in usage tracking** — `/v1/usage` history and Prometheus metrics
+- **Single OpenAI endpoint** — no port juggling, no process management
 
-```
-OpenAI Request
-     │
-     ▼
-Requested model?
-     │
-     ├─ Already loaded? ──Yes──▶ Forward to backend
-     │
-     └─ No ──▶ Stop current model ──▶ Load requested model ──▶ Wait for healthy ──▶ Forward
-```
-
-The result: one endpoint, many models, zero manual process management.
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      gguf-switchboard                        │
-│                                                              │
-│  /v1/chat/completions  ─┐                                    │
-│  /v1/completions       ─┤                                    │
-│  /v1/embeddings        ─┼──▶ Scheduler ──▶ Backend          │
-│  /v1/responses         ─┤   (single-slot)    (llama.cpp)      │
-│  /v1/audio/*           ─┘                                    │
-│                                                              │
-│  Dynamic model loading: A→B→A without restart                │
-│  Priority model auto-loads after configurable idle timeout   │
-│  Prometheus metrics at /metrics                              │
-└─────────────────────────────────────────────────────────────┘
-```
+Your tools never manage processes or ports — they just point at `http://localhost:9090/v1` and pick a model name from the config.
 
 ### Separation of concerns
 
@@ -83,32 +118,6 @@ This project does one job well: **local GPU scheduling and model lifecycle**.
 | **Client tools** (Cursor, Cline, Codex, Open WebUI, etc.) | Talk to gguf-switchboard as a normal OpenAI server — no special integration needed |
 
 Point your IDE or agent at `http://localhost:9090/v1`, set a model name from your config, and requests flow through the scheduler automatically.
-
-### What you get
-
-- **OpenAI-compatible API** — see [compatibility matrix](docs/COMPATIBILITY.md) for endpoint and feature coverage
-- **llama.cpp backend** — spawns and manages `llama-server` child processes
-- **Automatic model loading/unloading** — models come up on first request, no manual restarts
-- **Single-slot model swapping** — one model loaded at a time; switches drain in-flight requests first
-- **System memory-pressure monitoring** — unloads the active model when system RAM crosses the critical threshold
-- **Health checks with loaded model name** — `/health` and `/status` report which model is active
-- **SSE streaming** — full `text/event-stream` support with proper `[DONE]` termination
-- **Prometheus metrics** — request counts, latency histograms, model load times at `/metrics`
-- **Idle timeout** — returns to your priority model after configurable inactivity
-- **Priority model auto-load** — keeps your preferred model warm when the GPU is idle
-
-## Features
-
-- **Drop-in OpenAI API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/responses`, `/v1/models`, `/v1/models/registry.json`, `/v1/audio/*`
-- **Portable model registry** — `models.json` export for sharing across local AI tools
-- **Context sizing heuristic** — `vram_gb` in `config.toml` estimates per-model `-c` from model file size (not live GPU telemetry)
-- **Dynamic model loading** — models are loaded/unloaded on demand; no restart needed
-- **Single-slot swapping** — one resident model; failed switches roll back to the previous model
-- **Priority model** — auto-loads your preferred model after a configurable idle timeout
-- **SSE streaming** — full `text/event-stream` support with proper `[DONE]` termination
-- **Prometheus metrics** — request counts, latency histograms, active request gauges
-- **Graceful shutdown** — SIGTERM/SIGINT handling with backend cleanup
-- **Structured logging** — JSON logs, request IDs, OpenAI-shaped error responses
 
 ## Quick Start
 
