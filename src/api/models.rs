@@ -2,9 +2,12 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, State};
+use axum::http::StatusCode;
 use axum::http::header;
 use axum::response::IntoResponse;
 use chrono::Utc;
+use serde::Serialize;
+use utoipa::ToSchema;
 
 use crate::errors::RuntimeError;
 use crate::state::AppState;
@@ -73,8 +76,39 @@ pub async fn get_model(
 pub async fn registry_json(
     State(state): State<Arc<AppState>>,
 ) -> Result<impl IntoResponse, RuntimeError> {
+    let body = state.registry_json.read().await.clone();
+    Ok(([(header::CONTENT_TYPE, "application/json")], body))
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RefreshModelsResponse {
+    pub added: usize,
+    pub removed: usize,
+    pub total: usize,
+    pub models_dir: String,
+}
+
+/// Rescan model directories, persist `models.toml`, and hot-swap the live registry.
+#[utoipa::path(
+    post,
+    path = "/v1/models/refresh",
+    tag = "models",
+    responses(
+        (status = 200, description = "Registry refreshed", body = RefreshModelsResponse),
+        (status = 500, description = "Refresh failed")
+    )
+)]
+pub async fn refresh_models(
+    State(state): State<Arc<AppState>>,
+) -> Result<(StatusCode, Json<RefreshModelsResponse>), RuntimeError> {
+    let result = state.refresh_models().await?;
     Ok((
-        [(header::CONTENT_TYPE, "application/json")],
-        state.registry_json.clone(),
+        StatusCode::OK,
+        Json(RefreshModelsResponse {
+            added: result.added,
+            removed: result.removed,
+            total: result.total,
+            models_dir: result.models_dir,
+        }),
     ))
 }

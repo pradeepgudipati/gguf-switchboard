@@ -5,7 +5,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-pub use models_registry::ModelsRegistry;
+pub use models_registry::{ModelsRegistry, RescanResult};
 
 use crate::errors::RuntimeError;
 
@@ -56,6 +56,9 @@ pub struct Config {
     /// Seconds to skip priority-model reload after a failed priority load.
     #[serde(default = "default_priority_load_cooldown_secs")]
     pub priority_load_cooldown_secs: u64,
+    /// Seconds between automatic model-directory rescans (default 86400 = 1 day). `0` disables.
+    #[serde(default = "default_models_rescan_interval_secs")]
+    pub models_rescan_interval_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -117,6 +120,10 @@ fn default_priority_load_cooldown_secs() -> u64 {
     300
 }
 
+fn default_models_rescan_interval_secs() -> u64 {
+    86400
+}
+
 impl Config {
     /// Load configuration from a TOML file.
     pub fn load(path: &str) -> Result<Self, RuntimeError> {
@@ -172,6 +179,7 @@ impl Config {
     }
 
     /// Return the model id of the priority model, if one is configured.
+    #[allow(dead_code)] // public API; scheduler reads priority from the live model map
     pub fn priority_model_id(&self) -> Option<String> {
         self.models
             .iter()

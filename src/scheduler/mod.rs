@@ -24,6 +24,7 @@ enum LoadOrigin {
 
 struct SchedulerInner {
     config: Config,
+    models: parking_lot::RwLock<HashMap<String, ModelConfig>>,
     backends: RwLock<HashMap<String, Arc<dyn Backend>>>,
     runtime_args: RwLock<HashMap<String, Vec<String>>>,
     loaded: RwLock<Option<String>>,
@@ -77,8 +78,10 @@ pub struct Scheduler {
 
 impl Scheduler {
     pub async fn new(config: Config) -> Result<Self, RuntimeError> {
+        let models = parking_lot::RwLock::new(config.models.clone());
         let inner = SchedulerInner {
             config,
+            models,
             backends: RwLock::new(HashMap::new()),
             runtime_args: RwLock::new(HashMap::new()),
             loaded: RwLock::new(None),
@@ -162,7 +165,7 @@ impl Scheduler {
             BACKEND_HEALTH.set(0);
         }
 
-        if !self.inner.config.models.contains_key(model_id) {
+        if !self.inner.models.read().contains_key(model_id) {
             return Err(RuntimeError::ModelNotFound(model_id.to_string()));
         }
 
@@ -257,15 +260,57 @@ impl Scheduler {
     }
 
     pub fn priority_model(&self) -> Option<String> {
-        self.inner.config.priority_model_id()
+        self.inner
+            .models
+            .read()
+            .iter()
+            .find(|(_, cfg)| cfg.priority)
+            .map(|(id, _)| id.clone())
     }
 
-    pub fn model_config(&self, model_id: &str) -> Option<&ModelConfig> {
-        self.inner.config.models.get(model_id)
+    pub fn model_config(&self, model_id: &str) -> Option<ModelConfig> {
+        self.inner.models.read().get(model_id).cloned()
     }
 
     pub fn model_ids(&self) -> Vec<String> {
-        self.inner.config.models.keys().cloned().collect()
+        self.inner.models.read().keys().cloned().collect()
+    }
+
+    /// Replace the live model map. Unloads the current model if it was removed.
+    pub async fn replace_models(
+        &self,
+        new_models: HashMap<String, ModelConfig>,
+    ) -> Result<(), RuntimeError> {
+        let _guard = self.inner.load_lock.lock().await;
+
+        let loaded = self.inner.loaded.read().await.clone();
+        if let Some(ref id) = loaded
+            && !new_models.contains_key(id)
+        {
+            info!(model = %id, "Unloading model removed by registry refresh");
+            let _ = self.unload_model_no_drain(id).await;
+            *self.inner.loaded.write().await = None;
+            LOADED_MODEL.set(0);
+            BACKEND_HEALTH.set(0);
+        }
+
+        {
+            let mut backs = self.inner.backends.write().await;
+            let stale: Vec<String> = backs
+                .keys()
+                .filter(|id| !new_models.contains_key(*id))
+                .cloned()
+                .collect();
+            for id in stale {
+                if let Some(backend) = backs.remove(&id) {
+                    let _ = backend.unload().await;
+                }
+                self.inner.runtime_args.write().await.remove(&id);
+            }
+        }
+
+        *self.inner.models.write() = new_models;
+        Ok(())
     }
 
     pub async fn loaded_server_version(&self) -> Option<String> {
@@ -333,15 +378,6 @@ impl Scheduler {
     }
 
     fn spawn_priority_watcher(self: &Arc<Self>, cancel: CancellationToken) -> JoinHandle<()> {
-        let priority_id = match self.inner.config.priority_model_id() {
-            Some(id) => id,
-            None => {
-                return tokio::spawn(async {
-                    info!("No priority model configured, skipping priority watcher");
-                });
-            }
-        };
-
         let idle_timeout = Duration::from_secs(self.inner.config.idle_timeout);
         let cooldown = Duration::from_secs(self.inner.config.priority_load_cooldown_secs);
         let inner = Arc::clone(&self.inner);
@@ -349,7 +385,6 @@ impl Scheduler {
 
         tokio::spawn(async move {
             info!(
-                model = %priority_id,
                 timeout_secs = idle_timeout.as_secs(),
                 "Priority model watcher started"
             );
@@ -361,6 +396,10 @@ impl Scheduler {
                     }
                     () = tokio::time::sleep(Duration::from_secs(30)) => {}
                 }
+
+                let Some(priority_id) = scheduler.priority_model() else {
+                    continue;
+                };
 
                 let current = inner.loaded.read().await.clone();
                 if current.as_deref() == Some(&priority_id) {
@@ -505,8 +544,8 @@ impl SchedulerInner {
             return Ok(args.clone());
         }
 
-        self.config
-            .models
+        self.models
+            .read()
             .get(model_id)
             .map(|cfg| cfg.args.clone())
             .ok_or_else(|| RuntimeError::ModelNotFound(model_id.to_string()))
@@ -518,11 +557,12 @@ impl SchedulerInner {
         args: Vec<String>,
     ) -> Result<Arc<dyn Backend>, RuntimeError> {
         let model_cfg = self
-            .config
             .models
+            .read()
             .get(model_id)
+            .cloned()
             .ok_or_else(|| RuntimeError::ModelNotFound(model_id.to_string()))?;
-        let backend_cfg = model_config_with_args(model_cfg, args.clone());
+        let backend_cfg = model_config_with_args(&model_cfg, args.clone());
         let backend: Arc<dyn Backend> = Arc::from(create_backend(model_id, &backend_cfg));
         self.backends
             .write()

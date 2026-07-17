@@ -67,9 +67,9 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> 
             let cfg = state.scheduler.model_config(&id);
             serde_json::json!({
                 "id": id,
-                "display_name": cfg.map(|c| c.display_name.as_str()).unwrap_or(""),
-                "backend": cfg.map(|c| c.backend.as_str()).unwrap_or(""),
-                "priority": cfg.map(|c| c.priority).unwrap_or(false),
+                "display_name": cfg.as_ref().map(|c| c.display_name.as_str()).unwrap_or(""),
+                "backend": cfg.as_ref().map(|c| c.backend.as_str()).unwrap_or(""),
+                "priority": cfg.as_ref().map(|c| c.priority).unwrap_or(false),
             })
         })
         .collect();

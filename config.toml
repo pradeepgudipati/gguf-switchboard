@@ -23,6 +23,9 @@ switch_drain_timeout_secs = 120
 # Seconds to skip priority-model reload after a failed load
 priority_load_cooldown_secs = 300
 
+# Seconds between automatic model-directory rescans (86400 = daily). Set 0 to disable.
+models_rescan_interval_secs = 86400
+
 # Path to token usage SQLite database (defaults to token_usage.db)
 database_path = "/var/lib/gguf-switchboard/usage.db"
 

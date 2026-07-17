@@ -184,6 +184,99 @@ pub fn parse_models_dirs(configured: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Join model directories into the comma-separated `models_dir` form.
+pub fn format_models_dirs(dirs: &[PathBuf]) -> String {
+    dirs.iter()
+        .map(|d| d.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn dir_identity_key(dir: &Path) -> String {
+    dir.canonicalize()
+        .unwrap_or_else(|_| dir.to_path_buf())
+        .to_string_lossy()
+        .to_ascii_lowercase()
+}
+
+/// Well-known locations scanned after configured `models_dir` entries.
+pub fn common_models_dir_candidates() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        dirs.push(home.join("models"));
+        dirs.push(home.join(".lmstudio").join("models"));
+    }
+    dirs.push(PathBuf::from("/models"));
+    dirs.push(PathBuf::from("/var/lib/gguf-switchboard/models"));
+    dirs
+}
+
+/// Resolve scan roots: existing configured dirs first (even if empty), then common
+/// dirs that contain at least one llama.cpp-loadable GGUF. Dedupes by canonical path.
+pub fn resolve_models_dirs_with_fallback(configured: &str) -> Result<Vec<PathBuf>, RuntimeError> {
+    let mut resolved = Vec::new();
+    let mut seen = HashSet::new();
+
+    for dir in parse_models_dirs(configured) {
+        if !dir.is_dir() {
+            tracing::warn!(
+                path = %dir.display(),
+                "Skipping configured models_dir entry because the directory does not exist"
+            );
+            continue;
+        }
+        let key = dir_identity_key(&dir);
+        if seen.insert(key) {
+            resolved.push(dir);
+        }
+    }
+
+    for candidate in common_models_dir_candidates() {
+        if !candidate.is_dir() {
+            continue;
+        }
+        let key = dir_identity_key(&candidate);
+        if seen.contains(&key) {
+            continue;
+        }
+        match discover_gguf_files(std::slice::from_ref(&candidate)) {
+            Ok(files) if !files.is_empty() => {
+                seen.insert(key);
+                resolved.push(candidate);
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::debug!(
+                    path = %candidate.display(),
+                    error = %err,
+                    "Skipping common models_dir candidate"
+                );
+            }
+        }
+    }
+
+    if resolved.is_empty() {
+        return Err(RuntimeError::ConfigError(
+            "No model directories found; set defaults.models_dir, MODELS_DIR, or place GGUFs under a common path (e.g. ~/models)".to_string(),
+        ));
+    }
+
+    Ok(resolved)
+}
+
+/// Result of a disk rescan that is ready to persist and hot-swap.
+#[derive(Debug, Clone)]
+pub struct RescanResult {
+    pub registry: ModelsRegistry,
+    pub models: HashMap<String, ModelConfig>,
+    pub registry_json: String,
+    pub added: usize,
+    pub removed: usize,
+    pub total: usize,
+    pub models_dir: String,
+}
+
 fn relative_model_file(models_dir: &Path, path: &Path) -> String {
     if path.starts_with(models_dir) {
         path.strip_prefix(models_dir)
@@ -231,25 +324,70 @@ fn is_discoverable_gguf_name(path: &Path) -> bool {
         || lower.starts_with("ggml-vocab")
         || lower.contains("-mmproj")
         || lower.contains("-lora")
+        || lower.contains("-projector")
+        || lower.contains("projector")
+        || lower.contains("-adapter")
+        || lower.contains("adapter")
+        || lower.contains("tokenizer")
         || lower.ends_with("-vocab.gguf"))
 }
 
 const GGUF_MAGIC: u32 = 0x4655_4747;
 const GGUF_METADATA_STRING: u32 = 8;
+const GGUF_METADATA_UINT32: u32 = 4;
+const GGUF_METADATA_INT32: u32 = 5;
+const GGUF_METADATA_UINT64: u32 = 10;
+const GGUF_METADATA_INT64: u32 = 11;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GgufSkipReason {
+    BadName,
+    BadMagic,
+    BadVersion,
+    NoTensors,
+    BadArch,
+    BadType,
+    ZeroBlockCount,
+    Unreadable,
+}
+
+impl std::fmt::Display for GgufSkipReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::BadName => write!(f, "filename looks like a sidecar or adapter"),
+            Self::BadMagic => write!(f, "missing GGUF magic"),
+            Self::BadVersion => write!(f, "unsupported GGUF version (need 2 or 3)"),
+            Self::NoTensors => write!(f, "tensor_count is 0"),
+            Self::BadArch => write!(f, "architecture is not a standalone llama.cpp model"),
+            Self::BadType => write!(f, "general.type is lora/vocab (not a full model)"),
+            Self::ZeroBlockCount => write!(f, "architecture block_count is 0"),
+            Self::Unreadable => write!(f, "could not read GGUF metadata prefix"),
+        }
+    }
+}
 
 #[derive(Debug, Default)]
 struct GgufMetadata {
+    version: u32,
+    tensor_count: u64,
     architecture: Option<String>,
     file_type: Option<String>,
+    block_count: Option<u64>,
 }
 
 impl GgufMetadata {
-    fn is_llama_cpp_loadable(&self) -> bool {
+    fn loadable_skip_reason(&self) -> Option<GgufSkipReason> {
+        if !(self.version == 2 || self.version == 3) {
+            return Some(GgufSkipReason::BadVersion);
+        }
+        if self.tensor_count == 0 {
+            return Some(GgufSkipReason::NoTensors);
+        }
         let Some(arch) = self.architecture.as_ref() else {
-            return false;
+            return Some(GgufSkipReason::BadArch);
         };
         if arch.is_empty() {
-            return false;
+            return Some(GgufSkipReason::BadArch);
         }
 
         let arch_lower = arch.to_ascii_lowercase();
@@ -257,17 +395,21 @@ impl GgufMetadata {
             arch_lower.as_str(),
             "clip" | "siglip" | "vit" | "wav2vec2" | "whisper" | "encoder"
         ) {
-            return false;
+            return Some(GgufSkipReason::BadArch);
         }
 
         if let Some(file_type) = &self.file_type {
             let file_type_lower = file_type.to_ascii_lowercase();
             if matches!(file_type_lower.as_str(), "lora" | "vocab") {
-                return false;
+                return Some(GgufSkipReason::BadType);
             }
         }
 
-        true
+        if self.block_count == Some(0) {
+            return Some(GgufSkipReason::ZeroBlockCount);
+        }
+
+        None
     }
 }
 
@@ -285,6 +427,28 @@ fn read_gguf_string(data: &[u8], offset: &mut usize) -> Option<String> {
         .to_string();
     *offset += len;
     Some(value)
+}
+
+fn read_gguf_u64(data: &[u8], offset: &mut usize, value_type: u32) -> Option<u64> {
+    match value_type {
+        GGUF_METADATA_UINT32 | GGUF_METADATA_INT32 => {
+            if *offset + 4 > data.len() {
+                return None;
+            }
+            let value = u32::from_le_bytes(data[*offset..*offset + 4].try_into().ok()?) as u64;
+            *offset += 4;
+            Some(value)
+        }
+        GGUF_METADATA_UINT64 | GGUF_METADATA_INT64 => {
+            if *offset + 8 > data.len() {
+                return None;
+            }
+            let value = u64::from_le_bytes(data[*offset..*offset + 8].try_into().ok()?);
+            *offset += 8;
+            Some(value)
+        }
+        _ => None,
+    }
 }
 
 fn skip_gguf_value(data: &[u8], offset: &mut usize, value_type: u32) -> Option<()> {
@@ -315,66 +479,116 @@ fn skip_gguf_value(data: &[u8], offset: &mut usize, value_type: u32) -> Option<(
     Some(())
 }
 
-fn inspect_gguf_metadata(path: &Path) -> Option<GgufMetadata> {
+fn inspect_gguf_metadata(path: &Path) -> Result<GgufMetadata, GgufSkipReason> {
     use std::io::Read;
 
     // Metadata is a prefix before tensor weights. Never load multi-GB GGUFs into RAM.
     // ponytail: 32 MiB ceiling — raise only if a model ships absurdly large KV headers.
     const MAX_METADATA_BYTES: u64 = 32 * 1024 * 1024;
 
-    let mut file = std::fs::File::open(path).ok()?;
-    let file_len = file.metadata().ok()?.len();
+    let mut file = std::fs::File::open(path).map_err(|_| GgufSkipReason::Unreadable)?;
+    let file_len = file
+        .metadata()
+        .map_err(|_| GgufSkipReason::Unreadable)?
+        .len();
     let to_read = file_len.min(MAX_METADATA_BYTES) as usize;
     let mut data = vec![0u8; to_read];
-    file.read_exact(&mut data).ok()?;
+    file.read_exact(&mut data)
+        .map_err(|_| GgufSkipReason::Unreadable)?;
     if data.len() < 24 {
-        return None;
+        return Err(GgufSkipReason::Unreadable);
     }
 
-    let magic = u32::from_le_bytes(data[0..4].try_into().ok()?);
+    let magic = u32::from_le_bytes(
+        data[0..4]
+            .try_into()
+            .map_err(|_| GgufSkipReason::Unreadable)?,
+    );
     if magic != GGUF_MAGIC {
-        return None;
+        return Err(GgufSkipReason::BadMagic);
     }
 
-    let kv_count = u64::from_le_bytes(data[16..24].try_into().ok()?) as usize;
+    let version = u32::from_le_bytes(
+        data[4..8]
+            .try_into()
+            .map_err(|_| GgufSkipReason::Unreadable)?,
+    );
+    let tensor_count = u64::from_le_bytes(
+        data[8..16]
+            .try_into()
+            .map_err(|_| GgufSkipReason::Unreadable)?,
+    );
+    let kv_count = u64::from_le_bytes(
+        data[16..24]
+            .try_into()
+            .map_err(|_| GgufSkipReason::Unreadable)?,
+    ) as usize;
     let mut offset = 24usize;
-    let mut metadata = GgufMetadata::default();
+    let mut metadata = GgufMetadata {
+        version,
+        tensor_count,
+        ..GgufMetadata::default()
+    };
 
     for _ in 0..kv_count {
-        let key = read_gguf_string(&data, &mut offset)?;
+        let key = read_gguf_string(&data, &mut offset).ok_or(GgufSkipReason::Unreadable)?;
         if offset + 4 > data.len() {
-            return None;
+            return Err(GgufSkipReason::Unreadable);
         }
-        let value_type = u32::from_le_bytes(data[offset..offset + 4].try_into().ok()?);
+        let value_type = u32::from_le_bytes(
+            data[offset..offset + 4]
+                .try_into()
+                .map_err(|_| GgufSkipReason::Unreadable)?,
+        );
         offset += 4;
 
         if value_type == GGUF_METADATA_STRING {
-            let value = read_gguf_string(&data, &mut offset)?;
+            let value = read_gguf_string(&data, &mut offset).ok_or(GgufSkipReason::Unreadable)?;
             match key.as_str() {
                 "general.architecture" => metadata.architecture = Some(value),
                 "general.type" => metadata.file_type = Some(value),
                 _ => {}
             }
+        } else if key.ends_with(".block_count")
+            && matches!(
+                value_type,
+                GGUF_METADATA_UINT32
+                    | GGUF_METADATA_INT32
+                    | GGUF_METADATA_UINT64
+                    | GGUF_METADATA_INT64
+            )
+        {
+            metadata.block_count = Some(
+                read_gguf_u64(&data, &mut offset, value_type).ok_or(GgufSkipReason::Unreadable)?,
+            );
         } else {
-            skip_gguf_value(&data, &mut offset, value_type)?;
+            skip_gguf_value(&data, &mut offset, value_type).ok_or(GgufSkipReason::Unreadable)?;
         }
     }
 
-    Some(metadata)
+    Ok(metadata)
+}
+
+/// Cheap prefix-only validation: filename → header → architecture/type metadata.
+fn validate_gguf_model(path: &Path) -> Result<GgufMetadata, GgufSkipReason> {
+    if !is_discoverable_gguf_name(path) {
+        return Err(GgufSkipReason::BadName);
+    }
+    let metadata = inspect_gguf_metadata(path)?;
+    if let Some(reason) = metadata.loadable_skip_reason() {
+        return Err(reason);
+    }
+    Ok(metadata)
 }
 
 /// Return true when the file looks like a standalone llama.cpp-loadable GGUF model.
 fn is_llama_cpp_loadable_gguf(path: &Path) -> bool {
-    if !is_discoverable_gguf_name(path) {
-        return false;
-    }
-
-    match inspect_gguf_metadata(path) {
-        Some(metadata) if metadata.is_llama_cpp_loadable() => true,
-        Some(_) => false,
-        None => {
+    match validate_gguf_model(path) {
+        Ok(_) => true,
+        Err(reason) => {
             tracing::debug!(
                 path = %path.display(),
+                reason = %reason,
                 "Skipping file that is not a valid llama.cpp-loadable GGUF model"
             );
             false
@@ -772,6 +986,7 @@ impl ModelsRegistry {
     }
 
     /// Scan configured model directories for `.gguf` files and build a registry with generated aliases.
+    #[allow(dead_code)] // thin wrapper; used by tests and as the no-merge discover entry point
     pub fn discover(dirs: &str) -> Result<Self, RuntimeError> {
         Self::discover_with_merge(dirs, None)
     }
@@ -781,8 +996,7 @@ impl ModelsRegistry {
     /// `dirs` may be a single path or comma-separated list (e.g. `"/models,/data/gguf"`).
     /// When merging, entries are matched by normalized `file` path. Existing
     /// `alias`, `display_name`, `priority`, `port`, and `context_size` are preserved.
-    /// If no `.gguf` files are found but `merge_from` is set, the existing registry
-    /// is returned with an updated `defaults.models_dir`.
+    /// Entries whose files are gone are dropped (including when the scan finds zero GGUFs).
     pub fn discover_with_merge(
         dirs: &str,
         merge_from: Option<&Self>,
@@ -809,7 +1023,7 @@ impl ModelsRegistry {
         let mut registry = ModelsRegistry {
             defaults: {
                 let mut defaults = base_defaults;
-                defaults.models_dir = dirs.trim().to_string();
+                defaults.models_dir = format_models_dirs(&models_dirs);
                 defaults.llama_server = llama_server;
                 defaults
             },
@@ -819,9 +1033,8 @@ impl ModelsRegistry {
         };
 
         if files.is_empty() {
-            if let Some(existing) = merge_from {
-                registry.auto_discover = existing.auto_discover;
-                registry.models = existing.models.clone();
+            if merge_from.is_some() {
+                // Drop missing: keep defaults/settings, clear models whose files are gone.
                 return Ok(registry);
             }
             return Err(RuntimeError::ConfigError(format!(
@@ -885,6 +1098,89 @@ impl ModelsRegistry {
         Ok(registry)
     }
 
+    /// Resolve dirs (config/`MODELS_DIR` first, then common), discover, drop missing, merge, expand.
+    ///
+    /// When `override_dirs` is set, only those directories are scanned (no common-dir fallback).
+    /// When unset, uses `merge_from.defaults.models_dir`, then `MODELS_DIR`, then common dirs.
+    pub fn rescan(
+        override_dirs: Option<&str>,
+        merge_from: Option<&Self>,
+        fallback_backend: &str,
+        vram_gb: u32,
+    ) -> Result<RescanResult, RuntimeError> {
+        let previous_aliases: HashSet<String> = merge_from
+            .map(|existing| existing.models.iter().map(|e| e.alias.clone()).collect())
+            .unwrap_or_default();
+
+        let dirs_str = if let Some(dirs) = override_dirs {
+            let resolved = resolve_models_dirs(dirs)?;
+            format_models_dirs(&resolved)
+        } else {
+            let mut configured = merge_from
+                .map(|m| m.defaults.models_dir.clone())
+                .unwrap_or_default();
+            if let Ok(env_dirs) = std::env::var("MODELS_DIR") {
+                let env_dirs = env_dirs.trim();
+                if !env_dirs.is_empty() {
+                    configured = if configured.is_empty() {
+                        env_dirs.to_string()
+                    } else {
+                        format!("{env_dirs},{configured}")
+                    };
+                }
+            }
+            let resolved = resolve_models_dirs_with_fallback(&configured)?;
+            format_models_dirs(&resolved)
+        };
+
+        let registry = Self::discover_with_merge(&dirs_str, merge_from)?;
+        let models = registry.expand(fallback_backend, vram_gb)?;
+        let registry_json =
+            serde_json::to_string_pretty(&registry.to_json_export()).map_err(|e| {
+                RuntimeError::ConfigError(format!("Failed to serialize models JSON: {e}"))
+            })?;
+
+        let new_aliases: HashSet<String> =
+            registry.models.iter().map(|e| e.alias.clone()).collect();
+        let added = new_aliases.difference(&previous_aliases).count();
+        let removed = previous_aliases.difference(&new_aliases).count();
+        let total = registry.models.len();
+        let models_dir = registry.defaults.models_dir.clone();
+
+        Ok(RescanResult {
+            registry,
+            models,
+            registry_json,
+            added,
+            removed,
+            total,
+            models_dir,
+        })
+    }
+
+    /// Rescan, write `models_file` (+ JSON sibling), return the applied result.
+    /// Fails before writing nothing on discover/expand errors; caller must not hot-swap on write failure.
+    pub fn rescan_and_write(
+        models_file: &str,
+        override_dirs: Option<&str>,
+        fallback_backend: &str,
+        vram_gb: u32,
+    ) -> Result<RescanResult, RuntimeError> {
+        let merge_from = if Path::new(models_file).is_file() {
+            Some(Self::load(models_file)?)
+        } else {
+            None
+        };
+        let result = Self::rescan(
+            override_dirs,
+            merge_from.as_ref(),
+            fallback_backend,
+            vram_gb,
+        )?;
+        result.registry.write(models_file)?;
+        Ok(result)
+    }
+
     /// Expand registry entries into full `ModelConfig` map keyed by alias.
     pub fn expand(
         &self,
@@ -899,13 +1195,20 @@ impl ModelsRegistry {
         for entry in &self.models {
             match resolve_model_path(&models_dirs, &entry.file) {
                 Ok(path) => {
-                    // Explicit entries are trusted when the file exists. Metadata inspection
-                    // (used by auto_discover) is skipped so startup never reads multi-GB weights.
                     if !Path::new(&path).is_file() {
                         tracing::warn!(
                             alias = %entry.alias,
                             file = %entry.file,
                             "Skipping explicit model entry because the GGUF path is not a file"
+                        );
+                        continue;
+                    }
+                    if let Err(reason) = validate_gguf_model(Path::new(&path)) {
+                        tracing::warn!(
+                            alias = %entry.alias,
+                            file = %entry.file,
+                            reason = %reason,
+                            "Skipping explicit model entry because the GGUF file failed validation"
                         );
                         continue;
                     }
@@ -996,7 +1299,7 @@ impl ModelsRegistry {
                 "-ngl".to_string(),
                 self.defaults.ngl.to_string(),
             ];
-            args.extend(entry.extra_args.clone());
+            args.extend(effective_extra_args(entry));
 
             let config = ModelConfig {
                 backend: backend.clone(),
@@ -1015,6 +1318,41 @@ impl ModelsRegistry {
 
         Ok(models)
     }
+}
+
+/// Llama 3.1 GGUFs often ship a tool-use chat template that makes the model
+/// emit `{"name":...,"parameters":...}` even when the request has no tools.
+/// Force llama.cpp's built-in `llama3` template unless the user already set one.
+fn effective_extra_args(entry: &RegistryEntry) -> Vec<String> {
+    let mut args = entry.extra_args.clone();
+    if !should_force_llama3_chat_template(entry, &args) {
+        return args;
+    }
+    tracing::info!(
+        alias = %entry.alias,
+        "Applying --chat-template llama3 so Llama 3.1 answers in plain text (override via extra_args)"
+    );
+    args.push("--chat-template".to_string());
+    args.push("llama3".to_string());
+    args
+}
+
+fn should_force_llama3_chat_template(entry: &RegistryEntry, extra_args: &[String]) -> bool {
+    if !is_llama_3_1_model(&entry.alias, &entry.file) {
+        return false;
+    }
+    !extra_args.iter().any(|arg| {
+        let lower = arg.to_ascii_lowercase();
+        lower == "--chat-template"
+            || lower == "--chat-template-file"
+            || lower.starts_with("--chat-template=")
+            || lower == "--jinja"
+    })
+}
+
+fn is_llama_3_1_model(alias: &str, file: &str) -> bool {
+    let hay = format!("{alias} {file}").to_ascii_lowercase();
+    hay.contains("llama-3.1") || hay.contains("llama3.1") || hay.contains("meta-llama-3.1")
 }
 
 fn validate_unique_aliases(entries: &[RegistryEntry]) -> Result<(), RuntimeError> {
@@ -1188,14 +1526,43 @@ mod tests {
     }
 
     fn write_minimal_gguf(path: &Path, architecture: &str) {
+        write_gguf_fixture(path, 2, 1, architecture, None, None);
+    }
+
+    fn write_gguf_fixture(
+        path: &Path,
+        version: u32,
+        tensor_count: u64,
+        architecture: &str,
+        file_type: Option<&str>,
+        block_count: Option<u32>,
+    ) {
         let mut buf = Vec::new();
         buf.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
-        buf.extend_from_slice(&2u32.to_le_bytes());
-        buf.extend_from_slice(&0u64.to_le_bytes());
-        buf.extend_from_slice(&1u64.to_le_bytes());
+        buf.extend_from_slice(&version.to_le_bytes());
+        buf.extend_from_slice(&tensor_count.to_le_bytes());
+        let mut kv_count = 1u64;
+        if file_type.is_some() {
+            kv_count += 1;
+        }
+        if block_count.is_some() {
+            kv_count += 1;
+        }
+        buf.extend_from_slice(&kv_count.to_le_bytes());
         write_gguf_string(&mut buf, "general.architecture");
         buf.extend_from_slice(&GGUF_METADATA_STRING.to_le_bytes());
         write_gguf_string(&mut buf, architecture);
+        if let Some(file_type) = file_type {
+            write_gguf_string(&mut buf, "general.type");
+            buf.extend_from_slice(&GGUF_METADATA_STRING.to_le_bytes());
+            write_gguf_string(&mut buf, file_type);
+        }
+        if let Some(block_count) = block_count {
+            let key = format!("{architecture}.block_count");
+            write_gguf_string(&mut buf, &key);
+            buf.extend_from_slice(&GGUF_METADATA_UINT32.to_le_bytes());
+            buf.extend_from_slice(&block_count.to_le_bytes());
+        }
         std::fs::write(path, buf).unwrap();
     }
 
@@ -1209,7 +1576,7 @@ mod tests {
         let mut buf = Vec::new();
         buf.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
         buf.extend_from_slice(&2u32.to_le_bytes());
-        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&1u64.to_le_bytes());
         buf.extend_from_slice(&1u64.to_le_bytes());
         write_gguf_string(&mut buf, "general.architecture");
         buf.extend_from_slice(&GGUF_METADATA_STRING.to_le_bytes());
@@ -1220,7 +1587,136 @@ mod tests {
 
         let meta = inspect_gguf_metadata(&path).expect("prefix metadata");
         assert_eq!(meta.architecture.as_deref(), Some("llama"));
+        assert_eq!(meta.tensor_count, 1);
         assert!(is_llama_cpp_loadable_gguf(&path));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_gguf_model_accepts_chat_and_embedding_arches() {
+        let dir = std::env::temp_dir().join("gguf-switchboard-validate-accept-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let chat = dir.join("chat-model.gguf");
+        write_minimal_gguf(&chat, "llama");
+        assert!(validate_gguf_model(&chat).is_ok());
+
+        let embed = dir.join("nomic-embed.gguf");
+        write_minimal_gguf(&embed, "nomic-bert");
+        assert!(validate_gguf_model(&embed).is_ok());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn validate_gguf_model_rejects_bad_name_magic_version_tensors_arch() {
+        let dir = std::env::temp_dir().join("gguf-switchboard-validate-reject-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let mmproj = dir.join("mmproj-model.gguf");
+        write_minimal_gguf(&mmproj, "llama");
+        assert_eq!(
+            validate_gguf_model(&mmproj).unwrap_err(),
+            GgufSkipReason::BadName
+        );
+
+        let projector = dir.join("vision-projector.gguf");
+        write_minimal_gguf(&projector, "llama");
+        assert_eq!(
+            validate_gguf_model(&projector).unwrap_err(),
+            GgufSkipReason::BadName
+        );
+
+        let bad_magic = dir.join("bad-magic.gguf");
+        let mut bad = b"NOTG".to_vec();
+        bad.extend_from_slice(&[0u8; 20]);
+        std::fs::write(&bad_magic, bad).unwrap();
+        assert_eq!(
+            validate_gguf_model(&bad_magic).unwrap_err(),
+            GgufSkipReason::BadMagic
+        );
+
+        let bad_version = dir.join("bad-version.gguf");
+        write_gguf_fixture(&bad_version, 99, 1, "llama", None, None);
+        assert_eq!(
+            validate_gguf_model(&bad_version).unwrap_err(),
+            GgufSkipReason::BadVersion
+        );
+
+        let no_tensors = dir.join("no-tensors.gguf");
+        write_gguf_fixture(&no_tensors, 2, 0, "llama", None, None);
+        assert_eq!(
+            validate_gguf_model(&no_tensors).unwrap_err(),
+            GgufSkipReason::NoTensors
+        );
+
+        let clip = dir.join("clip-encoder.gguf");
+        write_minimal_gguf(&clip, "clip");
+        assert_eq!(
+            validate_gguf_model(&clip).unwrap_err(),
+            GgufSkipReason::BadArch
+        );
+
+        let zero_blocks = dir.join("zero-blocks.gguf");
+        write_gguf_fixture(&zero_blocks, 2, 1, "llama", None, Some(0));
+        assert_eq!(
+            validate_gguf_model(&zero_blocks).unwrap_err(),
+            GgufSkipReason::ZeroBlockCount
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn expand_skips_explicit_pin_that_fails_validation() {
+        let dir = std::env::temp_dir().join("gguf-switchboard-explicit-skip-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let good = dir.join("good.gguf");
+        let bad = dir.join("bad.gguf");
+        write_minimal_gguf(&good, "llama");
+        write_minimal_gguf(&bad, "clip");
+
+        let registry = ModelsRegistry {
+            version: 1,
+            defaults: RegistryDefaults {
+                models_dir: dir.to_string_lossy().into_owned(),
+                ..RegistryDefaults::default()
+            },
+            auto_discover: false,
+            models: vec![
+                RegistryEntry {
+                    alias: "good".to_string(),
+                    file: "good.gguf".to_string(),
+                    display_name: None,
+                    kind: None,
+                    enabled: true,
+                    priority: false,
+                    port: None,
+                    context_size: None,
+                    extra_args: Vec::new(),
+                },
+                RegistryEntry {
+                    alias: "bad".to_string(),
+                    file: "bad.gguf".to_string(),
+                    display_name: None,
+                    kind: None,
+                    enabled: true,
+                    priority: false,
+                    port: None,
+                    context_size: None,
+                    extra_args: Vec::new(),
+                },
+            ],
+        };
+
+        let models = registry.expand("llama.cpp", 12).unwrap();
+        assert!(models.contains_key("good"));
+        assert!(!models.contains_key("bad"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1307,7 +1803,7 @@ mod tests {
     }
 
     #[test]
-    fn discover_merge_keeps_existing_when_no_gguf_found() {
+    fn discover_merge_drops_entries_when_no_gguf_found() {
         let dir = std::env::temp_dir().join("gguf-switchboard-merge-empty-test");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
@@ -1335,8 +1831,7 @@ mod tests {
         let merged =
             ModelsRegistry::discover_with_merge(dir.to_str().unwrap(), Some(&existing)).unwrap();
         assert_eq!(merged.defaults.models_dir, dir.to_string_lossy());
-        assert_eq!(merged.models.len(), 1);
-        assert_eq!(merged.models[0].alias, "demo");
+        assert!(merged.models.is_empty());
         assert!(!merged.auto_discover);
 
         std::fs::remove_dir_all(&dir).ok();
@@ -1380,6 +1875,81 @@ mod tests {
         assert!(cfg.args.contains(&"9001".to_string()));
         assert!(cfg.args.contains(&"4096".to_string()));
         assert_eq!(cfg.backend_url, "http://127.0.0.1:9001/v1");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn expand_forces_llama3_chat_template_for_llama_3_1() {
+        let dir = std::env::temp_dir().join("gguf-switchboard-llama31-template-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let model_path = dir.join("Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf");
+        write_minimal_gguf(&model_path, "llama");
+
+        let registry = ModelsRegistry {
+            version: 1,
+            defaults: RegistryDefaults {
+                models_dir: dir.to_string_lossy().into_owned(),
+                ..RegistryDefaults::default()
+            },
+            auto_discover: false,
+            models: vec![RegistryEntry {
+                alias: "meta-llama-3.1-8b".to_string(),
+                file: "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf".to_string(),
+                display_name: None,
+                kind: None,
+                enabled: true,
+                priority: true,
+                port: None,
+                context_size: None,
+                extra_args: Vec::new(),
+            }],
+        };
+
+        let models = registry.expand("llama.cpp", 0).unwrap();
+        let cfg = models.get("meta-llama-3.1-8b").unwrap();
+        assert!(
+            cfg.args
+                .windows(2)
+                .any(|w| { w[0] == "--chat-template" && w[1] == "llama3" })
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn expand_respects_explicit_jinja_for_llama_3_1() {
+        let dir = std::env::temp_dir().join("gguf-switchboard-llama31-jinja-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let model_path = dir.join("Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf");
+        write_minimal_gguf(&model_path, "llama");
+
+        let registry = ModelsRegistry {
+            version: 1,
+            defaults: RegistryDefaults {
+                models_dir: dir.to_string_lossy().into_owned(),
+                ..RegistryDefaults::default()
+            },
+            auto_discover: false,
+            models: vec![RegistryEntry {
+                alias: "meta-llama-3.1-8b".to_string(),
+                file: "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf".to_string(),
+                display_name: None,
+                kind: None,
+                enabled: true,
+                priority: true,
+                port: None,
+                context_size: None,
+                extra_args: vec!["--jinja".to_string()],
+            }],
+        };
+
+        let models = registry.expand("llama.cpp", 0).unwrap();
+        let cfg = models.get("meta-llama-3.1-8b").unwrap();
+        assert!(cfg.args.contains(&"--jinja".to_string()));
+        assert!(!cfg.args.iter().any(|a| a == "--chat-template"));
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1618,5 +2188,109 @@ mod tests {
             suggest_context_size(12, &entry, "/tmp/gemma-4-E4B-it-Q4_K_M.gguf", 65536),
             32768
         );
+    }
+
+    #[test]
+    fn resolve_models_dirs_with_fallback_prefers_configured_then_common() {
+        let root = std::env::temp_dir().join("gguf-switchboard-fallback-order-test");
+        let configured = root.join("configured");
+        let common_home = root.join("home-models");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&configured).unwrap();
+        std::fs::create_dir_all(&common_home).unwrap();
+        write_minimal_gguf(&common_home.join("only-in-common.gguf"), "llama");
+
+        // Empty configured dir still comes first; common with GGUF is appended.
+        let resolved = resolve_models_dirs_with_fallback(configured.to_str().unwrap()).unwrap();
+        assert_eq!(resolved[0], configured);
+        // common_models_dir_candidates uses $HOME/models — not our temp path.
+        // Verify configured-only when no GGUFs in configured and no overlap with real home.
+        assert!(resolved.iter().any(|d| d == &configured));
+
+        write_minimal_gguf(&configured.join("cfg.gguf"), "llama");
+        let with_files = resolve_models_dirs_with_fallback(configured.to_str().unwrap()).unwrap();
+        assert_eq!(with_files[0], configured);
+
+        let joined = format_models_dirs(&with_files);
+        assert!(joined.starts_with(&configured.to_string_lossy().into_owned()));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn resolve_models_dirs_with_fallback_dedupes_configured() {
+        let dir = std::env::temp_dir().join("gguf-switchboard-fallback-dedupe-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_minimal_gguf(&dir.join("a.gguf"), "llama");
+
+        let path = dir.to_string_lossy().into_owned();
+        let configured = format!("{path},{path}");
+        let resolved = resolve_models_dirs_with_fallback(&configured).unwrap();
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0], dir);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rescan_appends_models_dir_and_reports_added_removed() {
+        let dir = std::env::temp_dir().join("gguf-switchboard-rescan-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        write_minimal_gguf(&dir.join("alpha.gguf"), "llama");
+        write_minimal_gguf(&dir.join("beta.gguf"), "llama");
+
+        let existing = ModelsRegistry {
+            version: 1,
+            defaults: RegistryDefaults {
+                models_dir: dir.to_string_lossy().into_owned(),
+                ..RegistryDefaults::default()
+            },
+            auto_discover: true,
+            models: vec![
+                RegistryEntry {
+                    alias: "alpha-custom".to_string(),
+                    file: "alpha.gguf".to_string(),
+                    display_name: Some("Alpha Custom".to_string()),
+                    kind: None,
+                    enabled: true,
+                    priority: true,
+                    port: None,
+                    context_size: None,
+                    extra_args: Vec::new(),
+                },
+                RegistryEntry {
+                    alias: "gone".to_string(),
+                    file: "missing.gguf".to_string(),
+                    display_name: Some("Gone".to_string()),
+                    kind: None,
+                    enabled: true,
+                    priority: false,
+                    port: None,
+                    context_size: None,
+                    extra_args: Vec::new(),
+                },
+            ],
+        };
+
+        let result = ModelsRegistry::rescan(
+            Some(dir.to_str().unwrap()),
+            Some(&existing),
+            "llama.cpp",
+            12,
+        )
+        .unwrap();
+
+        assert_eq!(result.removed, 1);
+        assert_eq!(result.added, 1); // beta newly discovered
+        assert_eq!(result.total, 2);
+        assert!(result.registry.models.iter().any(
+            |e| e.alias == "alpha-custom" && e.display_name.as_deref() == Some("Alpha Custom")
+        ));
+        assert!(!result.registry.models.iter().any(|e| e.alias == "gone"));
+        assert_eq!(result.models_dir, dir.to_string_lossy());
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -11,7 +11,7 @@ fn write_test_gguf(path: &Path, architecture: &str) {
     let mut buf = Vec::new();
     buf.extend_from_slice(&0x4655_4747u32.to_le_bytes());
     buf.extend_from_slice(&2u32.to_le_bytes());
-    buf.extend_from_slice(&0u64.to_le_bytes());
+    buf.extend_from_slice(&1u64.to_le_bytes()); // tensor_count > 0 required for loadable GGUFs
     buf.extend_from_slice(&1u64.to_le_bytes());
     let key = b"general.architecture";
     buf.extend_from_slice(&(key.len() as u64).to_le_bytes());

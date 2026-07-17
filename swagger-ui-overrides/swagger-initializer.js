@@ -338,6 +338,50 @@ window.onload = function() {
 
     bar.appendChild(label);
     bar.appendChild(select);
+
+    const refreshBtn = document.createElement('button');
+    refreshBtn.type = 'button';
+    refreshBtn.id = 'refresh-models-btn';
+    refreshBtn.textContent = 'Refresh models';
+    refreshBtn.title = 'Rescan model directories and update the registry';
+    refreshBtn.className = 'refresh-models-btn';
+    refreshBtn.addEventListener('click', function() {
+      refreshBtn.disabled = true;
+      const prev = refreshBtn.textContent;
+      refreshBtn.textContent = 'Refreshing…';
+      fetch('/v1/models/refresh', { method: 'POST' })
+        .then(function(r) {
+          if (!r.ok) {
+            return r.text().then(function(t) {
+              throw new Error(t || ('HTTP ' + r.status));
+            });
+          }
+          return r.json();
+        })
+        .then(function(data) {
+          refreshBtn.textContent = 'Updated (' + (data.total || 0) + ')';
+          return fetch('/v1/models')
+            .then(function(r) { return r.json(); })
+            .then(function(list) {
+              const existing = document.getElementById('global-model-select');
+              const barEl = existing && existing.closest('.model-selector-bar');
+              if (barEl) barEl.remove();
+              injectModelSelector(list.data || []);
+            });
+        })
+        .catch(function(err) {
+          console.warn('Model refresh failed:', err);
+          refreshBtn.textContent = 'Refresh failed';
+        })
+        .finally(function() {
+          setTimeout(function() {
+            refreshBtn.textContent = prev;
+            refreshBtn.disabled = false;
+          }, 2000);
+        });
+    });
+
+    bar.appendChild(refreshBtn);
     bar.appendChild(registryLink);
     wrapper.appendChild(bar);
 
