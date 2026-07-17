@@ -78,6 +78,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let watcher_handles = scheduler.start_watchers();
     let app_state = Arc::new(AppState::new(config.clone(), scheduler.clone(), token_db));
 
+    let rescan_cancel = tokio_util::sync::CancellationToken::new();
+    let rescan_handle = app_state.spawn_models_rescan_watcher(rescan_cancel.clone());
+
     let app = api::create_router(app_state.clone());
 
     let bind: std::net::SocketAddr = config.bind.parse()?;
@@ -123,6 +126,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     info!("Shutting down scheduler");
+    rescan_cancel.cancel();
+    if let Some(handle) = rescan_handle {
+        let _ = handle.await;
+    }
     watcher_handles.shutdown().await;
     scheduler.shutdown().await?;
 
@@ -131,7 +138,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn run_discover_models(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
-    let mut models_dir = "/models".to_string();
+    let mut models_dir: Option<String> = None;
     let mut output = "models.toml".to_string();
     let mut merge_from: Option<String> = None;
 
@@ -161,28 +168,34 @@ fn run_discover_models(args: &[String]) -> Result<(), Box<dyn std::error::Error>
                 return Err(format!("discover-models: unknown flag '{arg}'").into());
             }
             path => {
-                models_dir = path.to_string();
+                models_dir = Some(path.to_string());
                 i += 1;
             }
         }
     }
 
-    let registry = match merge_from.as_deref() {
-        Some(path) => {
-            let existing = ModelsRegistry::load(path)?;
-            ModelsRegistry::discover_with_merge(&models_dir, Some(&existing))?
-        }
-        None => ModelsRegistry::discover(&models_dir)?,
+    let merge_registry = match merge_from.as_deref() {
+        Some(path) => Some(ModelsRegistry::load(path)?),
+        None => None,
     };
-    let discovered_count = registry.models.len();
-    registry.write(&output)?;
+
+    let result = ModelsRegistry::rescan(
+        models_dir.as_deref(),
+        merge_registry.as_ref(),
+        "llama.cpp",
+        12,
+    )?;
+    result.registry.write(&output)?;
+
+    let discovered_count = result.total;
+    let models_dir_display = result.models_dir.clone();
 
     if discovered_count == 0 {
         println!(
-            "Warning: no llama.cpp-loadable .gguf files found in {models_dir}; kept existing registry entries"
+            "Warning: no llama.cpp-loadable .gguf files found under {models_dir_display}; wrote empty registry"
         );
     } else {
-        println!("Discovered {discovered_count} model(s) in {models_dir}");
+        println!("Discovered {discovered_count} model(s) in {models_dir_display}");
     }
     println!("Wrote {output}");
     let json_output = json_sibling_path_for_output(&output);
@@ -192,15 +205,15 @@ fn run_discover_models(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     }
     println!();
     println!("  {:<24} {:<6} FILE", "ALIAS", "PRI");
-    for entry in &registry.models {
+    for entry in &result.registry.models {
         let pri = if entry.priority { "yes" } else { "" };
         println!("  {:<24} {:<6} {}", entry.alias, pri, entry.file);
     }
     println!();
     println!("Defaults:");
-    println!("  models_dir   = {}", registry.defaults.models_dir);
-    println!("  llama_server = {}", registry.defaults.llama_server);
-    println!("  base_port    = {}", registry.defaults.base_port);
+    println!("  models_dir   = {}", result.registry.defaults.models_dir);
+    println!("  llama_server = {}", result.registry.defaults.llama_server);
+    println!("  base_port    = {}", result.registry.defaults.base_port);
     println!();
     println!("Point config.toml at the registry with: models_file = \"{output}\"");
 

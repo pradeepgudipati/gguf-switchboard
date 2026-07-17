@@ -13,7 +13,7 @@ A **[llama-swap](https://github.com/mostlygeek/llama-swap) alternative in Rust**
 
 - **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/responses`, `/v1/models`, `/v1/models/registry.json`, `/v1/audio/*`
 - **Swagger UI** — Explore and test the API at `http://localhost:9090/swagger-ui/`
-- **Auto-discovery of GGUF models** — Automatically scans configured directories at startup and registers all valid `.gguf` files; no manual model registry needed
+- **Auto-discovery of GGUF models** — Scans configured directories and registers GGUFs that pass a cheap validation ladder (filename → header → metadata); sidecars and invalid files are skipped
 - **Dynamic model loading** — Models load/unload on demand; no restart needed
 - **Single-slot model swapping** — One resident model at a time; switches drain in-flight requests first, failed switches roll back automatically
 - **System memory-pressure monitoring** — Automatically unloads the active model when system RAM crosses the critical threshold
@@ -438,7 +438,7 @@ Duplicate aliases get a numeric suffix (`model-2`, `model-3`, …).
 
 #### Auto-discover at runtime
 
-With `auto_discover = true`, the runtime scans every directory listed in `models_dir` on startup and registers any llama.cpp-loadable `.gguf` file not already listed in `[[models]]`. Explicit entries let you pin aliases, display names, or priorities for specific files; everything else is picked up automatically.
+With `auto_discover = true`, the runtime scans every directory listed in `models_dir` on startup and registers any llama.cpp-loadable `.gguf` file not already listed in `[[models]]`. Explicit entries let you pin aliases, display names, or priorities for specific files; everything else is picked up automatically. Pins that fail the same validation checks are **skipped with a warning** (they are not registered).
 
 `models_dir` must exist at startup — no fallback directories are searched. Use a comma-separated list to scan multiple folders:
 
@@ -448,7 +448,15 @@ models_dir = "/models,/home/you/extra-gguf"
 auto_discover = true
 ```
 
-Discovery is recursive and skips sidecars and non-model artifacts (`mmproj*`, `mtp-*`, `ggml-vocab*`, LoRA adapters) plus files that are not valid llama.cpp-loadable GGUF models (missing `general.architecture` metadata, vision encoders, etc.). With a single `models_dir`, nested paths are stored relative to that root; with multiple directories, discovered files are stored as absolute paths.
+Discovery is recursive. Before a file is registered (auto-discover **or** explicit `[[models]]` pin), it must pass a cheap **prefix-only** validation ladder — never a full multi-GB read:
+
+1. **Filename** — reject sidecars/adapters (`mmproj*`, `mtp-*`, `*projector*`, `*adapter*`, `*tokenizer*`, `ggml-vocab*`, LoRA/`-vocab` names)
+2. **Header** — `GGUF` magic, version `2` or `3`, `tensor_count > 0`
+3. **Metadata** — require `general.architecture`; reject encoder/sidecar arches (`clip`, `siglip`, `vit`, …) and `general.type` of `lora`/`vocab`; if `{arch}.block_count` is present and `0`, reject
+
+Embedding architectures remain discoverable (for `/v1/embeddings`). Passing this ladder means the file looks like a standalone model — **GPU load success is still proven later** when `llama-server` starts and passes health checks.
+
+With a single `models_dir`, nested paths are stored relative to that root; with multiple directories, discovered files are stored as absolute paths.
 
 You can omit `[[models]]` entirely and rely on auto-discover, or add entries only for models you want to customize.
 
@@ -521,7 +529,15 @@ For Docker deployments, use `models.docker.toml` (mounted by `docker-compose` al
 
 Only one model should have `priority = true` (the idle-timeout default). If multiple are set, the runtime keeps the first and clears the rest with a warning. If none is set after discovery, the best-matching chat model is marked priority (embeddings are skipped).
 
-**Tip — Llama 3.1 tool-call behavior:** Meta Llama 3.1 Instruct models may emit JSON function calls instead of plain answers. Add a system prompt in API requests, or set per-model `extra_args = ["--jinja"]` in `models.toml` and use an explicit `context_size` if needed.
+**Tip — Llama 3.1 tool-call behavior:** Some Meta Llama 3.1 GGUFs ship a tool-use chat template that makes `/v1/chat/completions` return JSON like `{"name":"...","parameters":{...}}` instead of a normal answer (even with no `tools` in the request). gguf-switchboard auto-adds `--chat-template llama3` for Llama 3.1 models unless you already set `--chat-template`, `--chat-template-file`, or `--jinja` in `extra_args`.
+
+To opt into GGUF tool-calling templates instead:
+
+```toml
+extra_args = ["--jinja"]
+```
+
+Raw `/v1/completions` (no chat template) is unaffected.
 
 ### Inline model config (advanced)
 

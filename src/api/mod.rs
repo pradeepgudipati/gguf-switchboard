@@ -32,6 +32,7 @@ use crate::state::AppState;
         models::list_models,
         models::get_model,
         models::registry_json,
+        models::refresh_models,
         chat::chat_completions,
         completions::completions,
         embeddings::embeddings,
@@ -44,6 +45,7 @@ use crate::state::AppState;
     components(schemas(
         health::HealthResponse,
         health::StatusResponse,
+        models::RefreshModelsResponse,
         crate::types::ModelInfo,
         crate::types::ListModelsResponse,
         crate::types::Usage,
@@ -143,6 +145,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             axum::routing::post(embeddings::embeddings),
         )
         .route("/v1/models", axum::routing::get(models::list_models))
+        .route(
+            "/v1/models/refresh",
+            axum::routing::post(models::refresh_models),
+        )
         .route(
             "/v1/models/registry.json",
             axum::routing::get(models::registry_json),

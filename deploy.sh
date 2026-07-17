@@ -18,7 +18,6 @@ CONFIG_FILE="${CONFIG_DIR}/config.toml"
 MODELS_FILE="${CONFIG_DIR}/models.toml"
 LOCAL_REGISTRY_TOML="models.local.toml"
 LOCAL_REGISTRY_JSON="models.local.json"
-DEFAULT_MODELS_DIR="$HOME/models"
 
 read_config() {
     if [[ -r "$1" ]]; then
@@ -99,150 +98,15 @@ read_models_dir_from_toml() {
     awk -F'"' '/^models_dir\s*=/ { print $2; exit }' "$file"
 }
 
-is_discoverable_gguf_name() {
-    local name="${1,,}"
-    [[ "$name" == mmproj* || "$name" == mtp-* || "$name" == ggml-vocab* ]] && return 1
-    [[ "$name" == *-mmproj* || "$name" == *-lora* || "$name" == *-vocab.gguf ]] && return 1
-    return 0
-}
-
-count_gguf_files() {
-    local dir="$1"
-    local count=0
-    local file base
-    [[ -d "$dir" ]] || { echo 0; return; }
-    while IFS= read -r -d '' file; do
-        base="$(basename "$file")"
-        if is_discoverable_gguf_name "$base"; then
-            count=$((count + 1))
-        fi
-    done < <(find "$dir" -type f -iname '*.gguf' -print0 2>/dev/null)
-    echo "$count"
-}
-
-dir_in_models_dir_list() {
-    local needle="$1"
-    local configured="$2"
-    local part
-    IFS=',' read -ra parts <<< "$configured"
-    for part in "${parts[@]}"; do
-        part="${part#"${part%%[![:space:]]*}"}"
-        part="${part%"${part##*[![:space:]]}"}"
-        [[ "$part" == "$needle" ]] && return 0
-    done
-    return 1
-}
-
-scan_common_models_dirs() {
-    local configured="${1:-}"
-    local -a found=()
-    local candidate count
-    for candidate in "$DEFAULT_MODELS_DIR" /models "$HOME/.lmstudio/models" "/var/lib/gguf-switchboard/models"; do
-        count="$(count_gguf_files "$candidate")"
-        if [[ "$count" -gt 0 ]]; then
-            found+=("$candidate")
-        fi
-    done
-    if [[ -n "$configured" ]]; then
-        IFS=',' read -ra parts <<< "$configured"
-        for candidate in "${parts[@]}"; do
-            candidate="${candidate#"${candidate%%[![:space:]]*}"}"
-            candidate="${candidate%"${candidate##*[![:space:]]}"}"
-            [[ -z "$candidate" ]] && continue
-            if [[ -d "$candidate" ]] && count="$(count_gguf_files "$candidate")" && [[ "$count" -gt 0 ]]; then
-                local seen=false
-                for existing in "${found[@]}"; do
-                    [[ "$existing" == "$candidate" ]] && seen=true
-                done
-                [[ "$seen" == "false" ]] && found+=("$candidate")
-            fi
-        done
-    fi
-    if [[ "${#found[@]}" -eq 0 ]]; then
-        return 1
-    fi
-    local IFS=,
-    echo "${found[*]}"
-}
-
-detect_models_dir() {
-    if [[ -n "${MODELS_DIR:-}" ]]; then
-        echo "$MODELS_DIR"
-        return 0
-    fi
-
-    if [[ -d "$DEFAULT_MODELS_DIR" ]]; then
-        echo "$DEFAULT_MODELS_DIR"
-        return 0
-    fi
-
-    local configured=""
-    for candidate in "$MODELS_FILE" "models.toml"; do
-        if [[ -f "$candidate" ]]; then
-            configured="$(read_models_dir_from_toml "$candidate" || true)"
-            [[ -n "$configured" ]] && break
-        fi
-    done
-
-    if scanned="$(scan_common_models_dirs "$configured" 2>/dev/null || true)" && [[ -n "$scanned" ]]; then
-        echo "$scanned"
-        return 0
-    fi
-
-    if [[ -n "$configured" ]]; then
-        echo "$configured"
-        return 0
-    fi
-
-    return 1
-}
-
 print_models_dir_hints() {
-    local configured="${1:-}"
-    local scanned extra_dirs=() candidate count refresh_dirs=""
-
-    if [[ -z "$configured" ]]; then
-        configured="$(read_models_dir_from_toml "$MODELS_FILE" 2>/dev/null || read_models_dir_from_toml "models.toml" 2>/dev/null || true)"
-    fi
-
+    local configured=""
+    configured="$(read_models_dir_from_toml "$MODELS_FILE" 2>/dev/null || read_models_dir_from_toml "models.toml" 2>/dev/null || true)"
     if [[ -n "$configured" ]]; then
         echo "    Configured models_dir: $configured"
     fi
-
-    scanned="$(scan_common_models_dirs "$configured" 2>/dev/null || true)"
-    if [[ -z "$scanned" ]]; then
-        echo "    No .gguf files found under common model directories."
-        echo "    Set MODELS_DIR=/path/to/models and re-run with --refresh-models."
-        return 0
-    fi
-
-    echo "    Directories with .gguf files on this host:"
-    IFS=',' read -ra scanned_parts <<< "$scanned"
-    for candidate in "${scanned_parts[@]}"; do
-        candidate="${candidate#"${candidate%%[![:space:]]*}"}"
-        candidate="${candidate%"${candidate##*[![:space:]]}"}"
-        count="$(count_gguf_files "$candidate")"
-        printf "      - %s (%s files)\n" "$candidate" "$count"
-        if [[ -n "$configured" ]] && ! dir_in_models_dir_list "$candidate" "$configured"; then
-            extra_dirs+=("$candidate")
-        fi
-    done
-
-    refresh_dirs="$scanned"
-    if [[ "${#extra_dirs[@]}" -gt 0 && -n "$configured" ]]; then
-        echo "    Note: some directories with models are not in configured models_dir."
-        refresh_dirs="$configured"
-        for candidate in "${extra_dirs[@]}"; do
-            refresh_dirs="$refresh_dirs,$candidate"
-        done
-    fi
-
-    echo "    To regenerate models.toml from disk:"
-    if [[ -d "$DEFAULT_MODELS_DIR" ]]; then
-        echo "    ./deploy.sh --refresh-models"
-    else
-        echo "    MODELS_DIR=$refresh_dirs ./deploy.sh --refresh-models"
-    fi
+    echo "    To regenerate models.toml from disk (Rust auto-resolves dirs):"
+    echo "    ./deploy.sh --refresh-models"
+    echo "    Or: MODELS_DIR=/path/to/models ./deploy.sh --refresh-models"
 }
 
 ensure_config_toml() {
@@ -287,7 +151,7 @@ sync_registry_to_repo() {
 
 generate_models_toml() {
     local refresh="${1:-false}"
-    local models_dir merge_source generated="models.toml.generated"
+    local merge_source generated="models.toml.generated"
     local -a discover_cmd
 
     if [[ "$refresh" != "true" && -f "$MODELS_FILE" ]]; then
@@ -303,18 +167,11 @@ generate_models_toml() {
         merge_source="models.toml"
     fi
 
-    if ! models_dir="$(detect_models_dir)"; then
-        echo "==> Warning: Could not find a models directory."
-        echo "    Set MODELS_DIR or edit models_dir in models.toml, then re-run with --refresh-models."
-        if [[ ! -f "$MODELS_FILE" && -f "models.toml" ]]; then
-            echo "==> Copying template models.toml to $MODELS_FILE..."
-            sudo cp models.toml "$MODELS_FILE"
-        fi
-        return 0
+    echo "==> Generating models.toml via discover-models (auto-resolves model directories)..."
+    discover_cmd=(./target/release/gguf-switchboard discover-models -o "$generated")
+    if [[ -n "${MODELS_DIR:-}" ]]; then
+        discover_cmd=(./target/release/gguf-switchboard discover-models "$MODELS_DIR" -o "$generated")
     fi
-
-    echo "==> Generating models.toml from $models_dir..."
-    discover_cmd=(./target/release/gguf-switchboard discover-models "$models_dir" -o "$generated")
     if [[ -n "$merge_source" ]]; then
         discover_cmd+=(--merge "$merge_source")
     fi
@@ -413,7 +270,7 @@ Options:
   --refresh-models   Regenerate /etc/gguf-switchboard/models.toml from GGUF files on disk
 
 Environment:
-  MODELS_DIR                Directory containing .gguf files (default: ~/models when present)
+  MODELS_DIR                Optional override dirs for discover-models (comma-separated)
   GGUF_SWITCHBOARD_DIR      Repo checkout path (default: ~/gguf-switchboard)
   GGUF_SWITCHBOARD_CONFIG_DIR  Config directory (default: /etc/gguf-switchboard)
 EOF

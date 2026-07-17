@@ -55,3 +55,23 @@
 .registry-json-link:hover {
   background: rgba(73, 204, 144, 0.25);
 }
+
+.refresh-models-btn {
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 5px 10px;
+  border-radius: 4px;
+  border: 1px solid rgba(73, 204, 144, 0.4);
+  background: rgba(0, 0, 0, 0.15);
+  cursor: pointer;
+}
+
+.refresh-models-btn:hover:not(:disabled) {
+  background: rgba(73, 204, 144, 0.25);
+}
+
+.refresh-models-btn:disabled {
+  opacity: 0.7;
+  cursor: wait;
+}
