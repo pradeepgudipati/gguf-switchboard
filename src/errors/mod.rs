@@ -34,6 +34,9 @@ pub enum RuntimeError {
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
 
+    #[error("Model busy: {0}")]
+    ModelBusy(String),
+
     #[error("Authentication required")]
     _Unauthorized,
 
@@ -105,6 +108,9 @@ impl IntoResponse for RuntimeError {
                 "invalid_request_error",
                 "invalid_request",
             ),
+            RuntimeError::ModelBusy(_) => {
+                (StatusCode::CONFLICT, "invalid_request_error", "model_busy")
+            }
             RuntimeError::_Unauthorized => (
                 StatusCode::UNAUTHORIZED,
                 "authentication_error",

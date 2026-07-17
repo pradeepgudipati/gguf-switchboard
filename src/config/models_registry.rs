@@ -316,7 +316,17 @@ fn skip_gguf_value(data: &[u8], offset: &mut usize, value_type: u32) -> Option<(
 }
 
 fn inspect_gguf_metadata(path: &Path) -> Option<GgufMetadata> {
-    let data = std::fs::read(path).ok()?;
+    use std::io::Read;
+
+    // Metadata is a prefix before tensor weights. Never load multi-GB GGUFs into RAM.
+    // ponytail: 32 MiB ceiling — raise only if a model ships absurdly large KV headers.
+    const MAX_METADATA_BYTES: u64 = 32 * 1024 * 1024;
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let file_len = file.metadata().ok()?.len();
+    let to_read = file_len.min(MAX_METADATA_BYTES) as usize;
+    let mut data = vec![0u8; to_read];
+    file.read_exact(&mut data).ok()?;
     if data.len() < 24 {
         return None;
     }
@@ -889,11 +899,13 @@ impl ModelsRegistry {
         for entry in &self.models {
             match resolve_model_path(&models_dirs, &entry.file) {
                 Ok(path) => {
-                    if !is_llama_cpp_loadable_gguf(Path::new(&path)) {
+                    // Explicit entries are trusted when the file exists. Metadata inspection
+                    // (used by auto_discover) is skipped so startup never reads multi-GB weights.
+                    if !Path::new(&path).is_file() {
                         tracing::warn!(
                             alias = %entry.alias,
                             file = %entry.file,
-                            "Skipping explicit model entry because the GGUF file is not llama.cpp-loadable"
+                            "Skipping explicit model entry because the GGUF path is not a file"
                         );
                         continue;
                     }
@@ -1185,6 +1197,32 @@ mod tests {
         buf.extend_from_slice(&GGUF_METADATA_STRING.to_le_bytes());
         write_gguf_string(&mut buf, architecture);
         std::fs::write(path, buf).unwrap();
+    }
+
+    #[test]
+    fn inspect_gguf_metadata_reads_prefix_only() {
+        let dir = std::env::temp_dir().join("gguf-switchboard-inspect-prefix-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("huge-but-header-only.gguf");
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&2u32.to_le_bytes());
+        buf.extend_from_slice(&0u64.to_le_bytes());
+        buf.extend_from_slice(&1u64.to_le_bytes());
+        write_gguf_string(&mut buf, "general.architecture");
+        buf.extend_from_slice(&GGUF_METADATA_STRING.to_le_bytes());
+        write_gguf_string(&mut buf, "llama");
+        // Simulate multi-GB weights without writing multi-GB: sparse-ish padding.
+        buf.resize(buf.len() + 8 * 1024 * 1024, 0);
+        std::fs::write(&path, &buf).unwrap();
+
+        let meta = inspect_gguf_metadata(&path).expect("prefix metadata");
+        assert_eq!(meta.architecture.as_deref(), Some("llama"));
+        assert!(is_llama_cpp_loadable_gguf(&path));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

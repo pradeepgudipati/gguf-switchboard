@@ -61,6 +61,7 @@ pub async fn chat_completions(
     let request = sanitize_chat_request(request);
     let backend = state.scheduler.ensure_loaded(&request.model).await?;
     let model_id = request.model.clone();
+    let request_guard = state.scheduler.track_request(&model_id);
 
     if request.stream == Some(true) {
         STREAMING_REQUESTS.inc();
@@ -93,7 +94,11 @@ pub async fn chat_completions(
         // finishes, not when the handler returns.
         let guarded = GuardedStream::new(
             full_stream,
-            vec![Box::new(ActiveGuard), Box::new(StreamingGuard)],
+            vec![
+                Box::new(request_guard),
+                Box::new(ActiveGuard),
+                Box::new(StreamingGuard),
+            ],
         );
 
         let body = Body::from_stream(guarded.map(|s: Result<String, _>| {
@@ -113,6 +118,7 @@ pub async fn chat_completions(
             .unwrap())
     } else {
         let _guard = ActiveGuard;
+        let _request_guard = request_guard;
         let mut response = backend.chat(request).await?;
         response.model = model_id.clone();
 

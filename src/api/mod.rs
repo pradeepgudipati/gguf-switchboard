@@ -22,7 +22,7 @@ use crate::state::AppState;
 #[openapi(
     info(
         title = "GGUF Switchboard",
-        description = "llama-swap alternative in Rust — OpenAI-compatible GGUF runtime with VRAM-pressure eviction, context auto-fallback, and usage tracking",
+        description = "llama-swap alternative in Rust — OpenAI-compatible GGUF runtime with memory-pressure eviction, OOM context fallback, and usage tracking",
         version = env!("CARGO_PKG_VERSION")
     ),
     paths(

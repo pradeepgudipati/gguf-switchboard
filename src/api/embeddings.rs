@@ -42,11 +42,12 @@ pub async fn embeddings(
 ) -> Result<impl IntoResponse, RuntimeError> {
     REQUEST_TOTAL.inc();
     ACTIVE_REQUESTS.inc();
-    let _guard = ActiveGuard;
 
     let start = std::time::Instant::now();
     let backend = state.scheduler.ensure_loaded(&request.model).await?;
     let model_id = request.model.clone();
+    let _request_guard = state.scheduler.track_request(&model_id);
+    let _guard = ActiveGuard;
     let mut response = backend.embeddings(request).await?;
     response.model = model_id.clone();
 

@@ -50,6 +50,12 @@ pub struct Config {
     /// Minimum context size (`-c`) when auto-reducing after a failed model load.
     #[serde(default = "default_context_fallback_min")]
     pub context_fallback_min: u32,
+    /// Seconds to wait for in-flight requests to finish before switching models.
+    #[serde(default = "default_switch_drain_timeout_secs")]
+    pub switch_drain_timeout_secs: u64,
+    /// Seconds to skip priority-model reload after a failed priority load.
+    #[serde(default = "default_priority_load_cooldown_secs")]
+    pub priority_load_cooldown_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -101,6 +107,14 @@ fn default_memory_check_interval_secs() -> u64 {
 
 fn default_context_fallback_min() -> u32 {
     8192
+}
+
+fn default_switch_drain_timeout_secs() -> u64 {
+    120
+}
+
+fn default_priority_load_cooldown_secs() -> u64 {
+    300
 }
 
 impl Config {

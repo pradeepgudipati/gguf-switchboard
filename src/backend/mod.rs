@@ -63,6 +63,14 @@ pub trait Backend: Send + Sync {
     async fn process_running(&self) -> bool {
         true
     }
+    /// Recent stderr from the backend process during startup (llama.cpp).
+    async fn take_startup_stderr(&self) -> String {
+        String::new()
+    }
+    /// Reported llama-server version, if detected.
+    async fn server_version(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Create a concrete backend for the given model id and config.

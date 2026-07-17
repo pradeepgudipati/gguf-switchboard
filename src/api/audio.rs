@@ -8,9 +8,16 @@ use axum::response::IntoResponse;
 use tracing::instrument;
 
 use crate::errors::RuntimeError;
-use crate::metrics::REQUEST_TOTAL;
+use crate::metrics::{ACTIVE_REQUESTS, REQUEST_TOTAL};
 use crate::state::AppState;
 use crate::types::audio::{SpeechRequest, TranscriptionRequest};
+
+struct ActiveGuard;
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        ACTIVE_REQUESTS.dec();
+    }
+}
 
 /// Transcribe audio to text.
 ///
@@ -42,6 +49,7 @@ pub async fn transcriptions(
     Json(request): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, RuntimeError> {
     REQUEST_TOTAL.inc();
+    ACTIVE_REQUESTS.inc();
 
     let model = request
         .get("model")
@@ -50,6 +58,8 @@ pub async fn transcriptions(
         .to_string();
 
     let backend = state.scheduler.ensure_loaded(&model).await?;
+    let _request_guard = state.scheduler.track_request(&model);
+    let _guard = ActiveGuard;
 
     let url = format!("{}/audio/transcriptions", backend.backend_url());
     let client = reqwest::Client::new();
@@ -105,6 +115,7 @@ pub async fn speech(
     Json(request): Json<serde_json::Value>,
 ) -> Result<impl IntoResponse, RuntimeError> {
     REQUEST_TOTAL.inc();
+    ACTIVE_REQUESTS.inc();
 
     let model = request
         .get("model")
@@ -113,6 +124,8 @@ pub async fn speech(
         .to_string();
 
     let backend = state.scheduler.ensure_loaded(&model).await?;
+    let _request_guard = state.scheduler.track_request(&model);
+    let _guard = ActiveGuard;
 
     let url = format!("{}/audio/speech", backend.backend_url());
     let client = reqwest::Client::new();

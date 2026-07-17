@@ -12,6 +12,7 @@ pub struct HealthResponse {
     pub status: String,
     pub version: String,
     pub loaded_model: Option<String>,
+    pub llama_server_version: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -19,6 +20,7 @@ pub struct StatusResponse {
     pub status: String,
     pub version: String,
     pub loaded_model: Option<String>,
+    pub llama_server_version: Option<String>,
     pub priority_model: Option<String>,
     pub configured_models: Vec<serde_json::Value>,
     pub uptime_secs: u64,
@@ -35,10 +37,12 @@ pub struct StatusResponse {
 )]
 pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     let loaded = state.scheduler.loaded_model().await;
+    let llama_server_version = state.scheduler.loaded_server_version().await;
     Json(HealthResponse {
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         loaded_model: loaded,
+        llama_server_version,
     })
 }
 
@@ -53,6 +57,7 @@ pub async fn health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> 
 )]
 pub async fn status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
     let loaded = state.scheduler.loaded_model().await;
+    let llama_server_version = state.scheduler.loaded_server_version().await;
     let priority = state.scheduler.priority_model();
     let models = state
         .scheduler
@@ -75,6 +80,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> 
         status: "ok".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         loaded_model: loaded,
+        llama_server_version,
         priority_model: priority,
         configured_models: models,
         uptime_secs,
