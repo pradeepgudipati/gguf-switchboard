@@ -12,6 +12,20 @@ use utoipa::ToSchema;
 use crate::config::ModelConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+#[schema(example = json!({
+    "id": "qwen2.5-coder-7b",
+    "object": "model",
+    "created": 1710000000,
+    "owned_by": "local",
+    "display_name": "Qwen2.5 Coder 7b",
+    "kind": "coder",
+    "description": "Code-specialized Qwen 2.5 instruct model",
+    "context_size": 32768,
+    "max_context_length": 32768,
+    "min_vram_gb": 8,
+    "capabilities": ["tools"],
+    "hf_repo": "lmstudio-community/Qwen2.5-Coder-7B-Instruct-GGUF"
+}))]
 pub struct ModelInfo {
     pub id: String,
     pub object: String,

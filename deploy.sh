@@ -5,7 +5,7 @@
 #   MODELS_DIR   Directory containing .gguf files (default: ~/models when present)
 #
 # Flags:
-#   --refresh-models   Regenerate /etc/gguf-switchboard/models.toml from disk
+#   --refresh-models   Regenerate models.toml in the config dir from disk
 #
 set -euo pipefail
 
@@ -13,9 +13,11 @@ REPO_URL="https://github.com/pradeepgudipati/gguf-switchboard.git"
 REPO_DIR="${GGUF_SWITCHBOARD_DIR:-$HOME/gguf-switchboard}"
 BRANCH="main"
 SERVICE_FILE="/etc/systemd/system/gguf-switchboard.service"
-CONFIG_DIR="${GGUF_SWITCHBOARD_CONFIG_DIR:-/etc/gguf-switchboard}"
-CONFIG_FILE="${CONFIG_DIR}/config.toml"
-MODELS_FILE="${CONFIG_DIR}/models.toml"
+LEGACY_CONFIG_DIR="/etc/gguf-switchboard"
+# Resolved after ensure_repo (default: repo checkout). Override with GGUF_SWITCHBOARD_CONFIG_DIR.
+CONFIG_DIR=""
+CONFIG_FILE=""
+MODELS_FILE=""
 LOCAL_REGISTRY_TOML="models.local.toml"
 LOCAL_REGISTRY_JSON="models.local.json"
 
@@ -112,7 +114,7 @@ print_models_dir_hints() {
 ensure_config_toml() {
     if [[ ! -f "$CONFIG_FILE" ]]; then
         echo "==> Copying default config to $CONFIG_FILE..."
-        sudo cp config.toml "$CONFIG_FILE"
+        install_file config.toml "$CONFIG_FILE"
         CONFIG_CREATED=true
         return
     fi
@@ -122,7 +124,61 @@ ensure_config_toml() {
     fi
 
     echo "==> Upgrading $CONFIG_FILE to use models_file (replacing legacy inline model definitions)..."
-    sudo cp config.toml "$CONFIG_FILE"
+    install_file config.toml "$CONFIG_FILE"
+}
+
+# Copy src → dst without sudo when possible; avoid no-op self-copies.
+install_file() {
+    local src="$1" dst="$2"
+    local src_real dst_real
+    src_real="$(realpath "$src" 2>/dev/null || echo "$src")"
+    dst_real="$(realpath "$dst" 2>/dev/null || echo "$dst")"
+    if [[ "$src_real" == "$dst_real" ]]; then
+        return 0
+    fi
+    mkdir -p "$(dirname "$dst")"
+    if [[ -w "$(dirname "$dst")" ]] && { [[ ! -e "$dst" ]] || [[ -w "$dst" ]]; }; then
+        cp "$src" "$dst"
+    else
+        sudo mkdir -p "$(dirname "$dst")"
+        sudo cp "$src" "$dst"
+        sudo chown "$(whoami)":"$(whoami)" "$dst"
+    fi
+}
+
+claim_config_files() {
+    local f
+    for f in "$CONFIG_FILE" "$MODELS_FILE" "${MODELS_FILE%.toml}.json"; do
+        [[ -e "$f" ]] || continue
+        if [[ ! -w "$f" ]]; then
+            sudo chown "$(whoami)":"$(whoami)" "$f"
+        fi
+    done
+}
+
+maybe_migrate_legacy_config() {
+    local legacy="$LEGACY_CONFIG_DIR"
+    local legacy_real config_real
+    [[ -d "$legacy" ]] || return 0
+    legacy_real="$(realpath "$legacy" 2>/dev/null || echo "$legacy")"
+    config_real="$(realpath "$CONFIG_DIR" 2>/dev/null || echo "$CONFIG_DIR")"
+    [[ "$legacy_real" != "$config_real" ]] || return 0
+
+    if [[ ! -f "$MODELS_FILE" && -r "$legacy/models.toml" ]]; then
+        echo "==> Migrating $legacy/models.toml → $MODELS_FILE"
+        install_file "$legacy/models.toml" "$MODELS_FILE"
+        if [[ -r "$legacy/models.json" ]]; then
+            install_file "$legacy/models.json" "${MODELS_FILE%.toml}.json"
+        fi
+    elif [[ -r "$legacy/models.toml" && -f "$MODELS_FILE" ]]; then
+        echo "==> Note: legacy $legacy/models.toml still exists; using $MODELS_FILE."
+        echo "    To import legacy once: cp $legacy/models.toml $MODELS_FILE"
+    fi
+
+    if [[ ! -f "$CONFIG_FILE" && -r "$legacy/config.toml" ]]; then
+        echo "==> Migrating $legacy/config.toml → $CONFIG_FILE"
+        install_file "$legacy/config.toml" "$CONFIG_FILE"
+    fi
 }
 
 sync_registry_to_repo() {
@@ -177,11 +233,11 @@ generate_models_toml() {
     fi
 
     if "${discover_cmd[@]}"; then
-        sudo cp "$generated" "$MODELS_FILE"
+        install_file "$generated" "$MODELS_FILE"
         cp "$generated" "$LOCAL_REGISTRY_TOML"
         local generated_json="${generated/.toml/.json}"
         if [[ -f "$generated_json" ]]; then
-            sudo cp "$generated_json" "${MODELS_FILE%.toml}.json"
+            install_file "$generated_json" "${MODELS_FILE%.toml}.json"
             cp "$generated_json" "$LOCAL_REGISTRY_JSON"
         fi
         rm -f "$generated" "$generated_json"
@@ -192,7 +248,7 @@ generate_models_toml() {
     echo "==> Warning: discover-models failed; keeping existing models.toml if present."
     rm -f "$generated"
     if [[ ! -f "$MODELS_FILE" && -f "models.toml" ]]; then
-        sudo cp models.toml "$MODELS_FILE"
+        install_file models.toml "$MODELS_FILE"
     fi
 }
 
@@ -267,12 +323,12 @@ Usage: ./deploy.sh [--refresh-models]
 Deploy gguf-switchboard as a systemd service.
 
 Options:
-  --refresh-models   Regenerate /etc/gguf-switchboard/models.toml from GGUF files on disk
+  --refresh-models   Regenerate models.toml from GGUF files on disk
 
 Environment:
-  MODELS_DIR                Optional override dirs for discover-models (comma-separated)
-  GGUF_SWITCHBOARD_DIR      Repo checkout path (default: ~/gguf-switchboard)
-  GGUF_SWITCHBOARD_CONFIG_DIR  Config directory (default: /etc/gguf-switchboard)
+  MODELS_DIR                   Optional override dirs for discover-models (comma-separated)
+  GGUF_SWITCHBOARD_DIR         Repo checkout path (default: ~/gguf-switchboard)
+  GGUF_SWITCHBOARD_CONFIG_DIR  Config directory (default: repo checkout)
 EOF
             exit 0
             ;;
@@ -282,6 +338,11 @@ EOF
             ;;
     esac
 done
+
+CONFIG_DIR="${GGUF_SWITCHBOARD_CONFIG_DIR:-$(pwd)}"
+CONFIG_FILE="${CONFIG_DIR}/config.toml"
+MODELS_FILE="${CONFIG_DIR}/models.toml"
+echo "==> Config directory: $CONFIG_DIR"
 
 echo "==> Checking out $BRANCH..."
 git fetch origin "$BRANCH" 2>/dev/null || true
@@ -313,20 +374,20 @@ fi
 
 echo "==> Building release..."
 export SWAGGER_UI_OVERWRITE_FOLDER="$(pwd)/swagger-ui-overrides"
-cargo clean -p utoipa-swagger-ui 2>/dev/null || true
+# Override files are baked into utoipa-swagger-ui at compile time; debug clean
+# leaves release artifacts, so the old swagger-initializer.js keeps shipping.
+cargo clean -p utoipa-swagger-ui --release 2>/dev/null || true
 cargo build --release
 
 echo "==> Ensuring runtime directories..."
-sudo mkdir -p "$CONFIG_DIR" /var/lib/gguf-switchboard
+mkdir -p "$CONFIG_DIR" 2>/dev/null || sudo mkdir -p "$CONFIG_DIR"
+sudo mkdir -p /var/lib/gguf-switchboard
 sudo chown "$(whoami)":"$(whoami)" /var/lib/gguf-switchboard
 
 CONFIG_CREATED=false
 
-# Create service if it doesn't exist
-if [[ ! -f "$SERVICE_FILE" ]]; then
-    echo "==> Creating systemd service..."
-
-    sudo tee "$SERVICE_FILE" > /dev/null <<EOF
+echo "==> Installing systemd service (config: $CONFIG_FILE)..."
+sudo tee "$SERVICE_FILE" > /dev/null <<EOF
 [Unit]
 Description=GGUF Switchboard - GPU-aware local GGUF model scheduler
 After=network.target
@@ -334,6 +395,7 @@ After=network.target
 [Service]
 Type=simple
 User=$(whoami)
+WorkingDirectory=$(pwd)
 ExecStart=/usr/local/bin/gguf-switchboard $CONFIG_FILE
 Restart=on-failure
 RestartSec=5
@@ -343,15 +405,16 @@ Environment=RUST_LOG=info
 WantedBy=multi-user.target
 EOF
 
-    sudo systemctl daemon-reload
-    sudo systemctl enable gguf-switchboard
-    echo "==> Service created and enabled."
-fi
+sudo systemctl daemon-reload
+sudo systemctl enable gguf-switchboard
+
+maybe_migrate_legacy_config
 
 # Copy or upgrade config to the current models_file-based format
 ensure_config_toml
 
 generate_models_toml "$REFRESH_MODELS"
+claim_config_files
 sync_registry_to_repo
 
 echo "==> Stopping service..."

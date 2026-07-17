@@ -6,6 +6,7 @@ use crate::config::ModelConfig;
 
 /// Mutate an OpenAPI document so `model` fields on request bodies become enums
 /// of the currently configured aliases, with a descriptive one-liner.
+/// Also injects live examples onto `ModelInfo` / `ListModelsResponse`.
 pub fn inject_model_enums(doc: &mut Value, models: &[(String, ModelConfig)]) {
     let mut aliases: Vec<String> = models.iter().map(|(id, _)| id.clone()).collect();
     aliases.sort();
@@ -76,6 +77,49 @@ pub fn inject_model_enums(doc: &mut Value, models: &[(String, ModelConfig)]) {
         }
         model_prop["description"] = Value::String(description.clone());
     }
+
+    if let Some((id, cfg)) = models.first() {
+        let card = model_info_example(id, cfg);
+        if let Some(schema) = schemas.get_mut("ModelInfo") {
+            schema["example"] = card;
+        }
+        if let Some(schema) = schemas.get_mut("ListModelsResponse") {
+            schema["example"] = json!({
+                "object": "list",
+                "data": models.iter().take(3).map(|(id, cfg)| model_info_example(id, cfg)).collect::<Vec<_>>()
+            });
+        }
+    }
+}
+
+fn model_info_example(id: &str, cfg: &ModelConfig) -> Value {
+    let mut card = json!({
+        "id": id,
+        "object": "model",
+        "created": 1710000000i64,
+        "owned_by": "local",
+        "display_name": cfg.display_name,
+        "kind": cfg.kind,
+    });
+    if let Some(desc) = &cfg.description {
+        card["description"] = json!(desc);
+    }
+    if let Some(ctx) = crate::context::get_context_size(&cfg.args) {
+        card["context_size"] = json!(ctx);
+    }
+    if let Some(max) = cfg.max_context_length {
+        card["max_context_length"] = json!(max);
+    }
+    if let Some(vram) = cfg.min_vram_gb {
+        card["min_vram_gb"] = json!(vram);
+    }
+    if !cfg.capabilities.is_empty() {
+        card["capabilities"] = json!(cfg.capabilities);
+    }
+    if let Some(repo) = &cfg.hf_repo {
+        card["hf_repo"] = json!(repo);
+    }
+    card
 }
 
 #[cfg(test)]
@@ -109,7 +153,9 @@ mod tests {
                         "properties": {
                             "model": { "type": "string" }
                         }
-                    }
+                    },
+                    "ModelInfo": { "type": "object" },
+                    "ListModelsResponse": { "type": "object" }
                 }
             }
         });
@@ -122,5 +168,9 @@ mod tests {
                 .unwrap()
                 .contains("gemma-4-e4b")
         );
+        let card = &doc["components"]["schemas"]["ModelInfo"]["example"];
+        assert_eq!(card["id"], "gemma-4-e4b");
+        assert_eq!(card["kind"], "chat");
+        assert_eq!(card["min_vram_gb"], 4);
     }
 }
