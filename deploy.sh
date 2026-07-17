@@ -2,10 +2,13 @@
 # Deploy gguf-switchboard as a systemd service.
 #
 # Environment:
-#   MODELS_DIR   Directory containing .gguf files (default: ~/models when present)
+#   MODELS_DIR                   Directory containing .gguf files (optional override)
+#   GGUF_SWITCHBOARD_DIR         Repo checkout path (default: ~/gguf-switchboard)
+#   GGUF_SWITCHBOARD_CONFIG_DIR  Config directory (default: repo checkout)
 #
 # Flags:
 #   --refresh-models   Regenerate models.toml in the config dir from disk
+#   --skip-pull        Rebuild + reinstall without git fetch/pull (keeps local branch)
 #
 set -euo pipefail
 
@@ -311,19 +314,24 @@ ensure_repo() {
 ensure_repo
 
 REFRESH_MODELS=false
+SKIP_PULL=false
 for arg in "$@"; do
     case "$arg" in
         --refresh-models)
             REFRESH_MODELS=true
             ;;
+        --skip-pull)
+            SKIP_PULL=true
+            ;;
         -h|--help)
             cat <<'EOF'
-Usage: ./deploy.sh [--refresh-models]
+Usage: ./deploy.sh [--refresh-models] [--skip-pull]
 
-Deploy gguf-switchboard as a systemd service.
+Deploy gguf-switchboard as a systemd service (Linux).
 
 Options:
-  --refresh-models   Regenerate models.toml from GGUF files on disk
+  --refresh-models   Regenerate models.toml from GGUF files on disk (merge)
+  --skip-pull        Rebuild + reinstall without git fetch/checkout/pull
 
 Environment:
   MODELS_DIR                   Optional override dirs for discover-models (comma-separated)
@@ -344,25 +352,46 @@ CONFIG_FILE="${CONFIG_DIR}/config.toml"
 MODELS_FILE="${CONFIG_DIR}/models.toml"
 echo "==> Config directory: $CONFIG_DIR"
 
-echo "==> Checking out $BRANCH..."
-git fetch origin "$BRANCH" 2>/dev/null || true
-git checkout "$BRANCH" 2>/dev/null || git checkout -B "$BRANCH" "origin/$BRANCH"
+if [[ "$SKIP_PULL" != "true" ]]; then
+    echo "==> Checking out $BRANCH..."
+    git fetch origin "$BRANCH" 2>/dev/null || true
+    git checkout "$BRANCH" 2>/dev/null || git checkout -B "$BRANCH" "origin/$BRANCH"
 
-if [[ -n "$(git status --porcelain)" ]]; then
-    STASH_LABEL="deploy-auto-stash-$(date +%Y%m%d-%H%M%S)"
-    echo "==> Local changes detected; stashing as '$STASH_LABEL'..."
-    git stash push --include-untracked --message "$STASH_LABEL" >/dev/null
-    echo "==> Stashed local changes. (Use 'git stash list' to review.)"
+    if [[ -n "$(git status --porcelain)" ]]; then
+        STASH_LABEL="deploy-auto-stash-$(date +%Y%m%d-%H%M%S)"
+        echo "==> Local changes detected; stashing as '$STASH_LABEL'..."
+        git stash push --include-untracked --message "$STASH_LABEL" >/dev/null
+        echo "==> Stashed local changes. (Use 'git stash list' / 'git stash pop' to recover.)"
+    fi
+
+    echo "==> Pulling latest changes..."
+    git pull origin "$BRANCH"
+else
+    echo "==> Skipping git pull (--skip-pull)."
 fi
 
-echo "==> Pulling latest changes..."
-git pull origin "$BRANCH"
+if ! command -v llama-server >/dev/null 2>&1; then
+    echo "==> Warning: llama-server not found on PATH."
+    echo "    Install llama.cpp with server support before loading models."
+    echo "    Or set defaults.llama_server in models.toml after deploy."
+fi
 
 if command -v apt-get >/dev/null 2>&1; then
-    echo "==> Installing build dependencies..."
-    sudo apt-get update -qq
-    sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
-        libssl-dev pkg-config build-essential cmake curl git jq
+    APT_PKGS=(libssl-dev pkg-config build-essential cmake curl git jq)
+    NEED_APT=false
+    for pkg in "${APT_PKGS[@]}"; do
+        if ! dpkg -s "$pkg" >/dev/null 2>&1; then
+            NEED_APT=true
+            break
+        fi
+    done
+    if [[ "$NEED_APT" == "true" ]]; then
+        echo "==> Installing build dependencies..."
+        sudo apt-get update -qq
+        sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${APT_PKGS[@]}"
+    else
+        echo "==> Build dependencies already installed."
+    fi
 fi
 
 if ! command -v cargo >/dev/null 2>&1; then

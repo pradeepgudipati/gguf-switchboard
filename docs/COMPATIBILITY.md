@@ -1,5 +1,7 @@
 # OpenAI API compatibility
 
+> [← Back to README](../README.md)
+
 gguf-switchboard forwards requests to `llama-server`. Compatibility depends on both this proxy and your installed llama.cpp build. Treat this matrix as **best-effort** — verify with your client and backend version.
 
 ## Endpoints
