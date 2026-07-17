@@ -44,5 +44,13 @@ auto_discover = true
 # enabled = true             # false = hide from /v1/models and scheduling
 # priority = true            # idle auto-load target (only one). discover-models prefers gemma-4-e4b when present.
 # context_size = 16384       # pin for consumer GPUs; omit to use vram_gb heuristic from config.toml
+# description = "..."        # optional; filled by sync-hf-metadata when empty
+# max_context_length = 131072  # model ceiling from HF/GGUF (distinct from serving context_size)
+# min_vram_gb = 6            # approximate weights floor (GB); filled by sync-hf-metadata
+# capabilities = ["tools", "vision"]
+# hf_repo = "lmstudio-community/Qwen3.5-9B-GGUF"
 # extra_args = ["--chat-template", "llama3"]  # Llama 3.1 plain-text chat (auto for llama-3.1)
 # extra_args = ["--jinja"]                    # use GGUF tool-calling template instead
+#
+# Enrich empty metadata fields from Hugging Face (does not overwrite explicit pins):
+#   ./gguf-switchboard sync-hf-metadata models.toml

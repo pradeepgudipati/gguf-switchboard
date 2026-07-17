@@ -75,6 +75,42 @@ pub struct RegistryEntry {
     /// Extra `llama-server` flags appended after the default args (e.g. `--jinja`).
     #[serde(default)]
     pub extra_args: Vec<String>,
+    /// Short description for `/v1/models` / Swagger (often filled by `sync-hf-metadata`).
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Model max context from GGUF/HF metadata (distinct from serving `context_size`).
+    #[serde(default)]
+    pub max_context_length: Option<u32>,
+    /// Approximate minimum VRAM in GB (weights floor; filled by HF sync).
+    #[serde(default)]
+    pub min_vram_gb: Option<u32>,
+    /// Capability tags (e.g. `tools`, `vision`, `reasoning`).
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    /// Matched Hugging Face repo id (e.g. `lmstudio-community/Qwen3.5-9B-GGUF`).
+    #[serde(default)]
+    pub hf_repo: Option<String>,
+}
+
+impl Default for RegistryEntry {
+    fn default() -> Self {
+        Self {
+            alias: String::new(),
+            file: String::new(),
+            display_name: None,
+            kind: None,
+            enabled: true,
+            priority: false,
+            port: None,
+            context_size: None,
+            extra_args: Vec::new(),
+            description: None,
+            max_context_length: None,
+            min_vram_gb: None,
+            capabilities: Vec::new(),
+            hf_repo: None,
+        }
+    }
 }
 
 impl RegistryEntry {
@@ -103,6 +139,16 @@ pub struct ModelsJsonEntry {
     pub priority: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_size: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_context_length: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_vram_gb: Option<u32>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hf_repo: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
 }
@@ -703,6 +749,21 @@ fn merge_registry_entry(target: &mut RegistryEntry, incoming: &RegistryEntry) {
     if target.extra_args.is_empty() {
         target.extra_args = incoming.extra_args.clone();
     }
+    if target.description.is_none() {
+        target.description = incoming.description.clone();
+    }
+    if target.max_context_length.is_none() {
+        target.max_context_length = incoming.max_context_length;
+    }
+    if target.min_vram_gb.is_none() {
+        target.min_vram_gb = incoming.min_vram_gb;
+    }
+    if target.capabilities.is_empty() {
+        target.capabilities = incoming.capabilities.clone();
+    }
+    if target.hf_repo.is_none() {
+        target.hf_repo = incoming.hf_repo.clone();
+    }
 }
 
 fn normalize_priority_entries(entries: &mut [RegistryEntry]) {
@@ -845,7 +906,10 @@ fn assign_default_priority(
     }
 }
 
-fn resolve_model_path(models_dirs: &[PathBuf], file: &str) -> Result<String, RuntimeError> {
+pub(crate) fn resolve_model_path(
+    models_dirs: &[PathBuf],
+    file: &str,
+) -> Result<String, RuntimeError> {
     let path = Path::new(file);
     let resolved = if path.is_absolute() {
         path.to_path_buf()
@@ -932,6 +996,11 @@ impl ModelsRegistry {
                     port: None,
                     context_size: entry.context_size,
                     extra_args: Vec::new(),
+                    description: entry.description,
+                    max_context_length: entry.max_context_length,
+                    min_vram_gb: entry.min_vram_gb,
+                    capabilities: entry.capabilities,
+                    hf_repo: entry.hf_repo,
                 })
                 .collect(),
         };
@@ -958,6 +1027,11 @@ impl ModelsRegistry {
                     enabled: entry.enabled,
                     priority: entry.priority,
                     context_size: entry.context_size,
+                    description: entry.description.clone(),
+                    max_context_length: entry.max_context_length,
+                    min_vram_gb: entry.min_vram_gb,
+                    capabilities: entry.capabilities.clone(),
+                    hf_repo: entry.hf_repo.clone(),
                     tags: tags_for_entry(entry),
                 })
                 .collect(),
@@ -1070,6 +1144,11 @@ impl ModelsRegistry {
                     port: existing.port,
                     context_size: existing.context_size,
                     extra_args: existing.extra_args.clone(),
+                    description: existing.description.clone(),
+                    max_context_length: existing.max_context_length,
+                    min_vram_gb: existing.min_vram_gb,
+                    capabilities: existing.capabilities.clone(),
+                    hf_repo: existing.hf_repo.clone(),
                 });
                 continue;
             }
@@ -1088,6 +1167,7 @@ impl ModelsRegistry {
                 port: None,
                 context_size: None,
                 extra_args: Vec::new(),
+                ..Default::default()
             });
         }
 
@@ -1255,6 +1335,7 @@ impl ModelsRegistry {
                     port: None,
                     context_size: None,
                     extra_args: Vec::new(),
+                    ..Default::default()
                 });
             }
         }
@@ -1312,6 +1393,12 @@ impl ModelsRegistry {
                 backend_url: format!("http://{}:{}/v1", self.defaults.host, port),
                 health_url: format!("http://{}:{}/health", self.defaults.host, port),
                 priority: entry.priority,
+                kind: entry.effective_kind(),
+                description: entry.description.clone(),
+                max_context_length: entry.max_context_length,
+                min_vram_gb: entry.min_vram_gb,
+                capabilities: entry.capabilities.clone(),
+                hf_repo: entry.hf_repo.clone(),
             };
             models.insert(entry.alias.clone(), config);
         }
@@ -1699,6 +1786,7 @@ mod tests {
                     port: None,
                     context_size: None,
                     extra_args: Vec::new(),
+                    ..Default::default()
                 },
                 RegistryEntry {
                     alias: "bad".to_string(),
@@ -1710,6 +1798,7 @@ mod tests {
                     port: None,
                     context_size: None,
                     extra_args: Vec::new(),
+                    ..Default::default()
                 },
             ],
         };
@@ -1766,6 +1855,7 @@ mod tests {
                     port: None,
                     context_size: None,
                     extra_args: Vec::new(),
+                    ..Default::default()
                 },
                 RegistryEntry {
                     alias: "legacy-missing".to_string(),
@@ -1777,6 +1867,7 @@ mod tests {
                     port: None,
                     context_size: None,
                     extra_args: Vec::new(),
+                    ..Default::default()
                 },
             ],
         };
@@ -1825,6 +1916,7 @@ mod tests {
                 port: None,
                 context_size: None,
                 extra_args: Vec::new(),
+                ..Default::default()
             }],
         };
 
@@ -1864,6 +1956,7 @@ mod tests {
                 port: None,
                 context_size: Some(4096),
                 extra_args: Vec::new(),
+                ..Default::default()
             }],
         };
 
@@ -1904,6 +1997,7 @@ mod tests {
                 port: None,
                 context_size: None,
                 extra_args: Vec::new(),
+                ..Default::default()
             }],
         };
 
@@ -1943,6 +2037,7 @@ mod tests {
                 port: None,
                 context_size: None,
                 extra_args: vec!["--jinja".to_string()],
+                ..Default::default()
             }],
         };
 
@@ -2029,6 +2124,7 @@ mod tests {
                 port: None,
                 context_size: None,
                 extra_args: Vec::new(),
+                ..Default::default()
             }],
         };
 
@@ -2124,6 +2220,7 @@ mod tests {
                 port: None,
                 context_size: None,
                 extra_args: Vec::new(),
+                ..Default::default()
             }],
         };
 
@@ -2148,6 +2245,7 @@ mod tests {
                 port: None,
                 context_size: None,
                 extra_args: Vec::new(),
+                ..Default::default()
             },
             RegistryEntry {
                 alias: "qwen3-vl-8b".to_string(),
@@ -2159,6 +2257,7 @@ mod tests {
                 port: None,
                 context_size: None,
                 extra_args: Vec::new(),
+                ..Default::default()
             },
         ];
 
@@ -2182,6 +2281,7 @@ mod tests {
             port: None,
             context_size: None,
             extra_args: Vec::new(),
+            ..Default::default()
         };
 
         assert_eq!(
@@ -2259,6 +2359,7 @@ mod tests {
                     port: None,
                     context_size: None,
                     extra_args: Vec::new(),
+                    ..Default::default()
                 },
                 RegistryEntry {
                     alias: "gone".to_string(),
@@ -2270,6 +2371,7 @@ mod tests {
                     port: None,
                     context_size: None,
                     extra_args: Vec::new(),
+                    ..Default::default()
                 },
             ],
         };

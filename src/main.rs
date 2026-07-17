@@ -1,18 +1,3 @@
-mod api;
-mod backend;
-mod config;
-mod context;
-mod db;
-mod errors;
-mod load_failure;
-mod memory;
-mod metrics;
-mod proxy;
-mod sanitize;
-mod scheduler;
-mod state;
-mod types;
-
 use std::sync::Arc;
 
 use tokio::signal;
@@ -20,11 +5,12 @@ use tracing::{info, warn};
 
 use std::path::PathBuf;
 
-use crate::config::Config;
-use crate::config::ModelsRegistry;
-use crate::db::TokenDb;
-use crate::scheduler::Scheduler;
-use crate::state::AppState;
+use gguf_switchboard::api;
+use gguf_switchboard::config::{Config, ModelsRegistry, sync_registry_from_hf};
+use gguf_switchboard::db::TokenDb;
+use gguf_switchboard::metrics;
+use gguf_switchboard::scheduler::Scheduler;
+use gguf_switchboard::state::AppState;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -46,6 +32,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return run_discover_models(&args);
     }
 
+    if args.len() >= 2 && args[1] == "sync-hf-metadata" {
+        return run_sync_hf_metadata(&args).await;
+    }
+
     if args.len() >= 3 && args[1] == "export-registry" {
         return run_export_registry(&args);
     }
@@ -58,7 +48,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     metrics::register_all();
 
     info!("Loading configuration from {}", config_path);
-    let config = Config::load(&config_path)?;
+    let mut config = Config::load(&config_path)?;
+
+    if config.models_file.is_some() {
+        match config.sync_hf_metadata().await {
+            Ok(summary) => {
+                info!(
+                    matched = summary.matched,
+                    missed = summary.missed,
+                    skipped = summary.skipped,
+                    "HF metadata sync complete during launch"
+                );
+            }
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    "HF metadata sync failed during launch; continuing with local registry"
+                );
+            }
+        }
+    }
 
     info!(
         bind = %config.bind,
@@ -217,6 +226,56 @@ fn run_discover_models(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     println!();
     println!("Point config.toml at the registry with: models_file = \"{output}\"");
 
+    Ok(())
+}
+
+async fn run_sync_hf_metadata(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut input = "models.toml".to_string();
+    let mut output: Option<String> = None;
+
+    let mut i = 2;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" | "--output" => {
+                if let Some(path) = args.get(i + 1) {
+                    output = Some(path.clone());
+                    i += 2;
+                } else {
+                    return Err("sync-hf-metadata: missing value for --output".into());
+                }
+            }
+            arg if arg.starts_with('-') => {
+                return Err(format!("sync-hf-metadata: unknown flag '{arg}'").into());
+            }
+            path => {
+                input = path.to_string();
+                i += 1;
+            }
+        }
+    }
+
+    let output = output.unwrap_or_else(|| input.clone());
+    let mut registry = ModelsRegistry::load(&input)?;
+    let summary = sync_registry_from_hf(&mut registry).await?;
+    registry.write(&output)?;
+
+    println!(
+        "HF sync: matched={} missed={} skipped={}",
+        summary.matched, summary.missed, summary.skipped
+    );
+    println!("Wrote {output}");
+    println!("Wrote {}", json_sibling_path_for_output(&output));
+    println!();
+    println!("  {:<24} {:<10} {:<8} HF_REPO", "ALIAS", "KIND", "VRAM_GB");
+    for entry in &registry.models {
+        println!(
+            "  {:<24} {:<10} {:<8} {}",
+            entry.alias,
+            entry.effective_kind(),
+            entry.min_vram_gb.map(|v| v.to_string()).unwrap_or_default(),
+            entry.hf_repo.as_deref().unwrap_or("")
+        );
+    }
     Ok(())
 }
 

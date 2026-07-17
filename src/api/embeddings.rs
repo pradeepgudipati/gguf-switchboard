@@ -5,6 +5,7 @@ use axum::response::{IntoResponse, Json};
 use tracing::instrument;
 
 use crate::errors::RuntimeError;
+use crate::kind_guard::{EMBEDDING_KINDS, require_kind};
 use crate::metrics::{ACTIVE_REQUESTS, INFERENCE_LATENCY, REQUEST_TOTAL};
 use crate::state::AppState;
 use crate::types::embeddings::{EmbeddingRequest, EmbeddingResponse};
@@ -44,6 +45,11 @@ pub async fn embeddings(
     ACTIVE_REQUESTS.inc();
 
     let start = std::time::Instant::now();
+    let cfg = state
+        .scheduler
+        .model_config(&request.model)
+        .ok_or_else(|| RuntimeError::ModelNotFound(request.model.clone()))?;
+    require_kind(&request.model, &cfg, EMBEDDING_KINDS, "/v1/embeddings")?;
     let backend = state.scheduler.ensure_loaded(&request.model).await?;
     let model_id = request.model.clone();
     let _request_guard = state.scheduler.track_request(&model_id);

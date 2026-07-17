@@ -328,17 +328,6 @@ window.onload = function() {
       updateModelFieldOnly(selectedModel);
     });
 
-    const registryLink = document.createElement('a');
-    registryLink.id = 'registry-json-download';
-    registryLink.href = '/v1/models/registry.json';
-    registryLink.download = 'models.json';
-    registryLink.textContent = 'models.json';
-    registryLink.title = 'Download portable model registry JSON';
-    registryLink.className = 'registry-json-link';
-
-    bar.appendChild(label);
-    bar.appendChild(select);
-
     const refreshBtn = document.createElement('button');
     refreshBtn.type = 'button';
     refreshBtn.id = 'refresh-models-btn';
@@ -381,8 +370,9 @@ window.onload = function() {
         });
     });
 
+    bar.appendChild(label);
+    bar.appendChild(select);
     bar.appendChild(refreshBtn);
-    bar.appendChild(registryLink);
     wrapper.appendChild(bar);
 
     if (selectedModel) {

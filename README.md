@@ -12,7 +12,7 @@ A **[llama-swap](https://github.com/mostlygeek/llama-swap) alternative in Rust**
 ### Core capabilities
 
 - **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/responses`, `/v1/models`, `/v1/models/registry.json`, `/v1/audio/*`
-- **Swagger UI** — Explore and test the API at `http://localhost:9090/swagger-ui/`
+- **Swagger UI** — Explore and test the API at `http://localhost:9090/swagger-ui/` (Try-it-out model dropdown from live registry; rich `/v1/models` cards)
 - **Auto-discovery of GGUF models** — Scans configured directories and registers GGUFs that pass a cheap validation ladder (filename → header → metadata); sidecars and invalid files are skipped
 - **Dynamic model loading** — Models load/unload on demand; no restart needed
 - **Single-slot model swapping** — One resident model at a time; switches drain in-flight requests first, failed switches roll back automatically
@@ -330,6 +330,11 @@ enabled = true            # false = hide from /v1/models and scheduling
 priority = true           # Auto-load after idle_timeout (only one should be true)
 # port = 8085             # Override auto-assigned port (optional)
 # context_size = 32768    # Override VRAM-based default from config.toml vram_gb (optional)
+# description = "..."     # Optional blurb for /v1/models + Swagger (or run sync-hf-metadata)
+# max_context_length = 131072  # Model max context from HF/GGUF metadata
+# min_vram_gb = 6         # Approximate minimum VRAM (GB)
+# capabilities = ["tools", "vision"]
+# hf_repo = "lmstudio-community/Qwen3.5-9B-GGUF"
 # extra_args = ["--jinja"]  # Extra llama-server flags (optional)
 ```
 
@@ -349,9 +354,16 @@ priority = true           # Auto-load after idle_timeout (only one should be tru
 | `[[models]].priority` | If `true`, this model loads automatically after `idle_timeout` |
 | `[[models]].port` | Override the auto-assigned backend port |
 | `[[models]].context_size` | Override per-model `-c` (otherwise sized from `vram_gb`) |
+| `[[models]].description` | Optional description shown in `/v1/models` and Swagger |
+| `[[models]].max_context_length` | Model max context from HF/GGUF metadata (not the serving `-c`) |
+| `[[models]].min_vram_gb` | Approximate minimum VRAM in GB (weights floor) |
+| `[[models]].capabilities` | Tags such as `tools`, `vision`, `reasoning` |
+| `[[models]].hf_repo` | Matched Hugging Face repo id after `sync-hf-metadata` |
 | `[[models]].extra_args` | Extra flags appended to `llama-server` launch args |
 
 Duplicate `[[models]]` entries (same alias or file) are merged automatically on load and during `discover-models --merge`. Only one model may be `priority = true`; extras are cleared with a warning.
+
+Kind is enforced at request time: chat/completions/responses accept `chat`/`coder`/`vision`; `/v1/embeddings` accepts `embedding` only.
 
 #### Portable `models.json`
 
@@ -376,11 +388,18 @@ Example shape:
       "enabled": true,
       "priority": true,
       "context_size": null,
+      "description": null,
+      "max_context_length": 131072,
+      "min_vram_gb": 6,
+      "capabilities": ["tools"],
+      "hf_repo": "lmstudio-community/gemma-4-E4B-it-GGUF",
       "tags": ["chat", "priority"]
     }
   ]
 }
 ```
+
+`GET /v1/models` returns the same metadata on each OpenAI-style model object (`kind`, `description`, `max_context_length`, `min_vram_gb`, `capabilities`, `hf_repo`).
 
 Export manually:
 
@@ -492,7 +511,7 @@ Set `models_dir` in `models.toml` or pass `MODELS_DIR` when models live outside 
 MODELS_DIR=/path/to/models ./deploy.sh --refresh-models
 ```
 
-#### `discover-models` and `export-registry` CLI
+#### `discover-models`, `sync-hf-metadata`, and `export-registry` CLI
 
 Generate or refresh `models.toml` without a full deploy:
 
@@ -503,9 +522,16 @@ Generate or refresh `models.toml` without a full deploy:
 # Merge with an existing registry (preserves customizations by file path)
 ./gguf-switchboard discover-models /models -o models.toml --merge models.toml
 
+# Enrich empty description / max_context_length / min_vram_gb / capabilities / hf_repo from Hugging Face
+./gguf-switchboard sync-hf-metadata models.toml
+
 # Export portable JSON from an existing registry
 ./gguf-switchboard export-registry /etc/gguf-switchboard/models.toml -o models.json
 ```
+
+`sync-hf-metadata` also runs automatically on **server launch** and on **`POST /v1/models/refresh`** (and the periodic rescan watcher). Failures are logged and the server continues with the local registry. The standalone CLI remains available for offline/manual runs.
+
+`sync-hf-metadata` matches each local GGUF against the Hub (`filter=gguf`), prefers exact sibling filenames and `lmstudio-community` repos, and **only fills empty fields** (explicit `kind`, `context_size`, `extra_args`, etc. are never overwritten). Swagger Try-it-out then shows a live model dropdown from `/api-docs/openapi.json`.
 
 `discover-models`:
 
