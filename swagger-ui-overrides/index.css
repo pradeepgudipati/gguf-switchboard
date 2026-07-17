@@ -25,8 +25,8 @@
 }
 
 .model-selector-bar select {
-  min-width: 220px;
-  max-width: 360px;
+  min-width: 280px;
+  max-width: 520px;
   padding: 5px 8px;
   border-radius: 4px;
   border: 1px solid #49cc90;

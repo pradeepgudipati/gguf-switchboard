@@ -151,7 +151,7 @@ cd gguf-switchboard
 ./deploy.sh
 ```
 
-`deploy.sh` installs build dependencies and Rust (if needed), compiles the release binary, creates `/etc/gguf-switchboard/config.toml` from the template if missing, **auto-generates `/etc/gguf-switchboard/models.toml` on first install** from your GGUF directory, **syncs a copy to `models.local.toml` / `models.local.json` in the repo** (gitignored), installs the systemd service, and starts the server on `0.0.0.0:9090`.
+`deploy.sh` installs build dependencies and Rust (if needed), compiles the release binary, uses **`config.toml` / `models.toml` in the repo checkout** (override with `GGUF_SWITCHBOARD_CONFIG_DIR`), **auto-generates `models.toml` on first install** from your GGUF directory, **syncs a copy to `models.local.toml` / `models.local.json`** (gitignored), installs the systemd service, and starts the server on `0.0.0.0:9090`.
 
 ### Build without systemd
 
@@ -200,10 +200,10 @@ cargo build --release
 
 If you want gguf-switchboard to start on boot and restart on failure, run `deploy.sh` from a git checkout (see [Fresh machine](#fresh-machine) above). It performs the same build and registry steps, plus systemd installation.
 
-Keep config next to the repo instead of `/etc/gguf-switchboard`:
+Config lives in the repo checkout by default (`config.toml`, `models.toml`). To use another directory (for example `/etc/gguf-switchboard`):
 
 ```bash
-GGUF_SWITCHBOARD_CONFIG_DIR="$PWD" ./deploy.sh
+GGUF_SWITCHBOARD_CONFIG_DIR=/etc/gguf-switchboard ./deploy.sh
 ```
 
 On first deploy (no existing `models.toml`), discovery scans for `.gguf` files, assigns aliases and ports, and detects `llama-server` on your PATH. Override the scan directory with `MODELS_DIR`:
@@ -220,7 +220,7 @@ MODELS_DIR=/models ./deploy.sh --refresh-models
 
 On completion it prints a table of **available models** (ID, display name, priority/loaded state) plus links to Swagger UI and health endpoints.
 
-**Post-install:** Edit `models.toml` (under `$CONFIG_DIR`, default `/etc/gguf-switchboard/`) to tweak aliases, `kind`, `enabled`, or `extra_args`, then restart:
+**Post-install:** Edit `models.toml` in the config directory (default: the repo checkout) to tweak aliases, `kind`, `enabled`, or `extra_args`, then restart:
 
 ```bash
 sudo systemctl restart gguf-switchboard
@@ -274,13 +274,13 @@ Configuration is split across two files:
 | **`config.toml`** | Server bind address, idle timeout, GPU VRAM, database path |
 | **`models.toml`** | Model registry — aliases, GGUF paths, priorities, per-model overrides |
 
-Production paths (default): `/etc/gguf-switchboard/config.toml` and `/etc/gguf-switchboard/models.toml`.  
-After `deploy.sh`, machine-specific copies are synced to **`models.local.toml`** and **`models.local.json`** in the repo (gitignored).
+Default paths after `deploy.sh`: `config.toml` and `models.toml` in the repo checkout.  
+Machine-specific copies are also synced to **`models.local.toml`** and **`models.local.json`** (gitignored).
 
-Override the config directory:
+Override the config directory (optional):
 
 ```bash
-GGUF_SWITCHBOARD_CONFIG_DIR="$HOME/gguf-switchboard" ./deploy.sh
+GGUF_SWITCHBOARD_CONFIG_DIR=/etc/gguf-switchboard ./deploy.sh
 ```
 
 ### Server configuration (`config.toml`)
@@ -404,7 +404,7 @@ Example shape:
 Export manually:
 
 ```bash
-./gguf-switchboard export-registry /etc/gguf-switchboard/models.toml -o models.json
+./gguf-switchboard export-registry models.toml -o models.json
 ```
 
 `models_file` in `config.toml` may also point directly at a **`models.json`** registry (portable subset — no `llama_server` / port defaults; those fall back to built-in defaults).
@@ -481,9 +481,9 @@ You can omit `[[models]]` entirely and rely on auto-discover, or add entries onl
 
 #### Deploy-time auto-generation
 
-`./deploy.sh` generates `/etc/gguf-switchboard/models.toml` when:
+`./deploy.sh` generates `$CONFIG_DIR/models.toml` (default: repo checkout) when:
 
-- **First install** — no existing `/etc/gguf-switchboard/models.toml` (auto-discovers from GGUF files)
+- **First install** — no existing `models.toml` in the config dir (auto-discovers from GGUF files)
 - **`--refresh-models`** — explicitly regenerate from disk, merging with the existing registry
 
 Subsequent deploys without `--refresh-models` keep the existing registry unchanged.
@@ -526,7 +526,7 @@ Generate or refresh `models.toml` without a full deploy:
 ./gguf-switchboard sync-hf-metadata models.toml
 
 # Export portable JSON from an existing registry
-./gguf-switchboard export-registry /etc/gguf-switchboard/models.toml -o models.json
+./gguf-switchboard export-registry models.toml -o models.json
 ```
 
 `sync-hf-metadata` also runs automatically on **server launch** and on **`POST /v1/models/refresh`** (and the periodic rescan watcher). Failures are logged and the server continues with the local registry. The standalone CLI remains available for offline/manual runs.
@@ -705,7 +705,7 @@ The native install is recommended because the runtime spawns `llama-server` as a
 ./deploy.sh
 ```
 
-Edit `/etc/gguf-switchboard/config.toml` to match your `llama-server` path and GGUF models, then re-run `./deploy.sh` or restart:
+Edit `config.toml` / `models.toml` in the repo checkout to match your `llama-server` path and GGUF models, then re-run `./deploy.sh` or restart:
 
 ```bash
 ./deploy.sh

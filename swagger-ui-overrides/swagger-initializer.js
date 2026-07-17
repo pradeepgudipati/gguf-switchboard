@@ -281,6 +281,29 @@ window.onload = function() {
     });
   }
 
+  function formatModelLabel(m) {
+    if (!m || !m.id) return '';
+    var parts = [m.id];
+    if (m.kind) parts.push(m.kind);
+    var ctx = m.context_size || m.max_context_length;
+    if (ctx) parts.push('ctx ' + ctx);
+    if (m.min_vram_gb) parts.push('~' + m.min_vram_gb + 'GB');
+    return parts.join(' · ');
+  }
+
+  function formatModelCard(m) {
+    if (!m || !m.id) return '';
+    var lines = [];
+    if (m.display_name) lines.push(m.display_name);
+    lines.push(formatModelLabel(m));
+    if (m.hf_repo) lines.push(m.hf_repo);
+    if (m.description) lines.push(m.description);
+    if (m.capabilities && m.capabilities.length) {
+      lines.push('capabilities: ' + m.capabilities.join(', '));
+    }
+    return lines.join('\n');
+  }
+
   function injectModelSelector(models) {
     if (document.getElementById('global-model-select')) return;
 
@@ -306,7 +329,8 @@ window.onload = function() {
     models.forEach(function(m) {
       const opt = document.createElement('option');
       opt.value = m.id;
-      opt.textContent = m.id;
+      opt.textContent = formatModelLabel(m);
+      opt.title = formatModelCard(m);
       select.appendChild(opt);
     });
 

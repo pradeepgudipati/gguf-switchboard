@@ -1,3 +1,10 @@
+# Hardened example unit (optional). `deploy.sh` writes a simpler live unit that
+# points ExecStart at config.toml in the repo checkout (or GGUF_SWITCHBOARD_CONFIG_DIR).
+#
+# For a locked-down install under /etc, set:
+#   GGUF_SWITCHBOARD_CONFIG_DIR=/etc/gguf-switchboard ./deploy.sh
+# and adapt User/ProtectHome/ReadWritePaths below.
+
 [Unit]
 Description=GGUF Switchboard — GPU-aware local GGUF model scheduler
 After=network.target
@@ -7,20 +14,21 @@ Documentation=https://github.com/pradeepgudipati/gguf-switchboard
 Type=simple
 User=gguf-switchboard
 Group=gguf-switchboard
-ExecStart=/usr/local/bin/gguf-switchboard /etc/gguf-switchboard/config.toml
+WorkingDirectory=/opt/gguf-switchboard
+ExecStart=/usr/local/bin/gguf-switchboard /opt/gguf-switchboard/config.toml
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
 
 # Environment
 Environment=RUST_LOG=info
-EnvironmentFile=-/etc/gguf-switchboard/env
+EnvironmentFile=-/opt/gguf-switchboard/env
 
 # Hardening
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/models
+ReadWritePaths=/opt/gguf-switchboard /models /var/lib/gguf-switchboard
 PrivateTmp=yes
 ProtectKernelTunables=yes
 ProtectKernelModules=yes
