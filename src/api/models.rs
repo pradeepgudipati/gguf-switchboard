@@ -5,7 +5,6 @@ use axum::extract::{Path, State};
 use axum::http::StatusCode;
 use axum::http::header;
 use axum::response::IntoResponse;
-use chrono::Utc;
 use serde::Serialize;
 use utoipa::ToSchema;
 
@@ -30,11 +29,11 @@ pub async fn list_models(
         .scheduler
         .model_ids()
         .into_iter()
-        .map(|id| ModelInfo {
-            id,
-            object: "model".to_string(),
-            created: Utc::now().timestamp(),
-            owned_by: "local".to_string(),
+        .filter_map(|id| {
+            state
+                .scheduler
+                .model_config(&id)
+                .map(|cfg| ModelInfo::from_config(id, &cfg))
         })
         .collect();
 
@@ -58,10 +57,10 @@ pub async fn get_model(
     State(state): State<Arc<AppState>>,
     Path(model_id): Path<String>,
 ) -> Result<Json<ModelInfo>, RuntimeError> {
-    if state.scheduler.model_config(&model_id).is_none() {
+    let Some(cfg) = state.scheduler.model_config(&model_id) else {
         return Err(RuntimeError::ModelNotFound(model_id));
-    }
-    Ok(Json(ModelInfo::new(model_id)))
+    };
+    Ok(Json(ModelInfo::from_config(model_id, &cfg)))
 }
 
 /// Download the portable model registry as JSON (shared across local AI tools).

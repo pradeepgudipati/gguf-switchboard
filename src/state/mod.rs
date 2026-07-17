@@ -5,7 +5,9 @@ use std::time::Instant;
 use tokio::sync::{Mutex as AsyncMutex, RwLock};
 use tracing::{info, warn};
 
-use crate::config::{Config, ModelConfig, ModelsRegistry, RescanResult};
+use crate::config::{
+    Config, ModelConfig, ModelsRegistry, RescanResult, SyncSummary, sync_registry_from_hf,
+};
 use crate::db::TokenDb;
 use crate::errors::RuntimeError;
 use crate::scheduler::Scheduler;
@@ -38,7 +40,7 @@ impl AppState {
         }
     }
 
-    /// Rescan model dirs, persist registry, hot-swap live models.
+    /// Rescan model dirs, enrich metadata from Hugging Face, persist registry, hot-swap live models.
     pub async fn refresh_models(&self) -> Result<RescanResult, RuntimeError> {
         let _guard = self.refresh_lock.lock().await;
 
@@ -48,12 +50,31 @@ impl AppState {
             )
         })?;
 
-        let result = ModelsRegistry::rescan_and_write(
+        let mut result = ModelsRegistry::rescan_and_write(
             models_file,
             None,
             &self.default_backend,
             self.vram_gb,
         )?;
+
+        match enrich_registry_file(models_file, &self.default_backend, self.vram_gb).await {
+            Ok((models, registry_json, summary)) => {
+                info!(
+                    matched = summary.matched,
+                    missed = summary.missed,
+                    skipped = summary.skipped,
+                    "HF metadata sync complete during model refresh"
+                );
+                result.models = models;
+                result.registry_json = registry_json;
+            }
+            Err(err) => {
+                warn!(
+                    error = %err,
+                    "HF metadata sync failed during model refresh; using local registry only"
+                );
+            }
+        }
 
         self.apply_rescan(&result).await?;
         Ok(result)
@@ -113,4 +134,18 @@ impl AppState {
             }
         }))
     }
+}
+
+async fn enrich_registry_file(
+    models_file: &str,
+    default_backend: &str,
+    vram_gb: u32,
+) -> Result<(HashMap<String, ModelConfig>, String, SyncSummary), RuntimeError> {
+    let mut registry = ModelsRegistry::load(models_file)?;
+    let summary = sync_registry_from_hf(&mut registry).await?;
+    registry.write(models_file)?;
+    let models = registry.expand(default_backend, vram_gb)?;
+    let registry_json = serde_json::to_string_pretty(&registry.to_json_export())
+        .map_err(|e| RuntimeError::ConfigError(format!("Failed to serialize models JSON: {e}")))?;
+    Ok((models, registry_json, summary))
 }

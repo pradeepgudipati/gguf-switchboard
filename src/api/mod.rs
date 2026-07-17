@@ -10,12 +10,16 @@ pub mod usage;
 
 use std::sync::Arc;
 
+use axum::Json;
 use axum::Router;
+use axum::extract::State;
+use serde_json::Value;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::{Config, SwaggerUi};
 
+use crate::openapi_models::inject_model_enums;
 use crate::state::AppState;
 
 #[derive(OpenApi)]
@@ -32,7 +36,6 @@ use crate::state::AppState;
         models::list_models,
         models::get_model,
         models::registry_json,
-        models::refresh_models,
         chat::chat_completions,
         completions::completions,
         embeddings::embeddings,
@@ -45,7 +48,6 @@ use crate::state::AppState;
     components(schemas(
         health::HealthResponse,
         health::StatusResponse,
-        models::RefreshModelsResponse,
         crate::types::ModelInfo,
         crate::types::ListModelsResponse,
         crate::types::Usage,
@@ -99,6 +101,18 @@ use crate::state::AppState;
 )]
 pub struct ApiDoc;
 
+async fn openapi_json(State(state): State<Arc<AppState>>) -> Json<Value> {
+    let mut doc = serde_json::to_value(ApiDoc::openapi()).unwrap_or(Value::Null);
+    let models: Vec<_> = state
+        .scheduler
+        .model_ids()
+        .into_iter()
+        .filter_map(|id| state.scheduler.model_config(&id).map(|cfg| (id, cfg)))
+        .collect();
+    inject_model_enums(&mut doc, &models);
+    Json(doc)
+}
+
 /// Build the top-level router with all OpenAI-compatible endpoints.
 pub fn create_router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::permissive();
@@ -117,7 +131,6 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         )
     });
 
-    let openapi = ApiDoc::openapi();
     let swagger_config = Config::new(["/api-docs/openapi.json"])
         .try_it_out_enabled(true)
         .show_mutated_request(true);
@@ -127,11 +140,8 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/",
             axum::routing::get(|| async { axum::response::Redirect::permanent("/swagger-ui/") }),
         )
-        .merge(
-            SwaggerUi::new("/swagger-ui")
-                .url("/api-docs/openapi.json", openapi)
-                .config(swagger_config),
-        )
+        .route("/api-docs/openapi.json", axum::routing::get(openapi_json))
+        .merge(SwaggerUi::new("/swagger-ui").config(swagger_config))
         .route(
             "/v1/chat/completions",
             axum::routing::post(chat::chat_completions),

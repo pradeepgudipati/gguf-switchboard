@@ -1,3 +1,4 @@
+mod hf_sync;
 mod models_registry;
 
 use std::collections::HashMap;
@@ -5,6 +6,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
+pub use hf_sync::{SyncSummary, sync_registry_from_hf};
 pub use models_registry::{ModelsRegistry, RescanResult};
 
 use crate::errors::RuntimeError;
@@ -78,6 +80,23 @@ pub struct ModelConfig {
     /// If true, this model is loaded automatically after idle timeout
     #[serde(default)]
     pub priority: bool,
+    /// Model role: `chat`, `coder`, `vision`, or `embedding`.
+    #[serde(default = "default_model_kind")]
+    pub kind: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub max_context_length: Option<u32>,
+    #[serde(default)]
+    pub min_vram_gb: Option<u32>,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    #[serde(default)]
+    pub hf_repo: Option<String>,
+}
+
+fn default_model_kind() -> String {
+    "chat".to_string()
 }
 
 fn default_startup_timeout() -> u64 {
@@ -176,6 +195,30 @@ impl Config {
         }
 
         Ok(())
+    }
+
+    /// Enrich `models_file` from Hugging Face Hub and reload expanded models into this config.
+    ///
+    /// Network failures propagate to the caller so launch/refresh can warn and continue.
+    pub async fn sync_hf_metadata(&mut self) -> Result<crate::config::SyncSummary, RuntimeError> {
+        let models_path = self.models_file.as_ref().ok_or_else(|| {
+            RuntimeError::ConfigError(
+                "models_file is not configured; cannot sync HF metadata".to_string(),
+            )
+        })?;
+
+        let mut registry = ModelsRegistry::load(models_path)?;
+        let summary = crate::config::sync_registry_from_hf(&mut registry).await?;
+        registry.write(models_path)?;
+
+        let expanded = registry.expand(&self.default_backend, self.vram_gb)?;
+        self.models = expanded;
+        self.registry_json =
+            serde_json::to_string_pretty(&registry.to_json_export()).map_err(|e| {
+                RuntimeError::ConfigError(format!("Failed to serialize models JSON: {e}"))
+            })?;
+
+        Ok(summary)
     }
 
     /// Return the model id of the priority model, if one is configured.

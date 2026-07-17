@@ -9,6 +9,7 @@ use futures::StreamExt;
 use uuid::Uuid;
 
 use crate::errors::RuntimeError;
+use crate::kind_guard::{CHAT_KINDS, require_kind};
 use crate::metrics::{ACTIVE_REQUESTS, INFERENCE_LATENCY, REQUEST_TOTAL};
 use crate::proxy::GuardedStream;
 use crate::state::AppState;
@@ -57,6 +58,11 @@ pub async fn responses(
     ACTIVE_REQUESTS.inc();
 
     let start = std::time::Instant::now();
+    let cfg = state
+        .scheduler
+        .model_config(&request.model)
+        .ok_or_else(|| RuntimeError::ModelNotFound(request.model.clone()))?;
+    require_kind(&request.model, &cfg, CHAT_KINDS, "/v1/responses")?;
     let backend = state.scheduler.ensure_loaded(&request.model).await?;
     let model_id = request.model.clone();
     let request_guard = state.scheduler.track_request(&model_id);
