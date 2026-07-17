@@ -13,9 +13,15 @@ idle_timeout = 600
 # Default backend engine
 default_backend = "llama.cpp"
 
-# GPU VRAM in GB — used to size per-model context windows when not set in models.toml.
-# RTX 3060 12GB default; lower if you share VRAM with a display or other apps.
+# Assumed GPU capacity in GB — heuristic for per-model context (-c) when not set in models.toml.
+# RTX 3060 = 12; does not query live GPU memory.
 vram_gb = 12
+
+# Seconds to wait for in-flight requests before switching models
+switch_drain_timeout_secs = 120
+
+# Seconds to skip priority-model reload after a failed load
+priority_load_cooldown_secs = 300
 
 # Path to token usage SQLite database (defaults to token_usage.db)
 database_path = "/var/lib/gguf-switchboard/usage.db"

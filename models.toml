@@ -39,6 +39,6 @@ auto_discover = true
 # display_name = "Gemma 4 E4B"
 # kind = "chat"              # chat | coder | vision | embedding (inferred when omitted)
 # enabled = true             # false = hide from /v1/models and scheduling
-# priority = true            # auto-load after idle_timeout (only one should be true)
-# context_size = 32768       # override VRAM-based default from config.toml vram_gb
+# priority = true            # idle auto-load target (only one). discover-models prefers gemma-4-e4b when present.
+# context_size = 16384       # pin for consumer GPUs; omit to use vram_gb heuristic from config.toml
 # extra_args = ["--jinja"]   # appended to llama-server launch args

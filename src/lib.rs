@@ -4,6 +4,7 @@ pub mod config;
 pub mod context;
 pub mod db;
 pub mod errors;
+pub mod load_failure;
 pub mod memory;
 pub mod metrics;
 pub mod proxy;

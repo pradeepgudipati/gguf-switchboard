@@ -2,7 +2,7 @@
 name = "gguf-switchboard"
 version = "0.1.2"
 edition = "2024"
-description = "llama-swap alternative in Rust — OpenAI-compatible GGUF runtime with VRAM-pressure eviction, context auto-fallback, and usage tracking"
+description = "llama-swap alternative in Rust — OpenAI-compatible GGUF runtime with memory-pressure eviction, OOM context fallback, and usage tracking"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/pradeepgudipati/gguf-switchboard"
@@ -49,6 +49,7 @@ utoipa-swagger-ui = { version = "9", features = ["axum"] }
 tokio-test = "0.4"
 axum-test = "16"
 serial_test = "3"
+tempfile = "3"
 
 [profile.release]
 opt-level = 3

@@ -4,6 +4,7 @@ mod config;
 mod context;
 mod db;
 mod errors;
+mod load_failure;
 mod memory;
 mod metrics;
 mod proxy;
@@ -74,10 +75,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let token_db = Arc::new(TokenDb::open(&db_path)?);
 
     let scheduler = Arc::new(Scheduler::new(config.clone()).await?);
+    let watcher_handles = scheduler.start_watchers();
     let app_state = Arc::new(AppState::new(config.clone(), scheduler.clone(), token_db));
-
-    scheduler.start_priority_watcher().await;
-    scheduler.start_memory_watcher().await;
 
     let app = api::create_router(app_state.clone());
 
@@ -124,6 +123,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
 
     info!("Shutting down scheduler");
+    watcher_handles.shutdown().await;
     scheduler.shutdown().await?;
 
     info!("GGUF Switchboard stopped");

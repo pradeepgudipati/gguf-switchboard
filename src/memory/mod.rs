@@ -1,4 +1,4 @@
-//! System memory monitoring.
+//! System RAM monitoring for memory-pressure eviction.
 //!
 //! Provides platform-specific memory stats for Linux and macOS.
 //! Falls back gracefully on unsupported platforms.

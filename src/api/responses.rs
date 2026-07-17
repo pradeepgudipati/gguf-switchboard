@@ -59,6 +59,7 @@ pub async fn responses(
     let start = std::time::Instant::now();
     let backend = state.scheduler.ensure_loaded(&request.model).await?;
     let model_id = request.model.clone();
+    let request_guard = state.scheduler.track_request(&model_id);
 
     // Convert Responses API input to Chat Completion messages
     let mut messages = Vec::new();
@@ -176,7 +177,10 @@ pub async fn responses(
         });
         let full_stream = mapped.chain(done);
 
-        let guarded = GuardedStream::new(full_stream, vec![Box::new(active_guard)]);
+        let guarded = GuardedStream::new(
+            full_stream,
+            vec![Box::new(request_guard), Box::new(active_guard)],
+        );
 
         let body = Body::from_stream(guarded.map(|s: Result<String, _>| {
             s.map(bytes::Bytes::from)
@@ -195,6 +199,7 @@ pub async fn responses(
             .unwrap())
     } else {
         let _guard = ActiveGuard;
+        let _request_guard = request_guard;
         let chat_response = backend.chat(chat_request).await?;
         let response_id = format!("resp_{}", Uuid::new_v4().simple());
 

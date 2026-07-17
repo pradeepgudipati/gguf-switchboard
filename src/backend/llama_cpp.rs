@@ -6,6 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use futures::{Stream, StreamExt};
 use reqwest::Client;
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::{debug, info, warn};
@@ -29,6 +30,8 @@ pub struct LlamaCppBackend {
     client: Client,
     process: Arc<Mutex<Option<Child>>>,
     running: AtomicBool,
+    startup_stderr: Arc<Mutex<String>>,
+    server_version: Arc<Mutex<Option<String>>>,
 }
 
 impl LlamaCppBackend {
@@ -42,6 +45,8 @@ impl LlamaCppBackend {
                 .expect("failed to build reqwest client"),
             process: Arc::new(Mutex::new(None)),
             running: AtomicBool::new(false),
+            startup_stderr: Arc::new(Mutex::new(String::new())),
+            server_version: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -137,12 +142,32 @@ impl Backend for LlamaCppBackend {
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
-        let child = cmd.spawn().map_err(|e| {
+        let mut child = cmd.spawn().map_err(|e| {
             RuntimeError::ModelLoadingFailed(format!("Failed to spawn backend: {e}"))
         })?;
 
+        if let Some(stderr) = child.stderr.take() {
+            let log = Arc::clone(&self.startup_stderr);
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stderr).lines();
+                let mut combined = String::new();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    if combined.len() < 65_536 {
+                        combined.push_str(&line);
+                        combined.push('\n');
+                    }
+                    let mut guard = log.lock().await;
+                    if guard.len() < 65_536 {
+                        guard.push_str(&line);
+                        guard.push('\n');
+                    }
+                }
+            });
+        }
+
         *self.process.lock().await = Some(child);
         self.running.store(true, Ordering::SeqCst);
+        self.detect_server_version().await;
         Ok(())
     }
 
@@ -296,9 +321,45 @@ impl Backend for LlamaCppBackend {
             }
         }
     }
+
+    async fn take_startup_stderr(&self) -> String {
+        let mut guard = self.startup_stderr.lock().await;
+        std::mem::take(&mut *guard)
+    }
+
+    async fn server_version(&self) -> Option<String> {
+        self.server_version.lock().await.clone()
+    }
 }
 
 impl LlamaCppBackend {
+    async fn detect_server_version(&self) {
+        if self.server_version.lock().await.is_some() {
+            return;
+        }
+
+        let output = Command::new(&self.config.command)
+            .arg("--version")
+            .output()
+            .await;
+
+        let version = match output {
+            Ok(out) if out.status.success() => {
+                let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if stdout.is_empty() {
+                    String::from_utf8_lossy(&out.stderr).trim().to_string()
+                } else {
+                    stdout
+                }
+            }
+            _ => String::new(),
+        };
+
+        if !version.is_empty() {
+            *self.server_version.lock().await = Some(version);
+        }
+    }
+
     fn command_display(&self) -> String {
         format!("{} {}", self.config.command, self.config.args.join(" "))
     }
