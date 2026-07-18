@@ -15,6 +15,7 @@ use crate::errors::RuntimeError;
 use crate::load_failure::{LoadFailureKind, classify_load_failure};
 use crate::memory;
 use crate::metrics::{BACKEND_HEALTH, LOADED_MODEL, MEMORY_USAGE_PERCENT, MODEL_LOAD_LATENCY};
+use crate::ngl::{compute_auto_ngl, with_ngl};
 
 #[derive(Debug, Clone, Copy)]
 enum LoadOrigin {
@@ -638,12 +639,15 @@ impl SchedulerInner {
         &self,
         model_id: &str,
     ) -> Result<Arc<dyn Backend>, RuntimeError> {
+        self.apply_auto_ngl(model_id).await?;
+
         loop {
             let backend = self.get_or_create_backend(model_id).await?;
             let args = self.effective_args(model_id).await?;
             let current_ctx = get_context_size(&args);
+            let current_ngl = crate::ngl::get_ngl(&args);
 
-            info!(model = %model_id, context = ?current_ctx, "Loading model");
+            info!(model = %model_id, context = ?current_ctx, ngl = ?current_ngl, "Loading model");
 
             let start = Instant::now();
             if let Err(e) = backend.load().await {
@@ -681,6 +685,7 @@ impl SchedulerInner {
                     info!(
                         model = %model_id,
                         context = ?current_ctx,
+                        ngl = ?current_ngl,
                         elapsed_ms = elapsed.as_millis(),
                         "Model loaded and healthy"
                     );
@@ -710,6 +715,49 @@ impl SchedulerInner {
                 }
             }
         }
+    }
+
+    /// Opt-in: rewrite `-ngl` from free VRAM + GGUF size unless the model pins ngl.
+    async fn apply_auto_ngl(&self, model_id: &str) -> Result<(), RuntimeError> {
+        if !self.config.auto_ngl {
+            return Ok(());
+        }
+
+        let model_cfg = self
+            .models
+            .read()
+            .get(model_id)
+            .cloned()
+            .ok_or_else(|| RuntimeError::ModelNotFound(model_id.to_string()))?;
+
+        if model_cfg.ngl_pinned {
+            debug!(model = %model_id, "auto_ngl skipped; ngl is pinned");
+            return Ok(());
+        }
+
+        let args = self.effective_args(model_id).await?;
+        let Some(model_path) = crate::ngl::model_path_from_args(&args) else {
+            warn!(model = %model_id, "auto_ngl skipped; no -m/--model in args");
+            return Ok(());
+        };
+
+        let Some(ngl) = compute_auto_ngl(
+            model_id,
+            model_path,
+            self.config.vram_gb,
+            model_cfg.block_count,
+        ) else {
+            warn!(model = %model_id, "auto_ngl skipped; could not read model file size");
+            return Ok(());
+        };
+
+        let updated = with_ngl(&args, ngl);
+        self.backends.write().await.remove(model_id);
+        self.runtime_args
+            .write()
+            .await
+            .insert(model_id.to_string(), updated);
+        Ok(())
     }
 
     async fn should_reduce_context(

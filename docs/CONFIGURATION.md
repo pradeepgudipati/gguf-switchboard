@@ -30,6 +30,9 @@ default_backend = "llama.cpp"
 # RTX 3060 = 12; lower if you share VRAM with a display or other apps
 vram_gb = 12
 
+# Opt-in: pick -ngl at load from free VRAM (nvidia-smi or vram_gb) + GGUF size
+auto_ngl = false
+
 database_path = "/var/lib/gguf-switchboard/usage.db"
 
 # Model registry (TOML or portable JSON)
@@ -39,6 +42,7 @@ models_file = "models.toml"
 If `models_file` is omitted but a sibling `models.toml` exists next to your config, it is loaded automatically.
 
 See [Context size (`-c`)](#context-size-c) for how `vram_gb` affects per-model `-c` values.
+See [Auto GPU layers (`auto_ngl`)](#auto-gpu-layers-auto_ngl) for load-time `-ngl` heuristics.
 
 ### Model configuration (`models.toml`)
 
@@ -65,6 +69,7 @@ enabled = true            # false = hide from /v1/models and scheduling
 priority = true           # Auto-load after idle_timeout (only one should be true)
 # port = 8085             # Override auto-assigned port (optional)
 # context_size = 32768    # Override VRAM-based default from config.toml vram_gb (optional)
+# ngl = 40                # Pin GPU layers (disables auto_ngl for this model)
 # description = "..."     # Optional blurb for /v1/models + Swagger (or run sync-hf-metadata)
 # max_context_length = 131072  # Model max context from HF/GGUF metadata
 # min_vram_gb = 6         # Approximate minimum VRAM (GB)
@@ -89,6 +94,7 @@ priority = true           # Auto-load after idle_timeout (only one should be tru
 | `[[models]].priority` | If `true`, this model loads automatically after `idle_timeout` |
 | `[[models]].port` | Override the auto-assigned backend port |
 | `[[models]].context_size` | Override per-model `-c` (otherwise sized from `vram_gb`) |
+| `[[models]].ngl` | Override per-model `-ngl` (pins against `auto_ngl`) |
 | `[[models]].description` | Optional description shown in `/v1/models` and Swagger |
 | `[[models]].max_context_length` | Model max context from HF/GGUF metadata (not the serving `-c`) |
 | `[[models]].min_vram_gb` | Approximate minimum VRAM in GB (weights floor) |
@@ -350,7 +356,8 @@ priority = false
 | `startup_timeout` | Seconds to wait for a backend to become healthy |
 | `idle_timeout` | Seconds of inactivity before the priority model loads |
 | `default_backend` | Fallback backend engine name |
-| `vram_gb` | Assumed GPU capacity in GB — heuristic for per-model `-c` when not set in `models.toml` (default: `12` for RTX 3060); does not query live GPU memory |
+| `vram_gb` | Assumed GPU capacity in GB — heuristic for per-model `-c` when not set in `models.toml` (default: `12` for RTX 3060); also VRAM fallback when `auto_ngl` cannot query `nvidia-smi` |
+| `auto_ngl` | When `true`, pick `-ngl` at load from free VRAM + GGUF size (default: `false`) |
 | `models_file` | Path to model registry (`models.toml` or `models.json`) |
 | `models.<id>.backend` | Engine type (`llama.cpp`) |
 | `models.<id>.display_name` | Human-readable name shown in `/v1/models` |
@@ -403,4 +410,22 @@ sudo systemctl restart gguf-switchboard
 
 ```toml
 context_fallback_min = 8192
+```
+
+### Auto GPU layers (`auto_ngl`)
+
+When `auto_ngl = true` in `config.toml`, each model load picks `-ngl` from:
+
+1. Free VRAM via `nvidia-smi` (first GPU), or `vram_gb * 1024` if unavailable (macOS/Metal has no live probe yet)
+2. ~80% of that as usable VRAM (KV/overhead reserve)
+3. GGUF file size and `block_count` from the GGUF header
+
+If the file fits in usable VRAM, all layers go on GPU; otherwise `-ngl` is scaled by `usable_vram / file_size`. This is a **heuristic**, not live layer telemetry — oversized KV or concurrent GPU use can still OOM.
+
+**Overrides (win over auto):** `[[models]].ngl`, or `-ngl` / `--n-gpu-layers` in `extra_args`. Default remains `defaults.ngl = 999` when `auto_ngl` is false.
+
+```toml
+# config.toml
+auto_ngl = true
+vram_gb = 12   # fallback when nvidia-smi is missing
 ```

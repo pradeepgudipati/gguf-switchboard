@@ -72,6 +72,9 @@ pub struct RegistryEntry {
     /// Override `defaults.context_size` for this model.
     #[serde(default)]
     pub context_size: Option<u32>,
+    /// Override `defaults.ngl` for this model (also pins against auto_ngl).
+    #[serde(default)]
+    pub ngl: Option<u32>,
     /// Extra `llama-server` flags appended after the default args (e.g. `--jinja`).
     #[serde(default)]
     pub extra_args: Vec<String>,
@@ -103,6 +106,7 @@ impl Default for RegistryEntry {
             priority: false,
             port: None,
             context_size: None,
+            ngl: None,
             extra_args: Vec::new(),
             description: None,
             max_context_length: None,
@@ -740,6 +744,9 @@ fn merge_registry_entry(target: &mut RegistryEntry, incoming: &RegistryEntry) {
     if target.context_size.is_none() {
         target.context_size = incoming.context_size;
     }
+    if target.ngl.is_none() {
+        target.ngl = incoming.ngl;
+    }
     if incoming.priority {
         target.priority = true;
     }
@@ -995,6 +1002,7 @@ impl ModelsRegistry {
                     priority: entry.priority,
                     port: None,
                     context_size: entry.context_size,
+                    ngl: None,
                     extra_args: Vec::new(),
                     description: entry.description,
                     max_context_length: entry.max_context_length,
@@ -1143,6 +1151,7 @@ impl ModelsRegistry {
                     priority: existing.priority,
                     port: existing.port,
                     context_size: existing.context_size,
+                    ngl: existing.ngl,
                     extra_args: existing.extra_args.clone(),
                     description: existing.description.clone(),
                     max_context_length: existing.max_context_length,
@@ -1166,6 +1175,7 @@ impl ModelsRegistry {
                 priority: false,
                 port: None,
                 context_size: None,
+                ngl: None,
                 extra_args: Vec::new(),
                 ..Default::default()
             });
@@ -1334,6 +1344,7 @@ impl ModelsRegistry {
                     priority: false,
                     port: None,
                     context_size: None,
+                    ngl: None,
                     extra_args: Vec::new(),
                     ..Default::default()
                 });
@@ -1367,6 +1378,13 @@ impl ModelsRegistry {
                 .unwrap_or(self.defaults.base_port.saturating_add(index as u16));
             let context_size =
                 suggest_context_size(vram_gb, entry, &model_path, self.defaults.context_size);
+            let ngl = entry.ngl.unwrap_or(self.defaults.ngl);
+            let extra = effective_extra_args(entry);
+            let ngl_pinned = entry.ngl.is_some() || extra_args_pin_ngl(&extra);
+            let block_count = inspect_gguf_metadata(Path::new(&model_path))
+                .ok()
+                .and_then(|m| m.block_count)
+                .and_then(|n| u32::try_from(n).ok());
 
             let mut args = vec![
                 "-m".to_string(),
@@ -1378,9 +1396,9 @@ impl ModelsRegistry {
                 "-c".to_string(),
                 context_size.to_string(),
                 "-ngl".to_string(),
-                self.defaults.ngl.to_string(),
+                ngl.to_string(),
             ];
-            args.extend(effective_extra_args(entry));
+            args.extend(extra);
 
             let config = ModelConfig {
                 backend: backend.clone(),
@@ -1399,12 +1417,20 @@ impl ModelsRegistry {
                 min_vram_gb: entry.min_vram_gb,
                 capabilities: entry.capabilities.clone(),
                 hf_repo: entry.hf_repo.clone(),
+                block_count,
+                ngl_pinned,
             };
             models.insert(entry.alias.clone(), config);
         }
 
         Ok(models)
     }
+}
+
+fn extra_args_pin_ngl(extra_args: &[String]) -> bool {
+    extra_args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "-ngl" | "--n-gpu-layers" | "--gpu-layers"))
 }
 
 /// Llama 3.1 GGUFs often ship a tool-use chat template that makes the model
@@ -1785,6 +1811,7 @@ mod tests {
                     priority: false,
                     port: None,
                     context_size: None,
+                    ngl: None,
                     extra_args: Vec::new(),
                     ..Default::default()
                 },
@@ -1797,6 +1824,7 @@ mod tests {
                     priority: false,
                     port: None,
                     context_size: None,
+                    ngl: None,
                     extra_args: Vec::new(),
                     ..Default::default()
                 },
@@ -1854,6 +1882,7 @@ mod tests {
                     priority: true,
                     port: None,
                     context_size: None,
+                    ngl: None,
                     extra_args: Vec::new(),
                     ..Default::default()
                 },
@@ -1866,6 +1895,7 @@ mod tests {
                     priority: false,
                     port: None,
                     context_size: None,
+                    ngl: None,
                     extra_args: Vec::new(),
                     ..Default::default()
                 },
@@ -1915,6 +1945,7 @@ mod tests {
                 priority: true,
                 port: None,
                 context_size: None,
+                ngl: None,
                 extra_args: Vec::new(),
                 ..Default::default()
             }],
@@ -1955,6 +1986,7 @@ mod tests {
                 priority: true,
                 port: None,
                 context_size: Some(4096),
+                ngl: None,
                 extra_args: Vec::new(),
                 ..Default::default()
             }],
@@ -1968,6 +2000,39 @@ mod tests {
         assert!(cfg.args.contains(&"9001".to_string()));
         assert!(cfg.args.contains(&"4096".to_string()));
         assert_eq!(cfg.backend_url, "http://127.0.0.1:9001/v1");
+        assert!(!cfg.ngl_pinned);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn expand_pins_ngl_when_model_sets_ngl() {
+        let dir = std::env::temp_dir().join("gguf-switchboard-ngl-pin-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let model_path = dir.join("test-model.gguf");
+        write_minimal_gguf(&model_path, "llama");
+
+        let registry = ModelsRegistry {
+            version: 1,
+            defaults: RegistryDefaults {
+                models_dir: dir.to_string_lossy().into_owned(),
+                base_port: 9001,
+                ..RegistryDefaults::default()
+            },
+            auto_discover: false,
+            models: vec![RegistryEntry {
+                alias: "test".to_string(),
+                file: "test-model.gguf".to_string(),
+                ngl: Some(24),
+                ..Default::default()
+            }],
+        };
+
+        let models = registry.expand("llama.cpp", 12).unwrap();
+        let cfg = models.get("test").unwrap();
+        assert!(cfg.ngl_pinned);
+        assert!(cfg.args.windows(2).any(|w| w[0] == "-ngl" && w[1] == "24"));
 
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -1996,6 +2061,7 @@ mod tests {
                 priority: true,
                 port: None,
                 context_size: None,
+                ngl: None,
                 extra_args: Vec::new(),
                 ..Default::default()
             }],
@@ -2036,6 +2102,7 @@ mod tests {
                 priority: true,
                 port: None,
                 context_size: None,
+                ngl: None,
                 extra_args: vec!["--jinja".to_string()],
                 ..Default::default()
             }],
@@ -2123,6 +2190,7 @@ mod tests {
                 priority: true,
                 port: None,
                 context_size: None,
+                ngl: None,
                 extra_args: Vec::new(),
                 ..Default::default()
             }],
@@ -2219,6 +2287,7 @@ mod tests {
                 priority: true,
                 port: None,
                 context_size: None,
+                ngl: None,
                 extra_args: Vec::new(),
                 ..Default::default()
             }],
@@ -2244,6 +2313,7 @@ mod tests {
                 priority: false,
                 port: None,
                 context_size: None,
+                ngl: None,
                 extra_args: Vec::new(),
                 ..Default::default()
             },
@@ -2256,6 +2326,7 @@ mod tests {
                 priority: true,
                 port: None,
                 context_size: None,
+                ngl: None,
                 extra_args: Vec::new(),
                 ..Default::default()
             },
@@ -2280,6 +2351,7 @@ mod tests {
             priority: false,
             port: None,
             context_size: None,
+            ngl: None,
             extra_args: Vec::new(),
             ..Default::default()
         };
@@ -2358,6 +2430,7 @@ mod tests {
                     priority: true,
                     port: None,
                     context_size: None,
+                    ngl: None,
                     extra_args: Vec::new(),
                     ..Default::default()
                 },
@@ -2370,6 +2443,7 @@ mod tests {
                     priority: false,
                     port: None,
                     context_size: None,
+                    ngl: None,
                     extra_args: Vec::new(),
                     ..Default::default()
                 },

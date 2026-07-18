@@ -10,7 +10,7 @@ A **[llama-swap](https://github.com/mostlygeek/llama-swap) alternative in Rust**
 
 **Requires** [llama.cpp](https://github.com/ggerganov/llama.cpp) `llama-server` and GGUF model files — see [Prerequisites](#prerequisites).
 
-> **Status:** Experimental — single-GPU home labs and development machines on a **trusted LAN**. One model loaded at a time. System RAM is monitored for pressure eviction; `vram_gb` sizes context heuristically (not live GPU telemetry). See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+> **Status:** Experimental — single-GPU home labs and development machines on a **trusted LAN**. One model loaded at a time. System RAM is monitored for pressure eviction; `vram_gb` sizes context heuristically. Opt-in `auto_ngl` can pick GPU layers from free VRAM (nvidia-smi or `vram_gb` fallback) — still a heuristic, not live layer telemetry. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
 ![gguf-switchboard demo](gguf-switchboard-demo.gif)
 
@@ -26,10 +26,12 @@ A **[llama-swap](https://github.com/mostlygeek/llama-swap) alternative in Rust**
 Also included:
 
 - **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/responses`, `/v1/models`, `/v1/models/registry.json`, `/v1/audio/*`
+- **Tool calling** — `tools` / `tool_choice` / `tool_calls` are accepted and forwarded to `llama-server`; actual behavior depends on the model and llama.cpp build (see [COMPATIBILITY](docs/COMPATIBILITY.md))
 - **Swagger UI** — Try-it-out at `http://localhost:9090/swagger-ui/` (live model dropdown from the registry)
 - **Auto-discovery** — Scans GGUF dirs with a cheap validation ladder (filename → header → metadata); sidecars skipped
 - **Single-slot hot-swap** — One resident model; switches drain in-flight requests; failed switches roll back
 - **Memory-pressure eviction** — Unloads when system RAM crosses the critical threshold
+- **Auto GPU layers (`auto_ngl`)** — Opt-in: at load, pick `-ngl` from free VRAM + GGUF size (manual `ngl` / `extra_args` still win)
 - **Idle priority model** — Preferred model auto-loads after a configurable idle timeout
 - **llama.cpp backend** — Spawns and manages `llama-server` child processes
 - **SSE streaming**, **Prometheus** (`/metrics`), **usage history** (`/v1/usage`), **portable `models.json`**
