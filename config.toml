@@ -14,8 +14,12 @@ idle_timeout = 600
 default_backend = "llama.cpp"
 
 # Assumed GPU capacity in GB — heuristic for per-model context (-c) when not set in models.toml.
-# RTX 3060 = 12; does not query live GPU memory.
+# RTX 3060 = 12; also used as VRAM fallback when auto_ngl cannot query nvidia-smi.
 vram_gb = 12
+
+# When true, pick -ngl at load from free VRAM (nvidia-smi or vram_gb) and GGUF size.
+# Manual [[models]].ngl or -ngl in extra_args still wins. Default keeps ngl = 999.
+auto_ngl = false
 
 # Seconds to wait for in-flight requests before switching models
 switch_drain_timeout_secs = 120

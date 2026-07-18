@@ -4,6 +4,7 @@ idle_timeout = 600
 default_backend = "llama.cpp"
 database_path = "/var/lib/gguf-switchboard/usage.db"
 vram_gb = 12
+auto_ngl = false
 
 memory_warning_threshold = 85
 memory_critical_threshold = 95

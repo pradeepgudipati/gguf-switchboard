@@ -30,6 +30,9 @@ pub struct Config {
     /// GPU VRAM in GB used to size default context windows per model (default: 12).
     #[serde(default = "default_vram_gb")]
     pub vram_gb: u32,
+    /// When true, pick `-ngl` at load from free VRAM + GGUF size (see `ngl` module).
+    #[serde(default)]
+    pub auto_ngl: bool,
     /// Optional path to a simplified models registry (`models.toml` or `models.json`).
     /// When set, model entries are expanded from that file at load time.
     #[serde(default)]
@@ -93,6 +96,12 @@ pub struct ModelConfig {
     pub capabilities: Vec<String>,
     #[serde(default)]
     pub hf_repo: Option<String>,
+    /// GGUF `block_count` when known (used by auto_ngl).
+    #[serde(default, skip_serializing)]
+    pub block_count: Option<u32>,
+    /// When true, auto_ngl must not rewrite `-ngl` (pinned via `models.ngl` or `extra_args`).
+    #[serde(default, skip_serializing)]
+    pub ngl_pinned: bool,
 }
 
 fn default_model_kind() -> String {
