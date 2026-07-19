@@ -11,11 +11,11 @@ use super::Usage;
 pub struct EmbeddingRequest {
     pub model: String,
     pub input: EmbeddingInput,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoding_format: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dimensions: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
 }
 
