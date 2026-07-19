@@ -24,10 +24,6 @@ impl Drop for ActiveGuard {
     tag = "embeddings",
     request_body(
         content = EmbeddingRequest,
-        example = json!({
-            "model": "gemma-4-e4b",
-            "input": "The quick brown fox jumps over the lazy dog."
-        })
     ),
     responses(
         (status = 200, description = "Generated embeddings", body = EmbeddingResponse),
