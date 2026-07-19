@@ -1277,7 +1277,7 @@ impl ModelsRegistry {
         fallback_backend: &str,
         vram_gb: u32,
     ) -> Result<HashMap<String, ModelConfig>, RuntimeError> {
-        let models_dirs = resolve_models_dirs(&self.defaults.models_dir)?;
+        let models_dirs = resolve_models_dirs_with_fallback(&self.defaults.models_dir)?;
 
         let mut entries = Vec::new();
         let mut claimed_files = HashSet::new();
@@ -2205,7 +2205,7 @@ mod tests {
     }
 
     #[test]
-    fn expand_errors_when_configured_models_dir_is_missing() {
+    fn expand_errors_when_no_model_directories_found() {
         let registry = ModelsRegistry {
             version: 1,
             defaults: RegistryDefaults {
@@ -2217,7 +2217,10 @@ mod tests {
         };
 
         let err = registry.expand("llama.cpp", 12).unwrap_err().to_string();
-        assert!(err.contains("does not exist"));
+        assert!(
+            err.contains("No model directories found"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
