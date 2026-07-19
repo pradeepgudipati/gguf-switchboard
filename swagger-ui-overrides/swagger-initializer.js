@@ -2,7 +2,6 @@ window.onload = function() {
   const MODEL_STORAGE_KEY = 'gguf-switchboard-swagger-model';
   let selectedModel = localStorage.getItem(MODEL_STORAGE_KEY) || '';
   const userEditedBodies = new WeakSet();
-  const initializedBodies = new WeakSet();
 
   function isSwaggerPlaceholder(value) {
     return value === 'string' || value === null || value === undefined;
@@ -211,9 +210,7 @@ window.onload = function() {
   }
 
   function initializeRequestBody(textarea, path, model) {
-    if (!textarea || initializedBodies.has(textarea) || userEditedBodies.has(textarea)) {
-      return;
-    }
+    if (!textarea) return;
 
     markBodyEditor(textarea);
 
@@ -225,13 +222,17 @@ window.onload = function() {
       if (model && 'model' in sanitized) {
         sanitized.model = model;
       }
-      textarea.value = JSON.stringify(sanitized, null, 2);
-      initializedBodies.add(textarea);
+      if (!userEditedBodies.has(textarea)) {
+        textarea.value = JSON.stringify(sanitized, null, 2);
+      } else if (model && 'model' in json) {
+        json.model = model;
+        textarea.value = JSON.stringify(json, null, 2);
+      }
     } catch (e) {
+      if (userEditedBodies.has(textarea)) return;
       var fallback = defaultRequestBody(path, model);
       if (fallback) {
         textarea.value = JSON.stringify(fallback, null, 2);
-        initializedBodies.add(textarea);
       }
     }
   }
@@ -240,7 +241,6 @@ window.onload = function() {
     if (!model) return;
 
     document.querySelectorAll('.opblock-body textarea, .body-param textarea').forEach(function(textarea) {
-      if (userEditedBodies.has(textarea)) return;
       try {
         const json = JSON.parse(textarea.value);
         if (!json || typeof json !== 'object' || !('model' in json)) return;
