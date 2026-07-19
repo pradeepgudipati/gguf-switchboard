@@ -1,7 +1,26 @@
 window.onload = function() {
   const MODEL_STORAGE_KEY = 'gguf-switchboard-swagger-model';
   let selectedModel = localStorage.getItem(MODEL_STORAGE_KEY) || '';
+  let allModels = [];
   const userEditedBodies = new WeakSet();
+
+  const HIDE_FOR_EMBEDDING = new Set(['chat', 'completions', 'responses', 'audio']);
+
+  function updateEndpointVisibility(kind) {
+    const isEmbedding = kind === 'embedding';
+    document.querySelectorAll('[id^="operations-tag-"]').forEach(function(section) {
+      var tag = section.id.replace('operations-tag-', '');
+      var shouldHide = isEmbedding
+        ? HIDE_FOR_EMBEDDING.has(tag)
+        : tag === 'embeddings';
+      section.style.display = shouldHide ? 'none' : '';
+    });
+  }
+
+  function kindForModel(modelId) {
+    var m = allModels.find(function(m) { return m.id === modelId; });
+    return m ? m.kind : '';
+  }
 
   function isSwaggerPlaceholder(value) {
     return value === 'string' || value === null || value === undefined;
@@ -306,6 +325,7 @@ window.onload = function() {
 
   function injectModelSelector(models) {
     if (document.getElementById('global-model-select')) return;
+    allModels = models;
 
     const wrapper = document.querySelector('.topbar-wrapper');
     if (!wrapper) return;
@@ -350,6 +370,7 @@ window.onload = function() {
         localStorage.removeItem(MODEL_STORAGE_KEY);
       }
       updateModelFieldOnly(selectedModel);
+      updateEndpointVisibility(kindForModel(selectedModel));
     });
 
     const refreshBtn = document.createElement('button');
@@ -401,6 +422,7 @@ window.onload = function() {
 
     if (selectedModel) {
       updateModelFieldOnly(selectedModel);
+      updateEndpointVisibility(kindForModel(selectedModel));
     }
 
     document.getElementById('swagger-ui').addEventListener('click', function(event) {
@@ -417,6 +439,10 @@ window.onload = function() {
       .then(function(r) { return r.json(); })
       .then(function(data) {
         injectModelSelector(data.data || []);
+        // ponytail: safety net for async Swagger UI rendering after onComplete
+        setTimeout(function() {
+          if (selectedModel) updateEndpointVisibility(kindForModel(selectedModel));
+        }, 500);
       })
       .catch(function(err) {
         console.warn('Failed to load models for Swagger UI selector:', err);
