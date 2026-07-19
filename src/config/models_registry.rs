@@ -1398,6 +1398,9 @@ impl ModelsRegistry {
                 "-ngl".to_string(),
                 ngl.to_string(),
             ];
+            if entry.effective_kind() == "embedding" {
+                args.push("--embeddings".to_string());
+            }
             args.extend(extra);
 
             let config = ModelConfig {
@@ -2033,6 +2036,56 @@ mod tests {
         let cfg = models.get("test").unwrap();
         assert!(cfg.ngl_pinned);
         assert!(cfg.args.windows(2).any(|w| w[0] == "-ngl" && w[1] == "24"));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn expand_adds_embeddings_flag_for_embedding_models() {
+        let dir = std::env::temp_dir().join("gguf-switchboard-embeddings-flag-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let embed_path = dir.join("nomic-embed-text-v1.5.Q4_K_M.gguf");
+        let chat_path = dir.join("chat-model.gguf");
+        write_minimal_gguf(&embed_path, "nomic-bert");
+        write_minimal_gguf(&chat_path, "llama");
+
+        let registry = ModelsRegistry {
+            version: 1,
+            defaults: RegistryDefaults {
+                models_dir: dir.to_string_lossy().into_owned(),
+                base_port: 9100,
+                ..RegistryDefaults::default()
+            },
+            auto_discover: false,
+            models: vec![
+                RegistryEntry {
+                    alias: "nomic-embed-text-v1.5".to_string(),
+                    file: "nomic-embed-text-v1.5.Q4_K_M.gguf".to_string(),
+                    kind: Some("embedding".to_string()),
+                    ..Default::default()
+                },
+                RegistryEntry {
+                    alias: "chat-model".to_string(),
+                    file: "chat-model.gguf".to_string(),
+                    kind: Some("chat".to_string()),
+                    ..Default::default()
+                },
+            ],
+        };
+
+        let models = registry.expand("llama.cpp", 12).unwrap();
+        let embed_cfg = models.get("nomic-embed-text-v1.5").unwrap();
+        assert!(
+            embed_cfg.args.contains(&"--embeddings".to_string()),
+            "Embedding model must have --embeddings flag"
+        );
+
+        let chat_cfg = models.get("chat-model").unwrap();
+        assert!(
+            !chat_cfg.args.contains(&"--embeddings".to_string()),
+            "Chat model must NOT have --embeddings flag"
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
