@@ -1,3 +1,4 @@
+pub mod anthropic;
 pub mod audio;
 pub mod chat;
 pub mod completions;
@@ -42,6 +43,7 @@ use crate::state::AppState;
         embeddings::embeddings,
         responses::responses,
         audio::transcriptions,
+        anthropic::messages,
         audio::speech,
         usage::usage,
         usage::recent_usage,
@@ -86,6 +88,16 @@ use crate::state::AppState;
         crate::types::responses::ResponseContent,
         crate::types::responses::ResponseUsage,
         crate::types::audio::TranscriptionRequest,
+        crate::types::anthropic::MessagesRequest,
+        crate::types::anthropic::MessagesResponse,
+        crate::types::anthropic::Message,
+        crate::types::anthropic::Role,
+        crate::types::anthropic::MessageContent,
+        crate::types::anthropic::ContentBlock,
+        crate::types::anthropic::ToolDefinition,
+        crate::types::anthropic::ToolChoice,
+        crate::types::anthropic::ResponseBlock,
+        crate::types::anthropic::Usage,
         crate::types::audio::SpeechRequest,
         crate::types::chat::Content,
     )),
@@ -94,6 +106,7 @@ use crate::state::AppState;
         (name = "models", description = "Model management endpoints"),
         (name = "chat", description = "Chat completion endpoints"),
         (name = "completions", description = "Text completion endpoints"),
+        (name = "Anthropic", description = "Anthropic Messages API endpoints"),
         (name = "embeddings", description = "Embedding endpoints"),
         (name = "responses", description = "Responses API endpoints"),
         (name = "audio", description = "Audio transcription and speech endpoints"),
@@ -174,6 +187,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/v1/audio/transcriptions",
             axum::routing::post(audio::transcriptions),
         )
+        .route("/v1/messages", axum::routing::post(anthropic::messages))
         .route("/v1/audio/speech", axum::routing::post(audio::speech))
         .route("/v1/usage", axum::routing::get(usage::usage))
         .route("/v1/usage/recent", axum::routing::get(usage::recent_usage))

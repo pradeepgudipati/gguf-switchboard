@@ -153,7 +153,7 @@ fn test_embedding_request_serialization() {
     let request = EmbeddingRequest {
         model: "test-model".to_string(),
         input: EmbeddingInput::Multiple(vec!["hello".to_string(), "world".to_string()]),
-        encoding_format: None,
+        encoding_format: "float".to_string(),
         dimensions: None,
         user: None,
     };

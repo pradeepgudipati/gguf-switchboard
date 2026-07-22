@@ -1,3 +1,4 @@
+pub mod anthropic;
 pub mod audio;
 pub mod chat;
 pub mod completions;

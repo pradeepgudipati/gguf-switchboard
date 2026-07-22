@@ -3,6 +3,10 @@ use utoipa::ToSchema;
 
 use super::Usage;
 
+fn default_encoding_format() -> String {
+    "float".to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 #[schema(example = json!({
     "model": "gemma-4-e4b",
@@ -11,8 +15,10 @@ use super::Usage;
 pub struct EmbeddingRequest {
     pub model: String,
     pub input: EmbeddingInput,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub encoding_format: Option<String>,
+    /// Embedding format: `"float"` (default) or `"base64"`.
+    /// Always serialized so backends never see null / missing.
+    #[serde(default = "default_encoding_format")]
+    pub encoding_format: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dimensions: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
