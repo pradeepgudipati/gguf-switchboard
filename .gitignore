@@ -29,3 +29,4 @@ models.local.json
 #.idea/
 /target-docker-arm64
 local_commands.md
+.worktrees/
