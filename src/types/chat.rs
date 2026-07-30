@@ -274,4 +274,22 @@ mod tests {
         assert_eq!(delta.content.as_deref(), Some("Thinking..."));
         assert_eq!(delta.reasoning_content.as_deref(), Some("Thinking..."));
     }
+
+    #[test]
+    fn preserves_streaming_tool_call_index() {
+        let delta: ChatDelta = serde_json::from_value(serde_json::json!({
+            "tool_calls": [{
+                "index": 1,
+                "id": "call_2",
+                "type": "function",
+                "function": {
+                    "name": "get_time",
+                    "arguments": "{\"timezone\":"
+                }
+            }]
+        }))
+        .unwrap();
+
+        assert_eq!(delta.tool_calls.unwrap()[0].index, Some(1));
+    }
 }

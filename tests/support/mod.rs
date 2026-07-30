@@ -1,13 +1,17 @@
+#![allow(dead_code)]
+
 use axum::Json;
 use axum::Router;
-use axum::http::StatusCode;
+use axum::body::Body;
+use axum::http::{Response, StatusCode, header};
 use axum::response::IntoResponse;
-use axum::routing::get;
+use axum::routing::{get, post};
 use gguf_switchboard::config::Config;
 use gguf_switchboard::scheduler::Scheduler;
 use serde_json::json;
 use std::io::Write;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tempfile::NamedTempFile;
 
@@ -15,6 +19,7 @@ pub struct FakeLlamaServer {
     pub health_url: String,
     pub backend_url: String,
     pub healthy: Arc<AtomicBool>,
+    pub requests: Arc<Mutex<Vec<serde_json::Value>>>,
     shutdown: Option<tokio::sync::oneshot::Sender<()>>,
     task: tokio::task::JoinHandle<()>,
 }
@@ -23,19 +28,122 @@ impl FakeLlamaServer {
     pub async fn start() -> Self {
         let healthy = Arc::new(AtomicBool::new(true));
         let healthy_check = Arc::clone(&healthy);
-        let app = Router::new().route(
-            "/health",
-            get(move || {
-                let healthy_check = Arc::clone(&healthy_check);
-                async move {
-                    if healthy_check.load(Ordering::SeqCst) {
-                        (StatusCode::OK, Json(json!({ "status": "ok" }))).into_response()
-                    } else {
-                        StatusCode::SERVICE_UNAVAILABLE.into_response()
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let captured_requests = Arc::clone(&requests);
+        let app = Router::new()
+            .route(
+                "/health",
+                get(move || {
+                    let healthy_check = Arc::clone(&healthy_check);
+                    async move {
+                        if healthy_check.load(Ordering::SeqCst) {
+                            (StatusCode::OK, Json(json!({ "status": "ok" }))).into_response()
+                        } else {
+                            StatusCode::SERVICE_UNAVAILABLE.into_response()
+                        }
                     }
-                }
-            }),
-        );
+                }),
+            )
+            .route(
+                "/v1/chat/completions",
+                post(move |Json(body): Json<serde_json::Value>| {
+                    let captured_requests = Arc::clone(&captured_requests);
+                    async move {
+                        let stream = body["stream"].as_bool() == Some(true);
+                        captured_requests.lock().unwrap().push(body);
+                        if stream {
+                            let chunks = [
+                                json!({
+                                    "id": "chatcmpl_tool",
+                                    "object": "chat.completion.chunk",
+                                    "created": 1_700_000_000,
+                                    "model": "model-a",
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": {
+                                            "role": "assistant",
+                                            "tool_calls": [{
+                                                "index": 0,
+                                                "id": "call_weather",
+                                                "type": "function",
+                                                "function": {
+                                                    "name": "get_weather",
+                                                    "arguments": "{\"loc"
+                                                }
+                                            }]
+                                        },
+                                        "finish_reason": null
+                                    }]
+                                }),
+                                json!({
+                                    "id": "chatcmpl_tool",
+                                    "object": "chat.completion.chunk",
+                                    "created": 1_700_000_000,
+                                    "model": "model-a",
+                                    "choices": [{
+                                        "index": 0,
+                                        "delta": {
+                                            "tool_calls": [{
+                                                "index": 0,
+                                                "id": "",
+                                                "type": "",
+                                                "function": {
+                                                    "name": "",
+                                                    "arguments": "ation\":\"Pune\"}"
+                                                }
+                                            }]
+                                        },
+                                        "finish_reason": "tool_calls"
+                                    }],
+                                    "usage": {
+                                        "prompt_tokens": 10,
+                                        "completion_tokens": 5,
+                                        "total_tokens": 15
+                                    }
+                                }),
+                            ];
+                            let mut payload = chunks
+                                .iter()
+                                .map(|chunk| format!("data: {chunk}\n\n"))
+                                .collect::<String>();
+                            payload.push_str("data: [DONE]\n\n");
+                            return Response::builder()
+                                .status(StatusCode::OK)
+                                .header(header::CONTENT_TYPE, "text/event-stream")
+                                .body(Body::from(payload))
+                                .unwrap();
+                        }
+                        Json(json!({
+                            "id": "chatcmpl_tool",
+                            "object": "chat.completion",
+                            "created": 1_700_000_000,
+                            "model": "model-a",
+                            "choices": [{
+                                "index": 0,
+                                "message": {
+                                    "role": "assistant",
+                                    "content": null,
+                                    "tool_calls": [{
+                                        "id": "call_weather",
+                                        "type": "function",
+                                        "function": {
+                                            "name": "get_weather",
+                                            "arguments": "{\"location\":\"Pune\"}"
+                                        }
+                                    }]
+                                },
+                                "finish_reason": "tool_calls"
+                            }],
+                            "usage": {
+                                "prompt_tokens": 10,
+                                "completion_tokens": 5,
+                                "total_tokens": 15
+                            }
+                        }))
+                        .into_response()
+                    }
+                }),
+            );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind fake llama-server");
@@ -55,6 +163,7 @@ impl FakeLlamaServer {
             health_url,
             backend_url,
             healthy,
+            requests,
             shutdown: Some(shutdown),
             task,
         }

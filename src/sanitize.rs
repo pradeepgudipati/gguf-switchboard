@@ -121,6 +121,7 @@ mod tests {
                 )),
                 name: Some("string".to_string()),
                 tool_calls: Some(vec![ToolCall {
+                    index: None,
                     id: "string".to_string(),
                     r#type: "string".to_string(),
                     function: FunctionCall {
