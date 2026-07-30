@@ -147,6 +147,7 @@ mod tests {
                     name: "string".to_string(),
                     description: Some("string".to_string()),
                     parameters: Some(serde_json::Value::String("string".to_string())),
+                    strict: None,
                 },
             }]),
             tool_choice: Some(serde_json::Value::String("string".to_string())),

@@ -336,6 +336,7 @@ pub fn to_openai_request(req: &MessagesRequest) -> ChatCompletionRequest {
                         name: t.name.clone(),
                         description: t.description.clone(),
                         parameters: Some(t.input_schema.clone()),
+                        strict: None,
                     },
                 })
                 .collect()
