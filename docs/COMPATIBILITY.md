@@ -13,7 +13,7 @@ gguf-switchboard forwards requests to `llama-server`. Compatibility depends on b
 | `POST /v1/chat/completions` | Supported | Streaming and non-streaming |
 | `POST /v1/completions` | Supported | Streaming and non-streaming |
 | `POST /v1/embeddings` | Supported | Depends on model/backend |
-| `POST /v1/responses` | Partial | Mapped to chat completions internally |
+| `POST /v1/responses` | Partial | Mapped to chat completions; function tools/calls and strict SSE events supported |
 | `POST /v1/audio/transcriptions` | Partial | Proxied when backend exposes endpoint |
 | `POST /v1/audio/speech` | Partial | Proxied when backend exposes endpoint |
 | `GET /health`, `GET /status` | Supported | Includes `llama_server_version` when detected |
@@ -24,8 +24,10 @@ gguf-switchboard forwards requests to `llama-server`. Compatibility depends on b
 
 | Feature | Status | Notes |
 |---------|--------|-------|
-| SSE streaming | Supported | `[DONE]` terminator emitted |
-| Tool calling | Untested | Passed through if backend supports |
+| SSE streaming | Supported | Chat Completions emits `[DONE]`; Responses terminates after `response.completed` |
+| Chat Completions tool calling | Supported | Passed through when the model and llama.cpp support it |
+| Responses function tools | Supported | Function definitions and `tool_choice` translated to Chat Completions; function calls returned as top-level output items |
+| Responses built-in/hosted tools | Not supported | Function tools only |
 | `response_format` / JSON mode | Untested | Depends on llama-server |
 | Structured outputs | Not supported | — |
 | Reasoning fields | Partial | `reasoning_content` promoted in chat types |

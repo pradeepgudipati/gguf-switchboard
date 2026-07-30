@@ -109,6 +109,36 @@ fn to_chat_request(request: &ResponseRequest) -> Result<ChatCompletionRequest, R
                 .collect::<Result<Vec<_>, RuntimeError>>()
         })
         .transpose()?;
+    let tool_choice = match request.tool_choice.as_ref() {
+        None => None,
+        Some(serde_json::Value::String(choice))
+            if matches!(choice.as_str(), "none" | "auto" | "required") =>
+        {
+            Some(serde_json::Value::String(choice.clone()))
+        }
+        Some(serde_json::Value::Object(choice))
+            if choice.get("type").and_then(serde_json::Value::as_str) == Some("function") =>
+        {
+            let name = choice
+                .get("name")
+                .and_then(serde_json::Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .ok_or_else(|| {
+                    RuntimeError::InvalidRequest(
+                        "function tool_choice must include a non-empty name".to_string(),
+                    )
+                })?;
+            Some(serde_json::json!({
+                "type": "function",
+                "function": {"name": name}
+            }))
+        }
+        Some(_) => {
+            return Err(RuntimeError::InvalidRequest(
+                "unsupported tool_choice for Responses API function tools".to_string(),
+            ));
+        }
+    };
 
     Ok(ChatCompletionRequest {
         model: request.model.clone(),
@@ -124,7 +154,7 @@ fn to_chat_request(request: &ResponseRequest) -> Result<ChatCompletionRequest, R
         logit_bias: None,
         user: request.user.clone(),
         tools,
-        tool_choice: request.tool_choice.clone(),
+        tool_choice,
         seed: None,
         response_format: request.response_format.clone(),
         chat_template_kwargs: None,
@@ -738,6 +768,25 @@ mod tests {
             }))
         );
         assert_eq!(chat.tool_choice, Some(json!("auto")));
+    }
+
+    #[test]
+    fn translates_named_function_tool_choice() {
+        let mut request = function_request();
+        request.tool_choice = Some(json!({
+            "type": "function",
+            "name": "get_weather"
+        }));
+
+        let chat = to_chat_request(&request).unwrap();
+
+        assert_eq!(
+            chat.tool_choice,
+            Some(json!({
+                "type": "function",
+                "function": {"name": "get_weather"}
+            }))
+        );
     }
 
     #[test]
