@@ -121,6 +121,7 @@ mod tests {
                 )),
                 name: Some("string".to_string()),
                 tool_calls: Some(vec![ToolCall {
+                    index: None,
                     id: "string".to_string(),
                     r#type: "string".to_string(),
                     function: FunctionCall {
@@ -147,6 +148,7 @@ mod tests {
                     name: "string".to_string(),
                     description: Some("string".to_string()),
                     parameters: Some(serde_json::Value::String("string".to_string())),
+                    strict: None,
                 },
             }]),
             tool_choice: Some(serde_json::Value::String("string".to_string())),

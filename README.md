@@ -26,7 +26,7 @@ A **[llama-swap](https://github.com/mostlygeek/llama-swap) alternative in Rust**
 Also included:
 
 - **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/responses`, `/v1/models`, `/v1/models/registry.json`, `/v1/audio/*`
-- **Tool calling** — `tools` / `tool_choice` / `tool_calls` are accepted and forwarded to `llama-server`; actual behavior depends on the model and llama.cpp build (see [COMPATIBILITY](docs/COMPATIBILITY.md))
+- **Tool calling** — Chat Completions forwards `tools` / `tool_choice` / `tool_calls`; the Responses API translates function tools, function calls, and strict streaming events to/from `llama-server`. Actual model behavior depends on the model and llama.cpp build (see [COMPATIBILITY](docs/COMPATIBILITY.md))
 - **Swagger UI** — Try-it-out at `http://localhost:9090/swagger-ui/` (live model dropdown from the registry)
 - **Auto-discovery** — Scans GGUF dirs with a cheap validation ladder (filename → header → metadata); sidecars skipped
 - **Single-slot hot-swap** — One resident model; switches drain in-flight requests; failed switches roll back

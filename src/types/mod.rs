@@ -128,6 +128,8 @@ pub struct FunctionCall {
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct ToolCall {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<usize>,
     pub id: String,
     pub r#type: String,
     pub function: FunctionCall,
