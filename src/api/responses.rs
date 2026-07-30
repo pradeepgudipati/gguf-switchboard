@@ -15,7 +15,8 @@ use crate::proxy::GuardedStream;
 use crate::state::AppState;
 use crate::types::chat::{ChatCompletionRequest, ChatMessage, Content, Role};
 use crate::types::responses::{
-    ResponseContent, ResponseInput, ResponseOutput, ResponseRequest, ResponseResult, ResponseUsage,
+    ResponseContent, ResponseInput, ResponseMessageOutput, ResponseOutput, ResponseRequest,
+    ResponseResult, ResponseUsage,
 };
 
 struct ActiveGuard;
@@ -153,15 +154,15 @@ pub async fn responses(
                 } else {
                     "in_progress"
                 };
-                let output = vec![ResponseOutput {
-                    r#type: "message".to_string(),
+                let output = vec![ResponseOutput::Message(ResponseMessageOutput {
                     id: format!("msg_{}", Uuid::new_v4().simple()),
+                    status: status.to_string(),
                     role: "assistant".to_string(),
-                    content: vec![ResponseContent {
-                        r#type: "output_text".to_string(),
+                    content: vec![ResponseContent::OutputText {
                         text: text.to_string(),
+                        annotations: Vec::new(),
                     }],
-                }];
+                })];
                 let chunk_json = serde_json::json!({
                     "id": response_id,
                     "object": "response",
@@ -224,15 +225,15 @@ pub async fn responses(
             object: "response".to_string(),
             created_at: Utc::now().timestamp(),
             model: model_id,
-            output: vec![ResponseOutput {
-                r#type: "message".to_string(),
+            output: vec![ResponseOutput::Message(ResponseMessageOutput {
                 id: format!("msg_{}", Uuid::new_v4().simple()),
+                status: "completed".to_string(),
                 role: "assistant".to_string(),
-                content: vec![ResponseContent {
-                    r#type: "output_text".to_string(),
+                content: vec![ResponseContent::OutputText {
                     text: text.to_string(),
+                    annotations: Vec::new(),
                 }],
-            }],
+            })],
             usage: ResponseUsage {
                 input_tokens: chat_response.usage.prompt_tokens,
                 output_tokens: chat_response.usage.completion_tokens,
