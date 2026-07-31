@@ -4,9 +4,9 @@
 
 **One API. Any GGUF Model. Seamless local LLM switching.**
 
-A lightweight OpenAI-compatible API server that loads, manages, and switches between GGUF models on a single GPU. Point any OpenAI SDK or tool at it (Python, Node, Cursor, Cline, Continue) — no manual process or port juggling.
+A lightweight OpenAI- and Anthropic-compatible API server that loads, manages, and switches between GGUF models on a single GPU. Point any OpenAI or Anthropic SDK or tool at it (Python, Node, Cursor, Cline, Continue) — no manual process or port juggling.
 
-A **[llama-swap](https://github.com/mostlygeek/llama-swap) alternative in Rust** with system memory-pressure eviction, OOM-only context fallback, Swagger UI, and built-in usage tracking.
+A **[llama-swap](https://github.com/mostlygeek/llama-swap) alternative in Rust** with system memory-pressure eviction, OOM-only context fallback, Swagger UI, Hugging Face metadata enrichment, and built-in usage tracking.
 
 **Requires** [llama.cpp](https://github.com/ggerganov/llama.cpp) `llama-server` and GGUF model files — see [Prerequisites](#prerequisites).
 
@@ -26,9 +26,13 @@ A **[llama-swap](https://github.com/mostlygeek/llama-swap) alternative in Rust**
 Also included:
 
 - **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/responses`, `/v1/models`, `/v1/models/registry.json`, `/v1/audio/*`
+- **Anthropic Messages API** — `POST /v1/messages` (stream + non-stream); translated onto the loaded `llama-server` OpenAI backend
 - **Tool calling** — Chat Completions forwards `tools` / `tool_choice` / `tool_calls`; the Responses API translates function tools, function calls, and strict streaming events to/from `llama-server`. Actual model behavior depends on the model and llama.cpp build (see [COMPATIBILITY](docs/COMPATIBILITY.md))
-- **Swagger UI** — Try-it-out at `http://localhost:9090/swagger-ui/` (live model dropdown from the registry)
+- **Swagger UI** — Try-it-out at `http://localhost:9090/swagger-ui/` (live model dropdown, Rescan Models, hides chat vs embedding endpoints by selected model kind)
 - **Auto-discovery** — Scans GGUF dirs with a cheap validation ladder (filename → header → metadata); sidecars skipped
+- **Live model rescan** — `POST /v1/models/refresh` plus a configurable daily watcher (`models_rescan_interval_secs`); merges new GGUFs without a full redeploy
+- **HF metadata enrichment** — fills empty `description` / context / VRAM / `capabilities` / `hf_repo` from Hugging Face on launch and rescan (`sync-hf-metadata` CLI also available)
+- **Kind-aware routing** — chat / completions / messages / responses require chat-like kinds; embeddings require `embedding` (and pass `--embeddings` to `llama-server`)
 - **Single-slot hot-swap** — One resident model; switches drain in-flight requests; failed switches roll back
 - **Memory-pressure eviction** — Unloads when system RAM crosses the critical threshold
 - **Auto GPU layers (`auto_ngl`)** — Opt-in: at load, pick `-ngl` from free VRAM + GGUF size (manual `ngl` / `extra_args` still win)
@@ -39,18 +43,19 @@ Also included:
 ### How it works
 
 ```
-Models (GGUF)                    OpenAI endpoints
+Models (GGUF)                    API endpoints
  Mistral / Llama / Phi / …   →   /v1/chat/completions
          ↓                       /v1/completions
    gguf-switchboard  ─────────▶  /v1/embeddings
    (single-slot swap)            /v1/responses, /v1/audio/*
+                                 /v1/messages (Anthropic)
 ```
 
 Request for model `B` while `A` is loaded → drain → unload `A` → load `B` → forward. After `idle_timeout`, the priority model warms back up. Details in [Architecture](docs/ARCHITECTURE.md).
 
 ## Why gguf-switchboard
 
-When running local LLMs you usually juggle `llama-server` processes, ports, and GPU memory by hand. gguf-switchboard is a **llama-swap-style swap proxy in Rust** for constrained GPUs: memory-pressure eviction, OOM context fallback, idle priority model, and usage tracking — one OpenAI endpoint, llama.cpp only.
+When running local LLMs you usually juggle `llama-server` processes, ports, and GPU memory by hand. gguf-switchboard is a **llama-swap-style swap proxy in Rust** for constrained GPUs: memory-pressure eviction, OOM context fallback, idle priority model, HF-enriched registry metadata, and usage tracking — one OpenAI/Anthropic endpoint, llama.cpp only.
 
 Full landscape table and vs llama-swap feature matrix: **[docs/COMPARISON.md](docs/COMPARISON.md)**.
 
@@ -164,6 +169,7 @@ cd ~/gguf-switchboard   # or wherever you cloned
 | Pull + rebuild + restart | `./deploy.sh` |
 | Rebuild only (no `git pull`) | `./deploy.sh --skip-pull` |
 | Pick up new GGUF files (merge registry) | `./deploy.sh --refresh-models` |
+| Live rescan while running | `curl -X POST http://localhost:9090/v1/models/refresh` (or Swagger **Rescan Models**) |
 | Restart without rebuild | `sudo systemctl restart gguf-switchboard` |
 
 **Important:**
