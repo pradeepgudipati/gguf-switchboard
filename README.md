@@ -32,6 +32,7 @@ Also included:
 - **Auto-discovery** — Scans GGUF dirs with a cheap validation ladder (filename → header → metadata); sidecars skipped
 - **Live model rescan** — `POST /v1/models/refresh` plus a configurable daily watcher (`models_rescan_interval_secs`); merges new GGUFs without a full redeploy
 - **HF metadata enrichment** — fills empty `description` / context / VRAM / `capabilities` / `hf_repo` from Hugging Face on launch and rescan (`sync-hf-metadata` CLI also available)
+- **Model management** — `models search`, `models files`, and `models pull` for one-command GGUF discovery, download, validation, and registry from Hugging Face
 - **Kind-aware routing** — chat / completions / messages / responses require chat-like kinds; embeddings require `embedding` (and pass `--embeddings` to `llama-server`)
 - **Single-slot hot-swap** — One resident model; switches drain in-flight requests; failed switches roll back
 - **Memory-pressure eviction** — Unloads when system RAM crosses the critical threshold
@@ -112,10 +113,25 @@ llama_server = "/path/to/llama-server"
 
 #### Install GGUF models
 
+Search, browse, and download GGUF models from Hugging Face in one step:
+
 ```bash
 mkdir -p ~/models
-# Download any GGUF (Hugging Face, etc.) into ~/models
-# Example layout:
+
+# Search for models
+gguf-switchboard models search "Qwen3.5 9B"
+
+# Browse available files in a repo
+gguf-switchboard models files lmstudio-community/Qwen3.5-9B-GGUF
+
+# Download, validate, and register a model
+gguf-switchboard models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --dir ~/models
+```
+
+Or download manually — any `.gguf` file in `~/models` works:
+
+```bash
+# Example layout after manual download:
 #   ~/models/Qwen3.5-9B-Q4_K_M.gguf
 #   ~/models/gemma-4-E4B-it-Q4_K_M.gguf
 ```

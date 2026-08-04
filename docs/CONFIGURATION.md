@@ -252,6 +252,32 @@ Set `models_dir` in `models.toml` or pass `MODELS_DIR` when models live outside 
 MODELS_DIR=/path/to/models ./deploy.sh --refresh-models
 ```
 
+#### `models` CLI (search, files, pull)
+
+Search, browse, and download GGUF models from Hugging Face:
+
+```bash
+# Search HF Hub for GGUF models
+./gguf-switchboard models search "Qwen3.5 9B"
+
+# List .gguf files in a repo (with size and quantization)
+./gguf-switchboard models files lmstudio-community/Qwen3.5-9B-GGUF
+
+# Download, validate, and register a model in one step
+./gguf-switchboard models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M
+
+# Specify a destination directory and registry file
+./gguf-switchboard models pull bartowski/Qwen3.5-9B-GGUF --quant Q4_K_M --dir /models --registry models.toml
+```
+
+`models pull` performs the complete workflow: fetches the repo tree, matches by `--quant` (case-insensitive), streams the download with progress, validates the GGUF header, generates an alias, and merges into `models.toml`. The running server picks up the new entry on the next `POST /v1/models/refresh` or restart.
+
+Set `HF_TOKEN` in the environment for gated models:
+
+```bash
+HF_TOKEN=hf_... ./gguf-switchboard models pull meta-llama/Llama-3-70B-GGUF --quant Q4_K_M
+```
+
 #### `discover-models`, `sync-hf-metadata`, and `export-registry` CLI
 
 Generate or refresh `models.toml` without a full deploy:
