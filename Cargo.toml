@@ -1,6 +1,6 @@
 [package]
 name = "gguf-switchboard"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 description = "llama-swap alternative in Rust — OpenAI-compatible GGUF runtime with memory-pressure eviction, OOM context fallback, and usage tracking"
 license = "MIT"
