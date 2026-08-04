@@ -53,7 +53,10 @@ pub async fn cmd_search(args: &[String]) -> Result<(), Box<dyn std::error::Error
         return Ok(());
     }
 
-    println!("  {:<44} {:<6} {:<10} ARCH", "REPO", "FILES", "CONTEXT");
+    println!(
+        "  {:<44} {:<6} {:<10} {:<10} ARCH",
+        "REPO", "FILES", "SIZE", "CONTEXT"
+    );
     for hit in &hits {
         let id = hit.get("id").and_then(|v| v.as_str()).unwrap_or("?");
         let siblings = hit
@@ -69,18 +72,24 @@ pub async fn cmd_search(args: &[String]) -> Result<(), Box<dyn std::error::Error
                     .count()
             })
             .unwrap_or(0);
+        let size_mb = hit
+            .get("gguf")
+            .and_then(|g| g.get("total"))
+            .and_then(|v| v.as_u64())
+            .map(format_mb)
+            .unwrap_or_default();
         let context = hit
             .get("gguf")
             .and_then(|g| g.get("context_length"))
             .and_then(|v| v.as_u64())
-            .map(|v| v.to_string())
+            .map(|v| format!("{} tok", v))
             .unwrap_or_default();
         let arch = hit
             .get("gguf")
             .and_then(|g| g.get("architecture"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
-        println!("  {id:<44} {siblings:<6} {context:<10} {arch}");
+        println!("  {id:<44} {siblings:<6} {size_mb:<10} {context:<10} {arch}");
     }
 
     Ok(())
@@ -458,6 +467,12 @@ fn infer_kind_from_filename(filename: &str) -> String {
     } else {
         "chat".to_string()
     }
+}
+
+/// Format bytes as MB (e.g. "5243 MB").
+fn format_mb(bytes: u64) -> String {
+    let mb = (bytes as f64 / 1_000_000.0).ceil() as u64;
+    format!("{mb} MB")
 }
 
 /// Deduplicate an alias against a set of used names, appending -2, -3, etc.
