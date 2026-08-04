@@ -6,7 +6,9 @@ use tracing::{info, warn};
 use std::path::PathBuf;
 
 use gguf_switchboard::api;
-use gguf_switchboard::config::{Config, ModelsRegistry, sync_registry_from_hf};
+use gguf_switchboard::config::{
+    Config, ModelsRegistry, cmd_files, cmd_pull, cmd_search, sync_registry_from_hf,
+};
 use gguf_switchboard::db::TokenDb;
 use gguf_switchboard::metrics;
 use gguf_switchboard::scheduler::Scheduler;
@@ -38,6 +40,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.len() >= 3 && args[1] == "export-registry" {
         return run_export_registry(&args);
+    }
+
+    if args.len() >= 2 && args[1] == "models" {
+        return run_models_cmd(&args).await;
     }
 
     let config_path = args
@@ -304,6 +310,22 @@ fn run_export_registry(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     registry.write_json(&output)?;
     println!("Exported {output}");
     Ok(())
+}
+
+async fn run_models_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let sub = args
+        .get(2)
+        .ok_or("models: missing subcommand (search, files, pull)")?;
+
+    let sub_args: Vec<String> = args[2..].to_vec();
+    match sub.as_str() {
+        "search" => cmd_search(&sub_args).await,
+        "files" => cmd_files(&sub_args).await,
+        "pull" => cmd_pull(&sub_args).await,
+        other => Err(format!(
+            "models: unknown subcommand '{other}'\n\nUsage:\n  gguf-switchboard models search <query> [--limit N]\n  gguf-switchboard models files <repo-id>\n  gguf-switchboard models pull <repo-id> [--quant QUANT] [--dir PATH]"
+        ).into()),
+    }
 }
 
 fn json_sibling_path_for_output(toml_path: &str) -> String {

@@ -11,7 +11,7 @@ fn default_registry_version() -> u32 {
 }
 
 /// Simplified model registry — short aliases instead of full GGUF paths in API requests.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ModelsRegistry {
     #[serde(default = "default_registry_version")]
     pub version: u32,
@@ -390,7 +390,7 @@ const GGUF_METADATA_UINT64: u32 = 10;
 const GGUF_METADATA_INT64: u32 = 11;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum GgufSkipReason {
+pub enum GgufSkipReason {
     BadName,
     BadMagic,
     BadVersion,
@@ -417,12 +417,12 @@ impl std::fmt::Display for GgufSkipReason {
 }
 
 #[derive(Debug, Default)]
-struct GgufMetadata {
-    version: u32,
-    tensor_count: u64,
-    architecture: Option<String>,
-    file_type: Option<String>,
-    block_count: Option<u64>,
+pub struct GgufMetadata {
+    pub version: u32,
+    pub tensor_count: u64,
+    pub architecture: Option<String>,
+    pub file_type: Option<String>,
+    pub block_count: Option<u64>,
 }
 
 impl GgufMetadata {
@@ -620,7 +620,7 @@ fn inspect_gguf_metadata(path: &Path) -> Result<GgufMetadata, GgufSkipReason> {
 }
 
 /// Cheap prefix-only validation: filename → header → architecture/type metadata.
-fn validate_gguf_model(path: &Path) -> Result<GgufMetadata, GgufSkipReason> {
+pub fn validate_gguf_model(path: &Path) -> Result<GgufMetadata, GgufSkipReason> {
     if !is_discoverable_gguf_name(path) {
         return Err(GgufSkipReason::BadName);
     }

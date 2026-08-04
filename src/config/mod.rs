@@ -1,4 +1,6 @@
+pub mod hf_download;
 mod hf_sync;
+pub mod models_cmd;
 mod models_registry;
 
 use std::collections::HashMap;
@@ -7,6 +9,7 @@ use std::path::Path;
 use serde::Deserialize;
 
 pub use hf_sync::{SyncSummary, sync_registry_from_hf};
+pub use models_cmd::{cmd_files, cmd_pull, cmd_search};
 pub use models_registry::{ModelsRegistry, RescanResult};
 
 use crate::errors::RuntimeError;
