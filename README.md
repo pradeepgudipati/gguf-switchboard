@@ -250,6 +250,41 @@ curl -s http://localhost:9090/status | jq .
 curl -s http://localhost:9090/v1/models | jq '.data[].id'
 ```
 
+### Shell alias (optional)
+
+Add a short `gs` alias so you can type `gs` instead of `gguf-switchboard`. `deploy.sh` offers to add this automatically on Linux.
+
+**Linux (bash):**
+
+```bash
+echo "alias gs='gguf-switchboard'" >> ~/.bashrc
+source ~/.bashrc
+```
+
+**Linux / macOS (zsh):**
+
+```bash
+echo "alias gs='gguf-switchboard'" >> ~/.zshrc
+source ~/.zshrc
+```
+
+**Windows (PowerShell):**
+
+```powershell
+# Add to your PowerShell profile
+if (!(Test-Path $PROFILE)) { New-Item -Path $PROFILE -Force }
+Add-Content $PROFILE "Set-Alias -Name gs -Value gguf-switchboard"
+. $PROFILE
+```
+
+After that:
+
+```bash
+gs models search "Qwen3.5"
+gs models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M
+gs config.toml
+```
+
 ### Troubleshooting first install
 
 | Symptom | Likely fix |

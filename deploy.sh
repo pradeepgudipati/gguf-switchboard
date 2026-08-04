@@ -337,6 +337,10 @@ Environment:
   MODELS_DIR                   Optional override dirs for discover-models (comma-separated)
   GGUF_SWITCHBOARD_DIR         Repo checkout path (default: ~/gguf-switchboard)
   GGUF_SWITCHBOARD_CONFIG_DIR  Config directory (default: repo checkout)
+
+Post-install:
+  Adds a 'gs' alias to your shell rc file (bash/zsh) when accepted.
+  Windows users: add `Set-Alias -Name gs -Value gguf-switchboard` to $PROFILE.
 EOF
             exit 0
             ;;
@@ -454,6 +458,25 @@ sudo cp target/release/gguf-switchboard /usr/local/bin/
 
 echo "==> Starting service..."
 sudo systemctl start gguf-switchboard
+
+# Offer to add the gs shell alias
+SHELL_RC=""
+if [[ "${SHELL:-}" == */zsh ]]; then
+    SHELL_RC="$HOME/.zshrc"
+elif [[ "${SHELL:-}" == */bash ]]; then
+    SHELL_RC="$HOME/.bashrc"
+fi
+
+if [[ -n "$SHELL_RC" ]] && ! grep -q "alias gs='gguf-switchboard'" "$SHELL_RC" 2>/dev/null; then
+    read -r -p "Add 'gs' alias to $SHELL_RC? [Y/n] " REPLY
+    REPLY="${REPLY:-Y}"
+    if [[ "$REPLY" =~ ^[Yy]$ ]]; then
+        echo "" >> "$SHELL_RC"
+        echo "# gguf-switchboard shortcut" >> "$SHELL_RC"
+        echo "alias gs='gguf-switchboard'" >> "$SHELL_RC"
+        echo "==> Added alias to $SHELL_RC (run 'source $SHELL_RC' or open a new terminal)"
+    fi
+fi
 
 # Resolve bind address from config (default 0.0.0.0:9090)
 BIND_ADDR="$(read_config "$CONFIG_FILE" | grep -E '^bind\s*=' | head -1 | sed -E 's/^bind\s*=\s*"([^"]+)".*/\1/' || true)"
