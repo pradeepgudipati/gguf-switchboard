@@ -28,7 +28,7 @@ The aria2 invocation uses resume, split downloads, a 64 MiB minimum split size, 
 
 ## Authentication and safety
 
-When `HF_TOKEN` is set, pass an HTTP `Authorization: Bearer` header to aria2 as a single process argument. Never interpolate command text through a shell and never print the token.
+For public downloads without `HF_TOKEN`, use aria2 acceleration. When `HF_TOKEN` is set, use the native downloader so the token remains in request headers and cannot leak through aria2 command-line arguments or the process list. Never interpolate command text through a shell and never print the token.
 
 Write partial state in the destination directory using aria2's standard control file. Do not register a model until the downloader exits successfully and validation completes.
 
@@ -37,6 +37,12 @@ Write partial state in the destination directory using aria2's standard control 
 Preserve the existing post-download GGUF metadata validation and registry update. Verify the downloaded size against Hugging Face tree metadata before GGUF validation. When Hugging Face supplies an LFS SHA-256 digest, verify it before registration.
 
 Only a fully downloaded, size-correct, digest-correct, valid GGUF file may be added to the model registry.
+
+## Post-download refresh
+
+After successful validation and registration, call `POST /v1/models/refresh` on the configured running server. Do not start a second server process and do not invoke the `ggs` shell alias from inside the application.
+
+If the server is unavailable or rejects the refresh, keep the completed download and registry update, print a warning, and tell the user to start or restart gguf-switchboard. A refresh failure must not turn a verified download into a failed pull operation.
 
 ## Deployment
 
@@ -50,10 +56,12 @@ Regression tests cover:
 
 - `--connections` parsing and validation.
 - aria2 argument construction, including destination, filename, split settings, resume, and Linux allocation.
-- token header propagation without token logging.
+- native fallback for authenticated downloads.
 - native fallback when aria2 is unavailable.
 - failed aria2 execution does not trigger a second native download.
 - expected-size mismatch prevents registration.
+- successful registration requests a live model refresh.
+- unavailable or failed refresh reports a warning without failing the completed pull.
 - deploy dependency installation includes `aria2`.
 
 Run the repository pre-commit gate after the focused tests.
