@@ -1,6 +1,7 @@
 //! CLI handlers for `gguf-switchboard models {search,files,pull}`.
 
 use std::collections::HashSet;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use serde_json::Value;
@@ -174,6 +175,7 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let mut quant: Option<String> = None;
     let mut dest_override: Option<String> = None;
     let mut models_file: Option<String> = None;
+    let mut connections: u16 = 8;
 
     let mut i = 1; // args[0] is "pull"
     while i < args.len() {
@@ -200,6 +202,14 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                     i += 2;
                 } else {
                     return Err("models pull: missing value for --registry".into());
+                }
+            }
+            "--connections" => {
+                if let Some(val) = args.get(i + 1) {
+                    connections = parse_connections(val)?;
+                    i += 2;
+                } else {
+                    return Err("models pull: missing value for --connections".into());
                 }
             }
             arg if arg.starts_with('-') => {
@@ -285,8 +295,12 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     println!("Repository: {repo}");
     println!("Selected: {}", selected.path);
     println!("Size: {}", format_bytes(selected.size));
-    println!("Destination: {}", dest_dir.join(&selected.path).display());
-    let downloaded = hf_download::download_file(&client, &repo, &selected.path, &dest_dir).await?;
+    let destination_name = Path::new(&selected.path)
+        .file_name()
+        .unwrap_or_else(|| selected.path.as_ref());
+    println!("Destination: {}", dest_dir.join(destination_name).display());
+    let downloaded =
+        hf_download::download_file_auto(&client, &repo, selected, &dest_dir, connections).await?;
 
     // 5. Validate GGUF.
     match validate_gguf_model(&downloaded) {
@@ -333,7 +347,7 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let already_registered = registry.models.iter().any(|e| e.file == file_ref);
     if already_registered {
         println!("✓ Already registered as: {alias}");
-        println!("✓ Available through /v1/models");
+        refresh_after_pull().await;
         return Ok(());
     }
 
@@ -354,9 +368,76 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
     registry.write(&registry_path)?;
     println!("✓ Registered as: {alias}");
-    println!("✓ Run `POST /v1/models/refresh` or restart the server to load");
+    refresh_after_pull().await;
 
     Ok(())
+}
+
+fn parse_connections(value: &str) -> Result<u16, &'static str> {
+    let connections = value
+        .parse::<u16>()
+        .map_err(|_| "models pull: --connections must be an integer from 1 to 16")?;
+    if !(1..=16).contains(&connections) {
+        return Err("models pull: --connections must be an integer from 1 to 16");
+    }
+    Ok(connections)
+}
+
+fn refresh_url_from_config(config_path: &Path) -> Result<String, RuntimeError> {
+    let raw = std::fs::read_to_string(config_path).map_err(|e| {
+        RuntimeError::ConfigError(format!("Cannot read '{}': {e}", config_path.display()))
+    })?;
+    let config: toml::Value = toml::from_str(&raw)
+        .map_err(|e| RuntimeError::ConfigError(format!("Invalid config.toml: {e}")))?;
+    let bind = config
+        .get("bind")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| RuntimeError::ConfigError("config.toml has no bind address".to_string()))?;
+    let client_address = match bind.parse::<SocketAddr>() {
+        Ok(address) if address.ip().is_unspecified() => {
+            SocketAddr::new(IpAddr::from([127, 0, 0, 1]), address.port()).to_string()
+        }
+        _ => bind.to_string(),
+    };
+    Ok(format!("http://{client_address}/v1/models/refresh"))
+}
+
+async fn refresh_running_server(
+    client: &reqwest::Client,
+    config_path: &Path,
+) -> Result<(), RuntimeError> {
+    let url = refresh_url_from_config(config_path)?;
+    let response = client.post(&url).send().await.map_err(RuntimeError::from)?;
+    if !response.status().is_success() {
+        return Err(RuntimeError::ProxyError(format!(
+            "model refresh failed: HTTP {}",
+            response.status()
+        )));
+    }
+    Ok(())
+}
+
+async fn refresh_after_pull() {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!(
+                "Warning: model downloaded and registered, but refresh setup failed: {error}"
+            );
+            eprintln!("Start or restart gguf-switchboard to load the updated registry.");
+            return;
+        }
+    };
+    match refresh_running_server(&client, Path::new("config.toml")).await {
+        Ok(()) => println!("✓ Running server refreshed"),
+        Err(error) => {
+            eprintln!("Warning: model downloaded and registered, but live refresh failed: {error}");
+            eprintln!("Start or restart gguf-switchboard to load the updated registry.");
+        }
+    }
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -487,5 +568,36 @@ fn dedupe_alias(alias: &str, used: &HashSet<String>) -> String {
             return candidate;
         }
         counter += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_connections, refresh_url_from_config};
+
+    #[test]
+    fn connections_accept_supported_range() {
+        assert_eq!(parse_connections("1"), Ok(1));
+        assert_eq!(parse_connections("8"), Ok(8));
+        assert_eq!(parse_connections("16"), Ok(16));
+    }
+
+    #[test]
+    fn connections_reject_invalid_values() {
+        assert!(parse_connections("0").is_err());
+        assert!(parse_connections("17").is_err());
+        assert!(parse_connections("fast").is_err());
+    }
+
+    #[test]
+    fn refresh_url_normalizes_unspecified_bind_address() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, "bind = \"0.0.0.0:9090\"\n").unwrap();
+
+        assert_eq!(
+            refresh_url_from_config(&config).unwrap(),
+            "http://127.0.0.1:9090/v1/models/refresh"
+        );
     }
 }

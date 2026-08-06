@@ -381,7 +381,7 @@ if ! command -v llama-server >/dev/null 2>&1; then
 fi
 
 if command -v apt-get >/dev/null 2>&1; then
-    APT_PKGS=(libssl-dev pkg-config build-essential cmake curl git jq)
+    APT_PKGS=(libssl-dev pkg-config build-essential cmake curl git jq aria2)
     NEED_APT=false
     for pkg in "${APT_PKGS[@]}"; do
         if ! dpkg -s "$pkg" >/dev/null 2>&1; then

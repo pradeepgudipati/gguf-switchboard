@@ -126,7 +126,12 @@ gguf-switchboard models files lmstudio-community/Qwen3.5-9B-GGUF
 
 # Download, validate, and register a model
 gguf-switchboard models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --dir ~/models
+
+# Optional: tune parallel aria2 connections (default 8, maximum 16)
+gguf-switchboard models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --connections 8
 ```
+
+Public downloads automatically use `aria2c` when available, then verify the expected size, Hugging Face LFS checksum, and GGUF metadata before registration. Authenticated downloads using `HF_TOKEN`, or systems without `aria2c`, use the native downloader. A successful pull refreshes a running gguf-switchboard server automatically.
 
 Or download manually — any `.gguf` file in `~/models` works:
 
@@ -252,19 +257,19 @@ curl -s http://localhost:9090/v1/models | jq '.data[].id'
 
 ### Shell alias (optional)
 
-Add a short `gs` alias so you can type `gs` instead of `gguf-switchboard`. `deploy.sh` offers to add this automatically on Linux.
+Add a short `ggs` alias so you can type `ggs` instead of `gguf-switchboard`. `deploy.sh` offers to add this automatically on Linux without conflicting with the common `gs='git status'` alias.
 
 **Linux (bash):**
 
 ```bash
-echo "alias gs='gguf-switchboard'" >> ~/.bashrc
+echo "alias ggs='gguf-switchboard'" >> ~/.bashrc
 source ~/.bashrc
 ```
 
 **Linux / macOS (zsh):**
 
 ```bash
-echo "alias gs='gguf-switchboard'" >> ~/.zshrc
+echo "alias ggs='gguf-switchboard'" >> ~/.zshrc
 source ~/.zshrc
 ```
 
@@ -273,16 +278,16 @@ source ~/.zshrc
 ```powershell
 # Add to your PowerShell profile
 if (!(Test-Path $PROFILE)) { New-Item -Path $PROFILE -Force }
-Add-Content $PROFILE "Set-Alias -Name gs -Value gguf-switchboard"
+Add-Content $PROFILE "Set-Alias -Name ggs -Value gguf-switchboard"
 . $PROFILE
 ```
 
 After that:
 
 ```bash
-gs models search "Qwen3.5"
-gs models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M
-gs config.toml
+ggs models search "Qwen3.5"
+ggs models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M
+ggs config.toml
 ```
 
 ### Troubleshooting first install
