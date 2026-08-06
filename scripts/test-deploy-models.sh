@@ -73,4 +73,7 @@ grep -q 'alias = "gemma-code"' "$merged_out"
 grep -q 'display_name = "Custom Gemma"' "$merged_out"
 grep -q 'priority = true' "$merged_out"
 
+grep -q "alias ggs='gguf-switchboard'" deploy.sh
+! grep -q "alias gs='gguf-switchboard'" deploy.sh
+
 echo "deploy models generation validation passed"

@@ -11,6 +11,11 @@ use tokio::io::AsyncWriteExt;
 use crate::errors::RuntimeError;
 
 const HF_MODELS_API: &str = "https://huggingface.co/api/models";
+const HF_BASE_URL: &str = "https://huggingface.co";
+
+fn download_url(repo: &str, filename: &str) -> String {
+    format!("{HF_BASE_URL}/{repo}/resolve/main/{filename}")
+}
 
 /// A single file entry from the HF repo tree API.
 #[derive(Debug, Clone, Deserialize)]
@@ -93,7 +98,7 @@ pub async fn download_file(
     filename: &str,
     dest_dir: &Path,
 ) -> Result<PathBuf, RuntimeError> {
-    let url = format!("{HF_MODELS_API}/{repo}/resolve/main/{filename}");
+    let url = download_url(repo, filename);
     let resp = client.get(&url).send().await.map_err(RuntimeError::from)?;
 
     if resp.status() == reqwest::StatusCode::NOT_FOUND {
@@ -182,5 +187,21 @@ pub fn format_bytes(bytes: u64) -> String {
         format!("{:.1} KB", b / KB)
     } else {
         format!("{bytes} B")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::download_url;
+
+    #[test]
+    fn download_url_uses_hugging_face_repository_route() {
+        assert_eq!(
+            download_url(
+                "unsloth/DeepSeek-R1-Distill-Llama-8B-GGUF",
+                "DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf",
+            ),
+            "https://huggingface.co/unsloth/DeepSeek-R1-Distill-Llama-8B-GGUF/resolve/main/DeepSeek-R1-Distill-Llama-8B-Q4_K_M.gguf"
+        );
     }
 }
