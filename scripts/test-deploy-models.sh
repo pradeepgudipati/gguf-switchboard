@@ -75,5 +75,6 @@ grep -q 'priority = true' "$merged_out"
 
 grep -q "alias ggs='gguf-switchboard'" deploy.sh
 ! grep -q "alias gs='gguf-switchboard'" deploy.sh
+grep -Eq 'APT_PKGS=.*\baria2\b' deploy.sh
 
 echo "deploy models generation validation passed"
