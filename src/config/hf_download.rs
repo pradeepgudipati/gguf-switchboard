@@ -300,7 +300,11 @@ async fn verify_download(
             }
             hasher.update(&buffer[..read]);
         }
-        let actual = format!("{:x}", hasher.finalize());
+        let actual = hasher
+            .finalize()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         if !actual.eq_ignore_ascii_case(expected) {
             return Err(RuntimeError::ConfigError(format!(
                 "Downloaded file SHA-256 mismatch: expected {expected}, got {actual}"

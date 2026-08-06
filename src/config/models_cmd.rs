@@ -347,7 +347,7 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let already_registered = registry.models.iter().any(|e| e.file == file_ref);
     if already_registered {
         println!("✓ Already registered as: {alias}");
-        refresh_after_pull(&client).await;
+        refresh_after_pull().await;
         return Ok(());
     }
 
@@ -368,7 +368,7 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
     registry.write(&registry_path)?;
     println!("✓ Registered as: {alias}");
-    refresh_after_pull(&client).await;
+    refresh_after_pull().await;
 
     Ok(())
 }
@@ -417,8 +417,21 @@ async fn refresh_running_server(
     Ok(())
 }
 
-async fn refresh_after_pull(client: &reqwest::Client) {
-    match refresh_running_server(client, Path::new("config.toml")).await {
+async fn refresh_after_pull() {
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => {
+            eprintln!(
+                "Warning: model downloaded and registered, but refresh setup failed: {error}"
+            );
+            eprintln!("Start or restart gguf-switchboard to load the updated registry.");
+            return;
+        }
+    };
+    match refresh_running_server(&client, Path::new("config.toml")).await {
         Ok(()) => println!("✓ Running server refreshed"),
         Err(error) => {
             eprintln!("Warning: model downloaded and registered, but live refresh failed: {error}");
