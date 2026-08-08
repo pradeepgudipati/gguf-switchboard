@@ -109,4 +109,29 @@ initialize_runtime_config
 grep -q '^# user setting$' "$CONFIG_FILE"
 grep -q '^# user registry$' "$MODELS_FILE"
 
+# Runtime initialization must happen before fallible build and systemd work.
+init_line="$(grep -n '^initialize_runtime_config$' deploy.sh | tail -1 | cut -d: -f1)"
+build_line="$(grep -n '^cargo build --release$' deploy.sh | cut -d: -f1)"
+service_line="$(grep -n '^sudo tee "\$SERVICE_FILE"' deploy.sh | cut -d: -f1)"
+test "$init_line" -lt "$build_line"
+test "$init_line" -lt "$service_line"
+
+fake_llama="$runtime_home/llama.cpp/build/bin/llama-server"
+mkdir -p "$(dirname "$fake_llama")"
+touch "$fake_llama"
+chmod +x "$fake_llama"
+fake_llama="$(realpath "$fake_llama")"
+
+resolved_llama="$(resolve_llama_server)"
+test "$resolved_llama" = "$fake_llama"
+
+configure_llama_server "$resolved_llama"
+grep -q "llama_server = \"$fake_llama\"" "$MODELS_FILE"
+
+custom_llama="$TMP/custom/llama-server"
+sed -i.bak -e "s|^llama_server = .*|llama_server = \"$custom_llama\"|" "$MODELS_FILE"
+rm -f "$MODELS_FILE.bak"
+configure_llama_server /usr/bin/llama-server
+grep -q "llama_server = \"$custom_llama\"" "$MODELS_FILE"
+
 echo "deploy models generation validation passed"

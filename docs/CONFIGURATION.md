@@ -222,7 +222,7 @@ You can omit `[[models]]` entirely and rely on auto-discover, or add entries onl
 
 #### Deploy-time auto-generation
 
-`./deploy.sh` creates `$CONFIG_DIR/config.toml` from `config.example.toml` when missing. It also creates `~/models` when `MODELS_DIR` is unset, then generates `$CONFIG_DIR/models.toml` (default: repo checkout) when:
+Immediately after updating the checkout, `./deploy.sh` creates `$CONFIG_DIR/config.toml` from `config.example.toml` when missing and creates `~/models` when `MODELS_DIR` is unset. This happens before dependency installation, compilation, and systemd setup. It then generates `$CONFIG_DIR/models.toml` (default: repo checkout) when:
 
 - **First install** — no existing `models.toml` in the config dir (auto-discovers from GGUF files)
 - **`--refresh-models`** — explicitly regenerate from disk, merging with the existing registry
@@ -245,6 +245,8 @@ When generation runs:
 2. `models_dir` from the existing runtime `models.toml` or tracked `models.example.toml`
 
 If discovery finds no valid GGUF files, deploy keeps the runtime registry created from `models.example.toml` and prints next-step guidance. Ordinary deployments preserve existing runtime configuration; only `--refresh-models` regenerates the model registry.
+
+Deploy resolves `llama-server` from `PATH`, `/usr/local/bin`, `/usr/bin`, `~/llama.cpp/build/bin`, or `/opt/llama.cpp/build/bin`. It writes a detected path to `defaults.llama_server` in a new or untouched example registry. A custom `llama_server` value is never replaced. The executable belongs in `models.toml`; `config.toml` contains the `models_file` reference rather than a duplicate backend path.
 
 Set `models_dir` in `models.toml` or pass `MODELS_DIR` when models live outside `/models`:
 

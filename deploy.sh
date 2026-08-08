@@ -153,6 +153,43 @@ initialize_runtime_config() {
     fi
 }
 
+resolve_llama_server() {
+    local candidate=""
+    candidate="$(command -v llama-server 2>/dev/null || true)"
+    if [[ -n "$candidate" && -x "$candidate" ]]; then
+        realpath "$candidate" 2>/dev/null || printf '%s\n' "$candidate"
+        return 0
+    fi
+
+    for candidate in \
+        /usr/local/bin/llama-server \
+        /usr/bin/llama-server \
+        "$HOME/llama.cpp/build/bin/llama-server" \
+        /opt/llama.cpp/build/bin/llama-server; do
+        if [[ -x "$candidate" ]]; then
+            realpath "$candidate" 2>/dev/null || printf '%s\n' "$candidate"
+            return 0
+        fi
+    done
+
+    return 1
+}
+
+configure_llama_server() {
+    local resolved="$1" configured=""
+    [[ -n "$resolved" && -f "$MODELS_FILE" ]] || return 0
+    configured="$(awk -F'"' '/^llama_server[[:space:]]*=/ { print $2; exit }' "$MODELS_FILE")"
+
+    if [[ -n "$configured" && "$configured" != "/usr/local/bin/llama-server" ]]; then
+        echo "==> Keeping configured llama-server: $configured"
+        return 0
+    fi
+
+    sed -i.bak -e "s|^llama_server = .*|llama_server = \"$resolved\"|" "$MODELS_FILE"
+    rm -f "$MODELS_FILE.bak"
+    echo "==> Configured llama-server: $resolved"
+}
+
 # Copy src → dst without sudo when possible; avoid no-op self-copies.
 install_file() {
     local src="$1" dst="$2"
@@ -401,7 +438,19 @@ else
     echo "==> Skipping git pull (--skip-pull)."
 fi
 
-if ! command -v llama-server >/dev/null 2>&1; then
+CONFIG_CREATED=false
+MODELS_CREATED=false
+
+maybe_migrate_legacy_config
+
+# Create user-owned runtime files and the default model directory before any
+# dependency installation, build, or systemd operation can fail.
+initialize_runtime_config
+
+LLAMA_SERVER_PATH="$(resolve_llama_server || true)"
+if [[ -n "$LLAMA_SERVER_PATH" ]]; then
+    configure_llama_server "$LLAMA_SERVER_PATH"
+else
     echo "==> Warning: llama-server not found on PATH."
     echo "    Install llama.cpp with server support before loading models."
     echo "    Or set defaults.llama_server in models.toml after deploy."
@@ -444,9 +493,6 @@ mkdir -p "$CONFIG_DIR" 2>/dev/null || sudo mkdir -p "$CONFIG_DIR"
 sudo mkdir -p /var/lib/gguf-switchboard
 sudo chown "$(whoami)":"$(whoami)" /var/lib/gguf-switchboard
 
-CONFIG_CREATED=false
-MODELS_CREATED=false
-
 echo "==> Installing systemd service (config: $CONFIG_FILE)..."
 sudo tee "$SERVICE_FILE" > /dev/null <<EOF
 [Unit]
@@ -468,11 +514,6 @@ EOF
 
 sudo systemctl daemon-reload
 sudo systemctl enable gguf-switchboard
-
-maybe_migrate_legacy_config
-
-# Create user-owned runtime files and the default model directory when missing.
-initialize_runtime_config
 
 if [[ "$MODELS_CREATED" == "true" ]]; then
     generate_models_toml true

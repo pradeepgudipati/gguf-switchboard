@@ -131,8 +131,9 @@ What `deploy.sh` does:
 3. Builds the release binary → `/usr/local/bin/gguf-switchboard`
 4. Creates **user-owned, gitignored `config.toml` / `models.toml`** in the repo checkout (override with `GGUF_SWITCHBOARD_CONFIG_DIR`)
 5. Creates `~/models` by default, or the single directory supplied through `MODELS_DIR`
-6. Generates `models.toml` on first install; syncs gitignored `models.local.toml` / `models.local.json`
-7. Enables and starts the systemd service on `0.0.0.0:9090`
+6. Detects `llama-server` from `PATH` or common llama.cpp install locations and records it in `models.toml`
+7. Generates `models.toml` on first install; syncs gitignored `models.local.toml` / `models.local.json`
+8. Enables and starts the systemd service on `0.0.0.0:9090`
 
 ```bash
 # Custom GGUF directory on first install
