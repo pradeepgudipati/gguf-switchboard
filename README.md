@@ -111,46 +111,13 @@ llama_server = "/path/to/llama-server"
 
 `deploy.sh` does **not** install llama.cpp — only gguf-switchboard, its config, and the systemd unit. Without `llama-server`, the proxy starts but model loads fail.
 
-#### Install GGUF models
-
-Search, browse, and download GGUF models from Hugging Face in one step:
-
-```bash
-mkdir -p ~/models
-
-# Search for models
-gguf-switchboard models search "Qwen3.5 9B"
-
-# Browse available files in a repo
-gguf-switchboard models files lmstudio-community/Qwen3.5-9B-GGUF
-
-# Download, validate, and register a model
-gguf-switchboard models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --dir ~/models
-
-# Optional: tune parallel aria2 connections (default 8, maximum 16)
-gguf-switchboard models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --connections 8
-```
-
-Public downloads automatically use `aria2c` when available, then verify the expected size, Hugging Face LFS checksum, and GGUF metadata before registration. Authenticated downloads using `HF_TOKEN`, or systems without `aria2c`, use the native downloader. A successful pull refreshes a running gguf-switchboard server automatically.
-
-Or download manually — any `.gguf` file in `~/models` works:
-
-```bash
-# Example layout after manual download:
-#   ~/models/Qwen3.5-9B-Q4_K_M.gguf
-#   ~/models/gemma-4-E4B-it-Q4_K_M.gguf
-```
-
-Then run `./deploy.sh` (first install) or `./deploy.sh --refresh-models` so discovery registers them.
-
-### Fresh machine (Linux + systemd)
+### Install gguf-switchboard (Linux + systemd)
 
 Clone, review `deploy.sh`, then run it. The script builds from source and installs a systemd service — no remote pipe-to-bash.
 
 ```bash
 # Before first deploy (required):
-#   1. Install llama-server  (see Prerequisites above)
-#   2. Put GGUFs in ~/models  (or export MODELS_DIR=/path/to/ggufs)
+#   Install llama-server (see Prerequisites above)
 
 git clone --branch main https://github.com/pradeepgudipati/gguf-switchboard.git
 cd gguf-switchboard
@@ -175,35 +142,6 @@ GGUF_SWITCHBOARD_CONFIG_DIR=/etc/gguf-switchboard ./deploy.sh
 ```
 
 Then open **http://localhost:9090/swagger-ui/**.
-
-### Updating
-
-From the existing checkout, re-run deploy. That is the supported upgrade path:
-
-```bash
-cd ~/gguf-switchboard   # or wherever you cloned
-./deploy.sh
-```
-
-| Goal | Command |
-|------|---------|
-| Pull + rebuild + restart | `./deploy.sh` |
-| Rebuild only (no `git pull`) | `./deploy.sh --skip-pull` |
-| Pick up new GGUF files (merge registry) | `./deploy.sh --refresh-models` |
-| Live rescan while running | `curl -X POST http://localhost:9090/v1/models/refresh` (or Swagger **Rescan Models**) |
-| Restart without rebuild | `sudo systemctl restart gguf-switchboard` |
-
-**Important:**
-
-- Deploy **stashes uncommitted changes** (including untracked files) before `git pull`. Recover with `git stash list` / `git stash pop`.
-- Your live registry stays in `models.toml` (or `GGUF_SWITCHBOARD_CONFIG_DIR`). Gitignored `models.local.*` copies avoid `git pull` conflicts — edit `models.toml`, not the template in a way that fights upstream.
-- After editing aliases / `priority` / `extra_args`, restart: `sudo systemctl restart gguf-switchboard`.
-
-```bash
-# Logs
-sudo systemctl status gguf-switchboard
-sudo journalctl -u gguf-switchboard -f
-```
 
 ### Prebuilt binary (Linux)
 
@@ -247,12 +185,73 @@ cargo build --release
 
 Use a **Metal** build of `llama-server`. Keep `config.toml` / `models.toml` in the checkout.
 
+### Install GGUF models
+
+With gguf-switchboard installed, search, browse, and download GGUF models from Hugging Face:
+
+```bash
+mkdir -p ~/models
+
+# Search for models
+gguf-switchboard models search "Qwen3.5 9B"
+
+# Browse available files in a repo
+gguf-switchboard models files lmstudio-community/Qwen3.5-9B-GGUF
+
+# Download, validate, and register a model
+gguf-switchboard models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --dir ~/models
+
+# Optional: tune parallel aria2 connections (default 8, maximum 16)
+gguf-switchboard models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --connections 8
+```
+
+Public downloads automatically use `aria2c` when available, then verify the expected size, Hugging Face LFS checksum, and GGUF metadata before registration. Authenticated downloads using `HF_TOKEN`, or systems without `aria2c`, use the native downloader. A successful pull refreshes a running gguf-switchboard server automatically.
+
+Or download manually — any `.gguf` file in `~/models` works:
+
+```bash
+# Example layout after manual download:
+#   ~/models/Qwen3.5-9B-Q4_K_M.gguf
+#   ~/models/gemma-4-E4B-it-Q4_K_M.gguf
+```
+
+If you downloaded models manually, run `./deploy.sh --refresh-models` so discovery registers them.
+
 ### Verify
 
 ```bash
 curl -s http://localhost:9090/health
 curl -s http://localhost:9090/status | jq .
 curl -s http://localhost:9090/v1/models | jq '.data[].id'
+```
+
+### Updating
+
+From the existing checkout, re-run deploy. That is the supported upgrade path:
+
+```bash
+cd ~/gguf-switchboard   # or wherever you cloned
+./deploy.sh
+```
+
+| Goal | Command |
+|------|---------|
+| Pull + rebuild + restart | `./deploy.sh` |
+| Rebuild only (no `git pull`) | `./deploy.sh --skip-pull` |
+| Pick up new GGUF files (merge registry) | `./deploy.sh --refresh-models` |
+| Live rescan while running | `curl -X POST http://localhost:9090/v1/models/refresh` (or Swagger **Rescan Models**) |
+| Restart without rebuild | `sudo systemctl restart gguf-switchboard` |
+
+**Important:**
+
+- Deploy **stashes uncommitted changes** (including untracked files) before `git pull`. Recover with `git stash list` / `git stash pop`.
+- Your live registry stays in `models.toml` (or `GGUF_SWITCHBOARD_CONFIG_DIR`). Gitignored `models.local.*` copies avoid `git pull` conflicts — edit `models.toml`, not the template in a way that fights upstream.
+- After editing aliases / `priority` / `extra_args`, restart: `sudo systemctl restart gguf-switchboard`.
+
+```bash
+# Logs
+sudo systemctl status gguf-switchboard
+sudo journalctl -u gguf-switchboard -f
 ```
 
 ### Shell alias (optional)

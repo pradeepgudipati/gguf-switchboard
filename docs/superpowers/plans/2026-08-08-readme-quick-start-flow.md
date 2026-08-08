@@ -27,15 +27,15 @@
 - Consumes: Existing llama.cpp installation, deployment, prebuilt binary, source build, model-management, verification, updating, and alias instructions in `README.md`.
 - Produces: A linear first-run guide in which every command appears after its required executable is installed.
 
-- [ ] **Step 1: Move gguf-switchboard installation ahead of model management**
+- [x] **Step 1: Move gguf-switchboard installation ahead of model management**
 
 Place the Linux/systemd installation immediately after the llama.cpp prerequisite. Keep prebuilt and source-build alternatives adjacent to the primary installation path, then place GGUF model search and download instructions after those paths.
 
-- [ ] **Step 2: Adjust connective wording**
+- [x] **Step 2: Adjust connective wording**
 
 Remove instructions that tell users to acquire GGUF files before installing gguf-switchboard. Make the first-install comments and model refresh guidance consistent with the new sequence without changing command semantics.
 
-- [ ] **Step 3: Verify structure and command ordering**
+- [x] **Step 3: Verify structure and command ordering**
 
 Run:
 
@@ -47,7 +47,7 @@ git diff -- README.md
 
 Expected: an installation heading and its commands precede the first `gguf-switchboard models` command; Markdown headings remain coherent; `git diff --check` reports no errors; the diff contains no unrelated content changes.
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 git add README.md docs/superpowers/plans/2026-08-08-readme-quick-start-flow.md
