@@ -46,7 +46,15 @@ Introduce a small model-option type and keep extraction, capacity filtering, rec
 
 ## User-visible table
 
-Add `QUANT` after `SUPPORTED`. Preserve the existing repository, file count, size, context, and architecture columns. Long quant lists remain complete rather than truncated, even if a row exceeds terminal width.
+Use a delimiter-based table with ` | ` between columns. Compute each core column's width from its heading and the values in the complete result set. Left-align repository, support, context, and architecture values; right-align file counts and sizes.
+
+Render columns in this order:
+
+```text
+REPO | FILES | SIZE | SUPPORTED | CONTEXT | ARCH | QUANT
+```
+
+Keep `QUANT` last so a long list cannot shift or misalign the core columns. Long repository ids expand the repository column rather than overflowing into `FILES`. Long quant lists remain complete rather than truncated, even if a row exceeds terminal width.
 
 Update `docs/USAGE.md` to explain the column and recommendation rule.
 
@@ -64,5 +72,6 @@ Write failing tests first for:
 - falling back to the largest fitting option;
 - omitting a command when no named quant fits;
 - rendering `QUANT`, `-`, and the chosen pull command.
+- dynamically aligning rows containing both short and long repository ids without column overlap.
 
 Run the full repository gate, then live searches for `gemma` and `DSpark Drafter`. Verify Gemma rows list fitting quants and print a valid recommendation, while auxiliary drafter rows remain `No`, show `-`, and produce no recommendation when all results are auxiliary.
