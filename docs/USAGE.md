@@ -35,6 +35,16 @@ Run the same checks manually:
 ./precommit.sh
 ```
 
+### Hardware-aware model search
+
+`ggs models search` adds a `SUPPORTED` estimate to each Hugging Face result:
+
+```bash
+ggs models search "gemma"
+```
+
+`Yes` means at least one complete, non-projector GGUF in the repository fits total system RAM plus total NVIDIA VRAM with 20% runtime headroom. CPU-only systems use system RAM alone. This is a discovery estimate: context size, KV cache, GPU offload, and other runtime allocations can still prevent a model from loading.
+
 ## Systemd service
 
 Native install is recommended: the runtime spawns `llama-server` as a child and needs direct GPU + model-file access.
