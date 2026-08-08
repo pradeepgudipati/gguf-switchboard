@@ -17,6 +17,9 @@ target
 .bench/
 
 # Deploy-time registry copies (synced from /etc/gguf-switchboard by deploy.sh)
+/config.toml
+/models.toml
+/models.json
 models.local.toml
 models.local.json
 

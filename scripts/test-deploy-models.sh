@@ -77,4 +77,36 @@ grep -q "alias ggs='gguf-switchboard'" deploy.sh
 ! grep -q "alias gs='gguf-switchboard'" deploy.sh
 grep -Eq 'APT_PKGS=.*\baria2\b' deploy.sh
 
+# Deploy keeps tracked examples separate from user-owned runtime configuration.
+test -f config.example.toml
+test -f models.example.toml
+grep -qx '/config.toml' .gitignore
+grep -qx '/models.toml' .gitignore
+grep -qx '/models.json' .gitignore
+
+runtime_home="$TMP/home"
+runtime_config="$TMP/config"
+mkdir -p "$runtime_home"
+
+GGUF_SWITCHBOARD_DEPLOY_LIB=1 source ./deploy.sh
+HOME="$runtime_home"
+CONFIG_DIR="$runtime_config"
+CONFIG_FILE="$CONFIG_DIR/config.toml"
+MODELS_FILE="$CONFIG_DIR/models.toml"
+unset MODELS_DIR
+
+initialize_runtime_config
+
+test -d "$runtime_home/models"
+test -f "$CONFIG_FILE"
+test -f "$MODELS_FILE"
+grep -q 'models_file = "models.toml"' "$CONFIG_FILE"
+grep -q "models_dir = \"$runtime_home/models\"" "$MODELS_FILE"
+
+printf '\n# user setting\n' >> "$CONFIG_FILE"
+printf '\n# user registry\n' >> "$MODELS_FILE"
+initialize_runtime_config
+grep -q '^# user setting$' "$CONFIG_FILE"
+grep -q '^# user registry$' "$MODELS_FILE"
+
 echo "deploy models generation validation passed"

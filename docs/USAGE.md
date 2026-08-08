@@ -7,6 +7,10 @@ API examples, SDK snippets, IDE setup, and monitoring.
 ## Running locally
 
 ```bash
+# Create user-owned runtime configuration once
+cp config.example.toml config.toml
+cp models.example.toml models.toml
+
 # With cargo
 cargo run --release -- config.toml
 

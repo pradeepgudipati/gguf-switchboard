@@ -129,9 +129,10 @@ What `deploy.sh` does:
 1. Pulls latest `main` (stashes dirty working tree first — see [Updating](#updating))
 2. Installs build deps + Rust if needed
 3. Builds the release binary → `/usr/local/bin/gguf-switchboard`
-4. Uses **`config.toml` / `models.toml` in the repo checkout** (override with `GGUF_SWITCHBOARD_CONFIG_DIR`)
-5. Auto-generates `models.toml` on first install; syncs gitignored `models.local.toml` / `models.local.json`
-6. Enables and starts the systemd service on `0.0.0.0:9090`
+4. Creates **user-owned, gitignored `config.toml` / `models.toml`** in the repo checkout (override with `GGUF_SWITCHBOARD_CONFIG_DIR`)
+5. Creates `~/models` by default, or the single directory supplied through `MODELS_DIR`
+6. Generates `models.toml` on first install; syncs gitignored `models.local.toml` / `models.local.json`
+7. Enables and starts the systemd service on `0.0.0.0:9090`
 
 ```bash
 # Custom GGUF directory on first install
@@ -152,9 +153,11 @@ curl -fsSL -o gguf-switchboard \
 chmod +x gguf-switchboard
 sudo mv gguf-switchboard /usr/local/bin/
 
-# Still need config templates from the repo
+# Copy the tracked examples to user-owned runtime files
 git clone --branch main --depth 1 https://github.com/pradeepgudipati/gguf-switchboard.git
 cd gguf-switchboard
+cp config.example.toml config.toml
+cp models.example.toml models.toml
 gguf-switchboard discover-models ~/models -o models.toml
 gguf-switchboard config.toml
 ```
@@ -168,6 +171,8 @@ git clone --branch main https://github.com/pradeepgudipati/gguf-switchboard.git
 cd gguf-switchboard
 cargo build --release
 
+cp config.example.toml config.toml
+cp models.example.toml models.toml
 ./target/release/gguf-switchboard discover-models ~/models -o models.toml
 ./target/release/gguf-switchboard config.toml
 ```
@@ -183,7 +188,7 @@ cargo build --release
 | systemd auto-start | Yes | No — terminal or your own `launchd` plist |
 | Auto-install build deps | Yes (`apt`) | Xcode CLI tools; `jq` via Homebrew if needed |
 
-Use a **Metal** build of `llama-server`. Keep `config.toml` / `models.toml` in the checkout.
+Use a **Metal** build of `llama-server`. Create runtime files from `config.example.toml` / `models.example.toml`; keep user-owned `config.toml` / `models.toml` in the checkout.
 
 ### Install GGUF models
 
@@ -245,7 +250,7 @@ cd ~/gguf-switchboard   # or wherever you cloned
 **Important:**
 
 - Deploy **stashes uncommitted changes** (including untracked files) before `git pull`. Recover with `git stash list` / `git stash pop`.
-- Your live registry stays in `models.toml` (or `GGUF_SWITCHBOARD_CONFIG_DIR`). Gitignored `models.local.*` copies avoid `git pull` conflicts — edit `models.toml`, not the template in a way that fights upstream.
+- Your live `config.toml`, `models.toml`, and `models.json` are gitignored and preserved across deploys. Tracked defaults live in `config.example.toml` and `models.example.toml`.
 - After editing aliases / `priority` / `extra_args`, restart: `sudo systemctl restart gguf-switchboard`.
 
 ```bash
@@ -312,7 +317,7 @@ ggs config.toml
 
 ### Configuration (short)
 
-Two files: **`config.toml`** (bind, idle timeout, `vram_gb`) and **`models.toml`** (aliases → GGUF paths). Defaults live in the repo checkout after `deploy.sh`. Full reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+Two runtime files: **`config.toml`** (bind, idle timeout, `vram_gb`) and **`models.toml`** (aliases → GGUF paths). `deploy.sh` creates these gitignored files from the tracked `.example.toml` defaults when required. Full reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ```bash
 # After install, tweak models then restart

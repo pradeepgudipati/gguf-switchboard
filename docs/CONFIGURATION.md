@@ -9,7 +9,7 @@ Configuration is split across two files:
 | **`config.toml`** | Server bind address, idle timeout, GPU VRAM, database path |
 | **`models.toml`** | Model registry — aliases, GGUF paths, priorities, per-model overrides |
 
-Default paths after `deploy.sh`: `config.toml` and `models.toml` in the repo checkout.  
+Default runtime paths after `deploy.sh`: gitignored `config.toml` and `models.toml` in the repo checkout. Tracked defaults live in `config.example.toml` and `models.example.toml`.
 Machine-specific copies are also synced to **`models.local.toml`** and **`models.local.json`** (gitignored).
 
 Override the config directory (optional):
@@ -222,7 +222,7 @@ You can omit `[[models]]` entirely and rely on auto-discover, or add entries onl
 
 #### Deploy-time auto-generation
 
-`./deploy.sh` generates `$CONFIG_DIR/models.toml` (default: repo checkout) when:
+`./deploy.sh` creates `$CONFIG_DIR/config.toml` from `config.example.toml` when missing. It also creates `~/models` when `MODELS_DIR` is unset, then generates `$CONFIG_DIR/models.toml` (default: repo checkout) when:
 
 - **First install** — no existing `models.toml` in the config dir (auto-discovers from GGUF files)
 - **`--refresh-models`** — explicitly regenerate from disk, merging with the existing registry
@@ -242,9 +242,9 @@ When generation runs:
 **Models directory detection**:
 
 1. `$MODELS_DIR` environment variable (may be comma-separated)
-2. `models_dir` from existing `models.toml` (deploy target or repo copy)
+2. `models_dir` from the existing runtime `models.toml` or tracked `models.example.toml`
 
-If no directory is configured or discovery fails, deploy warns and copies the template `models.toml` if needed — deploy does not fail.
+If discovery finds no valid GGUF files, deploy keeps the runtime registry created from `models.example.toml` and prints next-step guidance. Ordinary deployments preserve existing runtime configuration; only `--refresh-models` regenerates the model registry.
 
 Set `models_dir` in `models.toml` or pass `MODELS_DIR` when models live outside `/models`:
 

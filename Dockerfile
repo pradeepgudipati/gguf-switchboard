@@ -25,8 +25,8 @@ WORKDIR /home/appuser
 COPY --from=builder /app/target/release/gguf-switchboard /usr/local/bin/gguf-switchboard
 
 # Default config + model registry (mount your own at runtime)
-COPY --chown=appuser:appuser config.toml /home/appuser/config.toml
-COPY --chown=appuser:appuser models.toml /home/appuser/models.toml
+COPY --chown=appuser:appuser config.example.toml /home/appuser/config.toml
+COPY --chown=appuser:appuser models.example.toml /home/appuser/models.toml
 
 EXPOSE 9090
 

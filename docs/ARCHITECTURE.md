@@ -37,9 +37,9 @@ Client Request
 ```
 .
 ├── Cargo.toml              # Dependencies and build config
-├── config.toml             # Server configuration (bind, vram_gb, models_file)
+├── config.example.toml     # Tracked default for runtime config.toml
 ├── config.docker.toml      # Docker server configuration
-├── models.toml             # Model registry template (aliases → GGUF files)
+├── models.example.toml     # Tracked default for runtime models.toml
 ├── models.docker.toml      # Docker model registry
 ├── models.local.toml       # Deploy-synced registry copy (gitignored)
 ├── models.local.json       # Portable registry export (gitignored)

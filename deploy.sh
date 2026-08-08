@@ -23,6 +23,8 @@ CONFIG_FILE=""
 MODELS_FILE=""
 LOCAL_REGISTRY_TOML="models.local.toml"
 LOCAL_REGISTRY_JSON="models.local.json"
+CONFIG_TEMPLATE="config.example.toml"
+MODELS_TEMPLATE="models.example.toml"
 
 read_config() {
     if [[ -r "$1" ]]; then
@@ -105,7 +107,7 @@ read_models_dir_from_toml() {
 
 print_models_dir_hints() {
     local configured=""
-    configured="$(read_models_dir_from_toml "$MODELS_FILE" 2>/dev/null || read_models_dir_from_toml "models.toml" 2>/dev/null || true)"
+    configured="$(read_models_dir_from_toml "$MODELS_FILE" 2>/dev/null || read_models_dir_from_toml "$MODELS_TEMPLATE" 2>/dev/null || true)"
     if [[ -n "$configured" ]]; then
         echo "    Configured models_dir: $configured"
     fi
@@ -117,17 +119,38 @@ print_models_dir_hints() {
 ensure_config_toml() {
     if [[ ! -f "$CONFIG_FILE" ]]; then
         echo "==> Copying default config to $CONFIG_FILE..."
-        install_file config.toml "$CONFIG_FILE"
+        install_file "$CONFIG_TEMPLATE" "$CONFIG_FILE"
         CONFIG_CREATED=true
-        return
+    else
+        echo "==> Keeping existing $CONFIG_FILE."
+    fi
+}
+
+initialize_runtime_config() {
+    mkdir -p "$CONFIG_DIR"
+
+    if [[ -z "${MODELS_DIR:-}" ]]; then
+        MODELS_DIR="$HOME/models"
+        mkdir -p "$MODELS_DIR"
+        echo "==> Models directory: $MODELS_DIR"
+    elif [[ "$MODELS_DIR" != *,* ]]; then
+        mkdir -p "$MODELS_DIR"
+        echo "==> Models directory: $MODELS_DIR"
     fi
 
-    if grep -qE '^models_file\s*=' "$CONFIG_FILE" 2>/dev/null; then
-        return
-    fi
+    ensure_config_toml
 
-    echo "==> Upgrading $CONFIG_FILE to use models_file (replacing legacy inline model definitions)..."
-    install_file config.toml "$CONFIG_FILE"
+    if [[ ! -f "$MODELS_FILE" ]]; then
+        echo "==> Copying default model registry to $MODELS_FILE..."
+        install_file "$MODELS_TEMPLATE" "$MODELS_FILE"
+        if [[ "$MODELS_DIR" != *,* ]]; then
+            sed -i.bak -e "s|^models_dir = .*|models_dir = \"$MODELS_DIR\"|" "$MODELS_FILE"
+            rm -f "$MODELS_FILE.bak"
+        fi
+        MODELS_CREATED=true
+    else
+        echo "==> Keeping existing $MODELS_FILE."
+    fi
 }
 
 # Copy src → dst without sudo when possible; avoid no-op self-copies.
@@ -222,8 +245,8 @@ generate_models_toml() {
     merge_source=""
     if [[ -f "$MODELS_FILE" ]]; then
         merge_source="$MODELS_FILE"
-    elif [[ -f "models.toml" ]]; then
-        merge_source="models.toml"
+    elif [[ -f "$MODELS_TEMPLATE" ]]; then
+        merge_source="$MODELS_TEMPLATE"
     fi
 
     echo "==> Generating models.toml via discover-models (auto-resolves model directories)..."
@@ -250,8 +273,8 @@ generate_models_toml() {
 
     echo "==> Warning: discover-models failed; keeping existing models.toml if present."
     rm -f "$generated"
-    if [[ ! -f "$MODELS_FILE" && -f "models.toml" ]]; then
-        install_file models.toml "$MODELS_FILE"
+    if [[ ! -f "$MODELS_FILE" && -f "$MODELS_TEMPLATE" ]]; then
+        install_file "$MODELS_TEMPLATE" "$MODELS_FILE"
     fi
 }
 
@@ -310,6 +333,10 @@ ensure_repo() {
     cd "$REPO_DIR"
     exec "$REPO_DIR/deploy.sh" "$@"
 }
+
+if [[ "${GGUF_SWITCHBOARD_DEPLOY_LIB:-0}" == "1" ]]; then
+    return 0 2>/dev/null || exit 0
+fi
 
 ensure_repo
 
@@ -418,6 +445,7 @@ sudo mkdir -p /var/lib/gguf-switchboard
 sudo chown "$(whoami)":"$(whoami)" /var/lib/gguf-switchboard
 
 CONFIG_CREATED=false
+MODELS_CREATED=false
 
 echo "==> Installing systemd service (config: $CONFIG_FILE)..."
 sudo tee "$SERVICE_FILE" > /dev/null <<EOF
@@ -443,10 +471,14 @@ sudo systemctl enable gguf-switchboard
 
 maybe_migrate_legacy_config
 
-# Copy or upgrade config to the current models_file-based format
-ensure_config_toml
+# Create user-owned runtime files and the default model directory when missing.
+initialize_runtime_config
 
-generate_models_toml "$REFRESH_MODELS"
+if [[ "$MODELS_CREATED" == "true" ]]; then
+    generate_models_toml true
+else
+    generate_models_toml "$REFRESH_MODELS"
+fi
 claim_config_files
 sync_registry_to_repo
 
