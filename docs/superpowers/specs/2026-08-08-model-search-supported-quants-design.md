@@ -46,6 +46,14 @@ Introduce a small model-option type and keep extraction, capacity filtering, rec
 
 ## User-visible table
 
+Before the table, print the exact detected capacity inputs used by the support calculation:
+
+```text
+Hardware: System RAM 62.0 GiB | NVIDIA VRAM 24.0 GiB | Total 86.0 GiB
+```
+
+These values describe total hardware capacity, not currently free memory. Use binary GiB formatting with one decimal place. CPU-only systems show `NVIDIA VRAM 0.0 GiB`. Build the support capacity from these same MiB inputs so the displayed header and row decisions cannot diverge.
+
 Use a delimiter-based table with ` | ` between columns. Compute each core column's width from its heading and the values in the complete result set. Left-align repository, support, context, and architecture values; right-align file counts and sizes.
 
 Render columns in this order:
@@ -73,5 +81,6 @@ Write failing tests first for:
 - omitting a command when no named quant fits;
 - rendering `QUANT`, `-`, and the chosen pull command.
 - dynamically aligning rows containing both short and long repository ids without column overlap.
+- rendering system RAM, NVIDIA VRAM, and their total from the same capacity inputs used for support decisions.
 
 Run the full repository gate, then live searches for `gemma` and `DSpark Drafter`. Verify Gemma rows list fitting quants and print a valid recommendation, while auxiliary drafter rows remain `No`, show `-`, and produce no recommendation when all results are auxiliary.
