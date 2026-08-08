@@ -1,9 +1,11 @@
 //! CLI handlers for `gguf-switchboard models {search,files,pull}`.
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write as _;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
+use futures::{StreamExt, stream};
 use serde_json::Value;
 
 use super::hf_download::{self, HfTreeEntry, format_bytes};
@@ -54,44 +56,42 @@ pub async fn cmd_search(args: &[String]) -> Result<(), Box<dyn std::error::Error
         return Ok(());
     }
 
-    println!(
-        "  {:<44} {:<6} {:<10} {:<10} ARCH",
-        "REPO", "FILES", "SIZE", "CONTEXT"
-    );
-    for hit in &hits {
-        let id = hit.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-        let siblings = hit
-            .get("siblings")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter(|s| {
-                        s.get("rfilename")
-                            .and_then(|v| v.as_str())
-                            .is_some_and(|f| f.ends_with(".gguf"))
-                    })
-                    .count()
-            })
-            .unwrap_or(0);
-        let size_mb = hit
-            .get("gguf")
-            .and_then(|g| g.get("total"))
-            .and_then(|v| v.as_u64())
-            .map(format_mb)
-            .unwrap_or_default();
-        let context = hit
-            .get("gguf")
-            .and_then(|g| g.get("context_length"))
-            .and_then(|v| v.as_u64())
-            .map(|v| format!("{} tok", v))
-            .unwrap_or_default();
-        let arch = hit
-            .get("gguf")
-            .and_then(|g| g.get("architecture"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        println!("  {id:<44} {siblings:<6} {size_mb:<10} {context:<10} {arch}");
+    let total_ram_mb = crate::memory::check_memory()
+        .map(|stats| stats.total_mb)
+        .unwrap_or(0);
+    let total_vram_mb = crate::gpu::total_vram_mb().unwrap_or(0);
+    let capacity_bytes = total_ram_mb
+        .saturating_add(total_vram_mb)
+        .saturating_mul(1024 * 1024);
+
+    let estimates = stream::iter(hits.iter().enumerate().map(|(index, hit)| {
+        let client = client.clone();
+        let repo = hit.get("id").and_then(Value::as_str).map(str::to_string);
+        async move {
+            let supported = match repo {
+                Some(repo) => hf_download::fetch_repo_tree(&client, &repo)
+                    .await
+                    .ok()
+                    .and_then(|entries| smallest_complete_model_bytes(&entries))
+                    .is_some_and(|model_bytes| is_supported(Some(model_bytes), capacity_bytes)),
+                None => false,
+            };
+            (index, supported)
+        }
+    }))
+    .buffer_unordered(4)
+    .collect::<Vec<_>>()
+    .await;
+
+    let mut supported = vec![false; hits.len()];
+    for (index, estimate) in estimates {
+        supported[index] = estimate;
     }
+
+    print!("{}", render_search_table(&hits, &supported));
+    println!(
+        "Supported is estimated from the smallest complete GGUF, total RAM + NVIDIA VRAM, and 20% runtime headroom."
+    );
 
     Ok(())
 }
@@ -123,6 +123,62 @@ async fn search_hf_models_with_siblings(
     }
     let hits: Vec<Value> = resp.json().await.map_err(RuntimeError::from)?;
     Ok(hits)
+}
+
+fn render_search_table(hits: &[Value], supported: &[bool]) -> String {
+    let mut output = String::new();
+    writeln!(
+        output,
+        "  {:<44} {:<6} {:<10} {:<10} {:<10} ARCH",
+        "REPO", "FILES", "SIZE", "SUPPORTED", "CONTEXT"
+    )
+    .expect("writing to a String cannot fail");
+
+    for (index, hit) in hits.iter().enumerate() {
+        let id = hit.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+        let siblings = hit
+            .get("siblings")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter(|s| {
+                        s.get("rfilename")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|f| f.ends_with(".gguf"))
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+        let size_mb = hit
+            .get("gguf")
+            .and_then(|g| g.get("total"))
+            .and_then(|v| v.as_u64())
+            .map(format_mb)
+            .unwrap_or_default();
+        let context = hit
+            .get("gguf")
+            .and_then(|g| g.get("context_length"))
+            .and_then(|v| v.as_u64())
+            .map(|v| format!("{} tok", v))
+            .unwrap_or_default();
+        let arch = hit
+            .get("gguf")
+            .and_then(|g| g.get("architecture"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let support = if supported.get(index).copied().unwrap_or(false) {
+            "Yes"
+        } else {
+            "No"
+        };
+        writeln!(
+            output,
+            "  {id:<44} {siblings:<6} {size_mb:<10} {support:<10} {context:<10} {arch}"
+        )
+        .expect("writing to a String cannot fail");
+    }
+
+    output
 }
 
 // ── models files ─────────────────────────────────────────────────────────────
@@ -493,6 +549,50 @@ fn is_model_gguf(path: &str) -> bool {
         || lower.contains("vocab"))
 }
 
+fn split_model_part(path: &str) -> Option<(&str, usize, usize)> {
+    let stem = path.strip_suffix(".gguf")?;
+    let (before_total, total) = stem.rsplit_once("-of-")?;
+    let (prefix, index) = before_total.rsplit_once('-')?;
+    let index = index.parse::<usize>().ok()?;
+    let total = total.parse::<usize>().ok()?;
+    (index > 0 && total > 0 && index <= total).then_some((prefix, index, total))
+}
+
+fn smallest_complete_model_bytes(entries: &[HfTreeEntry]) -> Option<u64> {
+    let mut candidates = Vec::new();
+    let mut split_groups: HashMap<&str, (usize, BTreeMap<usize, u64>, bool)> = HashMap::new();
+
+    for entry in entries.iter().filter(|entry| is_model_gguf(&entry.path)) {
+        if let Some((prefix, index, total)) = split_model_part(&entry.path) {
+            let group = split_groups
+                .entry(prefix)
+                .or_insert_with(|| (total, BTreeMap::new(), true));
+            if group.0 != total || group.1.insert(index, entry.size).is_some() {
+                group.2 = false;
+            }
+        } else {
+            candidates.push(entry.size);
+        }
+    }
+
+    for (expected, shards, valid) in split_groups.into_values() {
+        if valid && shards.len() == expected && shards.keys().copied().eq(1..=expected) {
+            let size = shards
+                .values()
+                .try_fold(0_u64, |total, size| total.checked_add(*size));
+            if let Some(size) = size {
+                candidates.push(size);
+            }
+        }
+    }
+
+    candidates.into_iter().min()
+}
+
+fn is_supported(model_bytes: Option<u64>, capacity_bytes: u64) -> bool {
+    model_bytes.is_some_and(|bytes| u128::from(bytes) * 120 <= u128::from(capacity_bytes) * 100)
+}
+
 /// Extract a quantization label from a GGUF filename.
 fn extract_quant(filename: &str) -> String {
     let stem = Path::new(filename)
@@ -573,7 +673,90 @@ fn dedupe_alias(alias: &str, used: &HashSet<String>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_connections, refresh_url_from_config};
+    use super::{
+        is_supported, parse_connections, refresh_url_from_config, render_search_table,
+        smallest_complete_model_bytes,
+    };
+    use crate::config::hf_download::HfTreeEntry;
+
+    fn tree_entry(path: &str, size: u64) -> HfTreeEntry {
+        HfTreeEntry {
+            r#type: "file".to_string(),
+            path: path.to_string(),
+            size,
+            lfs: None,
+        }
+    }
+
+    #[test]
+    fn smallest_complete_selects_smallest_normal_model() {
+        let entries = [
+            tree_entry("gemma-q8.gguf", 8 * 1024 * 1024 * 1024),
+            tree_entry("gemma-q4.gguf", 4 * 1024 * 1024 * 1024),
+            tree_entry("mmproj-gemma.gguf", 1024),
+        ];
+
+        assert_eq!(
+            smallest_complete_model_bytes(&entries),
+            Some(4 * 1024 * 1024 * 1024)
+        );
+    }
+
+    #[test]
+    fn smallest_complete_sums_all_split_model_shards() {
+        let entries = [
+            tree_entry("gemma-q4-00001-of-00002.gguf", 2_000),
+            tree_entry("gemma-q4-00002-of-00002.gguf", 3_000),
+            tree_entry("gemma-q8.gguf", 8_000),
+        ];
+
+        assert_eq!(smallest_complete_model_bytes(&entries), Some(5_000));
+    }
+
+    #[test]
+    fn smallest_complete_rejects_incomplete_split_model() {
+        let entries = [tree_entry("gemma-q4-00001-of-00002.gguf", 2_000)];
+
+        assert_eq!(smallest_complete_model_bytes(&entries), None);
+    }
+
+    #[test]
+    fn support_estimate_reserves_twenty_percent_headroom() {
+        assert!(is_supported(Some(100), 120));
+        assert!(!is_supported(Some(100), 119));
+    }
+
+    #[test]
+    fn support_estimate_rejects_unknown_size_and_accepts_cpu_capacity() {
+        assert!(!is_supported(None, 1_000));
+        assert!(is_supported(Some(800), 960));
+    }
+
+    #[test]
+    fn search_table_renders_supported_header_and_values() {
+        let hits = vec![
+            serde_json::json!({
+                "id": "org/gemma-small",
+                "siblings": [{"rfilename": "gemma-q4.gguf"}],
+                "gguf": {"total": 4_000_000_000_u64, "context_length": 8192, "architecture": "gemma"}
+            }),
+            serde_json::json!({"id": "org/gemma-large", "siblings": [], "gguf": {}}),
+        ];
+
+        let table = render_search_table(&hits, &[true, false]);
+
+        assert!(table.lines().next().unwrap().contains("SUPPORTED"));
+        assert!(
+            table
+                .lines()
+                .any(|line| line.contains("org/gemma-small") && line.contains("Yes"))
+        );
+        assert!(
+            table
+                .lines()
+                .any(|line| line.contains("org/gemma-large") && line.contains("No"))
+        );
+    }
 
     #[test]
     fn connections_accept_supported_range() {
