@@ -69,11 +69,10 @@ pub async fn cmd_search(args: &[String]) -> Result<(), Box<dyn std::error::Error
         let repo = hit.get("id").and_then(Value::as_str).map(str::to_string);
         async move {
             let supported = match repo {
-                Some(repo) => hf_download::fetch_repo_tree(&client, &repo)
-                    .await
-                    .ok()
-                    .and_then(|entries| smallest_complete_model_bytes(&entries))
-                    .is_some_and(|model_bytes| is_supported(Some(model_bytes), capacity_bytes)),
+                Some(repo) => match hf_download::fetch_repo_tree(&client, &repo).await {
+                    Ok(entries) => repository_is_supported(hit, &entries, capacity_bytes),
+                    Err(_) => false,
+                },
                 None => false,
             };
             (index, supported)
@@ -90,7 +89,7 @@ pub async fn cmd_search(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     print!("{}", render_search_table(&hits, &supported));
     println!(
-        "Supported is estimated from the smallest complete GGUF, total RAM + NVIDIA VRAM, and 20% runtime headroom."
+        "Supported requires a standalone GGUF and is estimated from total RAM + NVIDIA VRAM with 20% runtime headroom."
     );
 
     Ok(())
@@ -593,6 +592,61 @@ fn is_supported(model_bytes: Option<u64>, capacity_bytes: u64) -> bool {
     model_bytes.is_some_and(|bytes| u128::from(bytes) * 120 <= u128::from(capacity_bytes) * 100)
 }
 
+fn contains_auxiliary_token(value: &str) -> bool {
+    value
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|token| {
+            matches!(
+                token.to_ascii_lowercase().as_str(),
+                "drafter" | "speculator"
+            )
+        })
+}
+
+fn is_standalone_model(hit: &Value, entries: &[HfTreeEntry]) -> bool {
+    let has_auxiliary_tag = hit
+        .get("tags")
+        .and_then(Value::as_array)
+        .is_some_and(|tags| {
+            tags.iter().filter_map(Value::as_str).any(|tag| {
+                matches!(
+                    tag.to_ascii_lowercase().as_str(),
+                    "draft-model" | "auxiliary-model"
+                )
+            })
+        });
+    if has_auxiliary_tag {
+        return false;
+    }
+
+    let architecture = hit
+        .get("gguf")
+        .and_then(|gguf| gguf.get("architecture"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if matches!(architecture.as_str(), "dflash" | "deepseek4-dspark")
+        || architecture.contains("draft")
+        || architecture.contains("speculator")
+    {
+        return false;
+    }
+
+    let repository_is_auxiliary = hit
+        .get("id")
+        .and_then(Value::as_str)
+        .is_some_and(contains_auxiliary_token);
+    let filename_is_auxiliary = entries
+        .iter()
+        .any(|entry| contains_auxiliary_token(&entry.path));
+    !(repository_is_auxiliary || filename_is_auxiliary)
+}
+
+fn repository_is_supported(hit: &Value, entries: &[HfTreeEntry], capacity_bytes: u64) -> bool {
+    is_standalone_model(hit, entries)
+        && is_supported(smallest_complete_model_bytes(entries), capacity_bytes)
+}
+
 /// Extract a quantization label from a GGUF filename.
 fn extract_quant(filename: &str) -> String {
     let stem = Path::new(filename)
@@ -674,8 +728,8 @@ fn dedupe_alias(alias: &str, used: &HashSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_supported, parse_connections, refresh_url_from_config, render_search_table,
-        smallest_complete_model_bytes,
+        is_standalone_model, is_supported, parse_connections, refresh_url_from_config,
+        render_search_table, repository_is_supported, smallest_complete_model_bytes,
     };
     use crate::config::hf_download::HfTreeEntry;
 
@@ -686,6 +740,77 @@ mod tests {
             size,
             lfs: None,
         }
+    }
+
+    #[test]
+    fn standalone_eligibility_rejects_auxiliary_tags() {
+        let entries = [tree_entry("model-q4.gguf", 4_000)];
+        for tag in ["draft-model", "auxiliary-model"] {
+            let hit = serde_json::json!({"id": "org/model", "tags": [tag], "gguf": {"architecture": "llama"}});
+            assert!(!is_standalone_model(&hit, &entries), "tag: {tag}");
+        }
+    }
+
+    #[test]
+    fn standalone_eligibility_rejects_auxiliary_architectures() {
+        let entries = [tree_entry("model-q4.gguf", 4_000)];
+        for architecture in [
+            "dflash",
+            "deepseek4-dspark",
+            "deepseek_v4_flash_dspark_draft",
+            "qwen_speculator_v2",
+        ] {
+            let hit = serde_json::json!({"id": "org/model", "tags": [], "gguf": {"architecture": architecture}});
+            assert!(
+                !is_standalone_model(&hit, &entries),
+                "architecture: {architecture}"
+            );
+        }
+    }
+
+    #[test]
+    fn standalone_eligibility_rejects_strong_repository_and_filename_tokens() {
+        let normal_entries = [tree_entry("model-q4.gguf", 4_000)];
+        let drafter_hit = serde_json::json!({"id": "org/model-drafter-GGUF", "tags": [], "gguf": {"architecture": "llama"}});
+        assert!(!is_standalone_model(&drafter_hit, &normal_entries));
+
+        let normal_hit = serde_json::json!({"id": "org/model-GGUF", "tags": [], "gguf": {"architecture": "llama"}});
+        let speculator_entries = [tree_entry("model-speculator-q4.gguf", 4_000)];
+        assert!(!is_standalone_model(&normal_hit, &speculator_entries));
+    }
+
+    #[test]
+    fn standalone_eligibility_preserves_full_dspark_target_models() {
+        let entries = [tree_entry(
+            "DeepSeek-V4-Flash-DSpark-support-q4.gguf",
+            4_000,
+        )];
+        let hit = serde_json::json!({
+            "id": "org/DeepSeek-V4-Flash-DSpark-draft-GGUF",
+            "tags": ["speculative-decoding", "dspark"],
+            "gguf": {"architecture": "deepseek4"}
+        });
+
+        assert!(is_standalone_model(&hit, &entries));
+    }
+
+    #[test]
+    fn repository_support_requires_standalone_model_and_memory_fit() {
+        let entries = [tree_entry("model-q4.gguf", 4_000)];
+        let auxiliary = serde_json::json!({
+            "id": "org/model",
+            "tags": ["auxiliary-model"],
+            "gguf": {"architecture": "llama"}
+        });
+        let standalone = serde_json::json!({
+            "id": "org/model",
+            "tags": [],
+            "gguf": {"architecture": "llama"}
+        });
+
+        assert!(!repository_is_supported(&auxiliary, &entries, 4_800));
+        assert!(repository_is_supported(&standalone, &entries, 4_800));
+        assert!(!repository_is_supported(&standalone, &entries, 4_799));
     }
 
     #[test]

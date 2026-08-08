@@ -43,7 +43,7 @@ Run the same checks manually:
 ggs models search "gemma"
 ```
 
-`Yes` means at least one complete, non-projector GGUF in the repository fits total system RAM plus total NVIDIA VRAM with 20% runtime headroom. CPU-only systems use system RAM alone. This is a discovery estimate: context size, KV cache, GPU offload, and other runtime allocations can still prevent a model from loading.
+`Yes` means the repository contains at least one standalone, complete, non-projector GGUF that fits total system RAM plus total NVIDIA VRAM with 20% runtime headroom. Auxiliary speculative-decoding drafters require a separate target model, so they show `No` even when they fit memory. CPU-only systems use system RAM alone. This is a discovery estimate: context size, KV cache, GPU offload, and other runtime allocations can still prevent a model from loading.
 
 ## Systemd service
 
