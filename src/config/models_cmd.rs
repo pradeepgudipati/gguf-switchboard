@@ -68,29 +68,34 @@ pub async fn cmd_search(args: &[String]) -> Result<(), Box<dyn std::error::Error
         let client = client.clone();
         let repo = hit.get("id").and_then(Value::as_str).map(str::to_string);
         async move {
-            let supported = match repo {
+            let assessment = match repo {
                 Some(repo) => match hf_download::fetch_repo_tree(&client, &repo).await {
-                    Ok(entries) => repository_is_supported(hit, &entries, capacity_bytes),
-                    Err(_) => false,
+                    Ok(entries) => assess_repository(hit, &entries, capacity_bytes),
+                    Err(_) => SearchAssessment::default(),
                 },
-                None => false,
+                None => SearchAssessment::default(),
             };
-            (index, supported)
+            (index, assessment)
         }
     }))
     .buffer_unordered(4)
     .collect::<Vec<_>>()
     .await;
 
-    let mut supported = vec![false; hits.len()];
-    for (index, estimate) in estimates {
-        supported[index] = estimate;
+    let mut assessments = vec![SearchAssessment::default(); hits.len()];
+    for (index, assessment) in estimates {
+        assessments[index] = assessment;
     }
 
-    print!("{}", render_search_table(&hits, &supported));
+    println!("{}", format_hardware_summary(total_ram_mb, total_vram_mb));
+    println!();
+    print!("{}", render_search_table(&hits, &assessments));
     println!(
         "Supported requires a standalone GGUF and is estimated from total RAM + NVIDIA VRAM with 20% runtime headroom."
     );
+    if let Some(command) = sample_pull_command(&hits, &assessments) {
+        println!("{command}");
+    }
 
     Ok(())
 }
@@ -124,55 +129,118 @@ async fn search_hf_models_with_siblings(
     Ok(hits)
 }
 
-fn render_search_table(hits: &[Value], supported: &[bool]) -> String {
+fn format_hardware_summary(total_ram_mb: u64, total_vram_mb: u64) -> String {
+    let total_mb = total_ram_mb.saturating_add(total_vram_mb);
+    format!(
+        "Hardware: System RAM {:.1} GiB | NVIDIA VRAM {:.1} GiB | Total {:.1} GiB",
+        total_ram_mb as f64 / 1024.0,
+        total_vram_mb as f64 / 1024.0,
+        total_mb as f64 / 1024.0
+    )
+}
+
+fn sample_pull_command(hits: &[Value], assessments: &[SearchAssessment]) -> Option<String> {
+    hits.iter().zip(assessments).find_map(|(hit, assessment)| {
+        let repository = hit.get("id").and_then(Value::as_str)?;
+        let quant = assessment.recommended_quant.as_deref()?;
+        Some(format!("Try: ggs models pull {repository} --quant {quant}"))
+    })
+}
+
+fn render_search_table(hits: &[Value], assessments: &[SearchAssessment]) -> String {
+    let rows = hits
+        .iter()
+        .enumerate()
+        .map(|(index, hit)| {
+            let id = hit
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string();
+            let siblings = hit
+                .get("siblings")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter(|s| {
+                            s.get("rfilename")
+                                .and_then(|v| v.as_str())
+                                .is_some_and(|f| f.ends_with(".gguf"))
+                        })
+                        .count()
+                })
+                .unwrap_or(0)
+                .to_string();
+            let size_mb = hit
+                .get("gguf")
+                .and_then(|g| g.get("total"))
+                .and_then(|v| v.as_u64())
+                .map(format_mb)
+                .unwrap_or_default();
+            let context = hit
+                .get("gguf")
+                .and_then(|g| g.get("context_length"))
+                .and_then(|v| v.as_u64())
+                .map(|v| format!("{} tok", v))
+                .unwrap_or_default();
+            let arch = hit
+                .get("gguf")
+                .and_then(|g| g.get("architecture"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let assessment = assessments.get(index);
+            let support = if assessment.is_some_and(|value| value.supported) {
+                "Yes".to_string()
+            } else {
+                "No".to_string()
+            };
+            let quants = assessment
+                .filter(|value| !value.quants.is_empty())
+                .map(|value| {
+                    value
+                        .quants
+                        .iter()
+                        .map(|option| option.quant.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .unwrap_or_else(|| "-".to_string());
+            (id, siblings, size_mb, support, context, arch, quants)
+        })
+        .collect::<Vec<_>>();
+
+    let width = |heading: &str, column: usize| {
+        rows.iter().fold(heading.len(), |width, row| {
+            let value = match column {
+                0 => &row.0,
+                1 => &row.1,
+                2 => &row.2,
+                3 => &row.3,
+                4 => &row.4,
+                _ => &row.5,
+            };
+            width.max(value.len())
+        })
+    };
+    let repo_width = width("REPO", 0);
+    let files_width = width("FILES", 1);
+    let size_width = width("SIZE", 2);
+    let support_width = width("SUPPORTED", 3);
+    let context_width = width("CONTEXT", 4);
+    let arch_width = width("ARCH", 5);
+
     let mut output = String::new();
     writeln!(
         output,
-        "  {:<44} {:<6} {:<10} {:<10} {:<10} ARCH",
-        "REPO", "FILES", "SIZE", "SUPPORTED", "CONTEXT"
+        "{:<repo_width$} | {:>files_width$} | {:>size_width$} | {:<support_width$} | {:<context_width$} | {:<arch_width$} | QUANT",
+        "REPO", "FILES", "SIZE", "SUPPORTED", "CONTEXT", "ARCH"
     )
     .expect("writing to a String cannot fail");
-
-    for (index, hit) in hits.iter().enumerate() {
-        let id = hit.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-        let siblings = hit
-            .get("siblings")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter(|s| {
-                        s.get("rfilename")
-                            .and_then(|v| v.as_str())
-                            .is_some_and(|f| f.ends_with(".gguf"))
-                    })
-                    .count()
-            })
-            .unwrap_or(0);
-        let size_mb = hit
-            .get("gguf")
-            .and_then(|g| g.get("total"))
-            .and_then(|v| v.as_u64())
-            .map(format_mb)
-            .unwrap_or_default();
-        let context = hit
-            .get("gguf")
-            .and_then(|g| g.get("context_length"))
-            .and_then(|v| v.as_u64())
-            .map(|v| format!("{} tok", v))
-            .unwrap_or_default();
-        let arch = hit
-            .get("gguf")
-            .and_then(|g| g.get("architecture"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-        let support = if supported.get(index).copied().unwrap_or(false) {
-            "Yes"
-        } else {
-            "No"
-        };
+    for (repo, files, size, support, context, arch, quants) in rows {
         writeln!(
             output,
-            "  {id:<44} {siblings:<6} {size_mb:<10} {support:<10} {context:<10} {arch}"
+            "{repo:<repo_width$} | {files:>files_width$} | {size:>size_width$} | {support:<support_width$} | {context:<context_width$} | {arch:<arch_width$} | {quants}"
         )
         .expect("writing to a String cannot fail");
     }
@@ -548,6 +616,26 @@ fn is_model_gguf(path: &str) -> bool {
         || lower.contains("vocab"))
 }
 
+fn is_auxiliary_model_file(path: &str) -> bool {
+    let filename = Path::new(path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(path)
+        .to_ascii_lowercase();
+    let tokens = filename
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .filter(|token| !token.is_empty())
+        .collect::<Vec<_>>();
+    let has_dspark = tokens.contains(&"dspark");
+    let quant_tokens = filename
+        .trim_end_matches(".gguf")
+        .split(['-', '.'])
+        .filter(|token| is_quant_token(&token.to_ascii_uppercase()))
+        .count();
+    (tokens.contains(&"mtp") && quant_tokens > 1)
+        || (has_dspark && (tokens.first() == Some(&"dspark") || tokens.contains(&"support")))
+}
+
 fn split_model_part(path: &str) -> Option<(&str, usize, usize)> {
     let stem = path.strip_suffix(".gguf")?;
     let (before_total, total) = stem.rsplit_once("-of-")?;
@@ -557,11 +645,27 @@ fn split_model_part(path: &str) -> Option<(&str, usize, usize)> {
     (index > 0 && total > 0 && index <= total).then_some((prefix, index, total))
 }
 
-fn smallest_complete_model_bytes(entries: &[HfTreeEntry]) -> Option<u64> {
-    let mut candidates = Vec::new();
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ModelOption {
+    quant: String,
+    bytes: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SearchAssessment {
+    supported: bool,
+    quants: Vec<ModelOption>,
+    recommended_quant: Option<String>,
+}
+
+fn complete_model_options(entries: &[HfTreeEntry]) -> Vec<ModelOption> {
+    let mut options: HashMap<String, u64> = HashMap::new();
     let mut split_groups: HashMap<&str, (usize, BTreeMap<usize, u64>, bool)> = HashMap::new();
 
-    for entry in entries.iter().filter(|entry| is_model_gguf(&entry.path)) {
+    for entry in entries
+        .iter()
+        .filter(|entry| is_model_gguf(&entry.path) && !is_auxiliary_model_file(&entry.path))
+    {
         if let Some((prefix, index, total)) = split_model_part(&entry.path) {
             let group = split_groups
                 .entry(prefix)
@@ -570,22 +674,43 @@ fn smallest_complete_model_bytes(entries: &[HfTreeEntry]) -> Option<u64> {
                 group.2 = false;
             }
         } else {
-            candidates.push(entry.size);
+            let quant = extract_quant(&entry.path);
+            if !quant.is_empty() {
+                options
+                    .entry(quant)
+                    .and_modify(|bytes| *bytes = (*bytes).min(entry.size))
+                    .or_insert(entry.size);
+            }
         }
     }
 
-    for (expected, shards, valid) in split_groups.into_values() {
+    for (prefix, (expected, shards, valid)) in split_groups {
         if valid && shards.len() == expected && shards.keys().copied().eq(1..=expected) {
             let size = shards
                 .values()
                 .try_fold(0_u64, |total, size| total.checked_add(*size));
             if let Some(size) = size {
-                candidates.push(size);
+                let quant = extract_quant(prefix);
+                if !quant.is_empty() {
+                    options
+                        .entry(quant)
+                        .and_modify(|bytes| *bytes = (*bytes).min(size))
+                        .or_insert(size);
+                }
             }
         }
     }
 
-    candidates.into_iter().min()
+    let mut options = options
+        .into_iter()
+        .map(|(quant, bytes)| ModelOption { quant, bytes })
+        .collect::<Vec<_>>();
+    options.sort_by(|left, right| {
+        left.bytes
+            .cmp(&right.bytes)
+            .then_with(|| left.quant.cmp(&right.quant))
+    });
+    options
 }
 
 fn is_supported(model_bytes: Option<u64>, capacity_bytes: u64) -> bool {
@@ -642,9 +767,30 @@ fn is_standalone_model(hit: &Value, entries: &[HfTreeEntry]) -> bool {
     !(repository_is_auxiliary || filename_is_auxiliary)
 }
 
-fn repository_is_supported(hit: &Value, entries: &[HfTreeEntry], capacity_bytes: u64) -> bool {
-    is_standalone_model(hit, entries)
-        && is_supported(smallest_complete_model_bytes(entries), capacity_bytes)
+fn assess_repository(
+    hit: &Value,
+    entries: &[HfTreeEntry],
+    capacity_bytes: u64,
+) -> SearchAssessment {
+    if !is_standalone_model(hit, entries) {
+        return SearchAssessment::default();
+    }
+
+    let quants = complete_model_options(entries)
+        .into_iter()
+        .filter(|option| is_supported(Some(option.bytes), capacity_bytes))
+        .collect::<Vec<_>>();
+    let recommended_quant = quants
+        .iter()
+        .find(|option| option.quant == "Q4_K_M")
+        .or_else(|| quants.last())
+        .map(|option| option.quant.clone());
+
+    SearchAssessment {
+        supported: !quants.is_empty(),
+        quants,
+        recommended_quant,
+    }
 }
 
 /// Extract a quantization label from a GGUF filename.
@@ -655,20 +801,30 @@ fn extract_quant(filename: &str) -> String {
         .unwrap_or(filename);
 
     // Look for common quant patterns: Q4_K_M, Q5_K_S, IQ4_NL, BF16, etc.
-    let parts: Vec<&str> = stem.split('-').collect();
+    let parts: Vec<&str> = stem.split(['-', '.']).collect();
     for part in parts.iter().rev() {
         let upper = part.to_ascii_uppercase();
-        if upper.starts_with('Q') && upper.len() >= 3 {
-            return upper;
-        }
-        if upper.starts_with("IQ") && upper.len() >= 4 {
-            return upper;
-        }
-        if matches!(upper.as_str(), "BF16" | "FP16" | "FP32" | "F16" | "F32") {
+        if is_quant_token(&upper) {
             return upper;
         }
     }
     String::new()
+}
+
+fn is_quant_token(value: &str) -> bool {
+    if matches!(
+        value,
+        "BF16" | "FP16" | "FP32" | "F16" | "F32" | "MXFP4" | "NVFP4"
+    ) {
+        return true;
+    }
+    let bytes = value.as_bytes();
+    (bytes.len() >= 4
+        && bytes[0] == b'I'
+        && bytes[1] == b'Q'
+        && bytes[2].is_ascii_digit()
+        && bytes[3] == b'_')
+        || (bytes.len() >= 3 && bytes[0] == b'Q' && bytes[1].is_ascii_digit() && bytes[2] == b'_')
 }
 
 /// Duplicate of `models_registry::display_name_from_alias` (not pub).
@@ -728,8 +884,9 @@ fn dedupe_alias(alias: &str, used: &HashSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        is_standalone_model, is_supported, parse_connections, refresh_url_from_config,
-        render_search_table, repository_is_supported, smallest_complete_model_bytes,
+        ModelOption, SearchAssessment, assess_repository, complete_model_options, extract_quant,
+        format_hardware_summary, is_standalone_model, is_supported, parse_connections,
+        refresh_url_from_config, render_search_table, sample_pull_command,
     };
     use crate::config::hf_download::HfTreeEntry;
 
@@ -795,54 +952,128 @@ mod tests {
     }
 
     #[test]
-    fn repository_support_requires_standalone_model_and_memory_fit() {
-        let entries = [tree_entry("model-q4.gguf", 4_000)];
-        let auxiliary = serde_json::json!({
-            "id": "org/model",
-            "tags": ["auxiliary-model"],
-            "gguf": {"architecture": "llama"}
-        });
-        let standalone = serde_json::json!({
-            "id": "org/model",
-            "tags": [],
-            "gguf": {"architecture": "llama"}
-        });
-
-        assert!(!repository_is_supported(&auxiliary, &entries, 4_800));
-        assert!(repository_is_supported(&standalone, &entries, 4_800));
-        assert!(!repository_is_supported(&standalone, &entries, 4_799));
-    }
-
-    #[test]
-    fn smallest_complete_selects_smallest_normal_model() {
+    fn complete_model_options_extracts_named_normal_quants() {
         let entries = [
-            tree_entry("gemma-q8.gguf", 8 * 1024 * 1024 * 1024),
-            tree_entry("gemma-q4.gguf", 4 * 1024 * 1024 * 1024),
-            tree_entry("mmproj-gemma.gguf", 1024),
+            tree_entry("model-Q4_K_M.gguf", 4_000),
+            tree_entry("model-Q8_0.gguf", 8_000),
+            tree_entry("model.gguf", 2_000),
         ];
 
+        let options = complete_model_options(&entries);
+
         assert_eq!(
-            smallest_complete_model_bytes(&entries),
-            Some(4 * 1024 * 1024 * 1024)
+            options
+                .iter()
+                .map(|option| (option.quant.as_str(), option.bytes))
+                .collect::<Vec<_>>(),
+            vec![("Q4_K_M", 4_000), ("Q8_0", 8_000)]
         );
     }
 
     #[test]
-    fn smallest_complete_sums_all_split_model_shards() {
-        let entries = [
-            tree_entry("gemma-q4-00001-of-00002.gguf", 2_000),
-            tree_entry("gemma-q4-00002-of-00002.gguf", 3_000),
-            tree_entry("gemma-q8.gguf", 8_000),
-        ];
-
-        assert_eq!(smallest_complete_model_bytes(&entries), Some(5_000));
+    fn extract_quant_handles_dot_before_quant_label() {
+        assert_eq!(extract_quant("nomic-embed-text-v1.5.Q4_K_M.gguf"), "Q4_K_M");
     }
 
     #[test]
-    fn smallest_complete_rejects_incomplete_split_model() {
-        let entries = [tree_entry("gemma-q4-00001-of-00002.gguf", 2_000)];
+    fn extract_quant_rejects_descriptive_q_tokens() {
+        assert_eq!(extract_quant("model-Q4KExperts-Q8Out-chat.gguf"), "");
+        assert_eq!(extract_quant("model-Q2KDown-chat.gguf"), "");
+    }
 
-        assert_eq!(smallest_complete_model_bytes(&entries), None);
+    #[test]
+    fn complete_model_options_excludes_auxiliary_dspark_and_mtp_files() {
+        let entries = [
+            tree_entry("dspark-DeepSeek-V4-Flash-Q8_0.gguf", 10_000),
+            tree_entry("DeepSeek-V4-Flash-MTP-Q4K-Q8_0-F32.gguf", 3_500),
+            tree_entry("DeepSeek-V4-Flash-Q4_K_M.gguf", 80_000),
+            tree_entry("DeepSeek-V4-Pro-Qwen3.5-9B-MTP-Q4_K_M.gguf", 5_400),
+        ];
+
+        let options = complete_model_options(&entries);
+
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].quant, "Q4_K_M");
+        assert_eq!(options[0].bytes, 5_400);
+    }
+
+    #[test]
+    fn complete_model_options_groups_splits_and_rejects_incomplete_sets() {
+        let entries = [
+            tree_entry("model-Q5_K_M-00001-of-00002.gguf", 2_000),
+            tree_entry("model-Q5_K_M-00002-of-00002.gguf", 3_000),
+            tree_entry("model-Q6_K-00001-of-00002.gguf", 3_000),
+        ];
+
+        let options = complete_model_options(&entries);
+
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].quant, "Q5_K_M");
+        assert_eq!(options[0].bytes, 5_000);
+    }
+
+    #[test]
+    fn complete_model_options_deduplicates_quant_to_smallest_size() {
+        let entries = [
+            tree_entry("a-Q4_K_M.gguf", 4_500),
+            tree_entry("b-Q4_K_M.gguf", 4_000),
+        ];
+
+        let options = complete_model_options(&entries);
+
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].quant, "Q4_K_M");
+        assert_eq!(options[0].bytes, 4_000);
+    }
+
+    #[test]
+    fn search_assessment_filters_capacity_and_prefers_q4_k_m() {
+        let hit =
+            serde_json::json!({"id": "org/model", "tags": [], "gguf": {"architecture": "llama"}});
+        let entries = [
+            tree_entry("model-Q3_K_M.gguf", 3_000),
+            tree_entry("model-Q4_K_M.gguf", 4_000),
+            tree_entry("model-Q8_0.gguf", 8_000),
+        ];
+
+        let assessment = assess_repository(&hit, &entries, 4_800);
+
+        assert!(assessment.supported);
+        assert_eq!(
+            assessment
+                .quants
+                .iter()
+                .map(|option| option.quant.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Q3_K_M", "Q4_K_M"]
+        );
+        assert_eq!(assessment.recommended_quant.as_deref(), Some("Q4_K_M"));
+    }
+
+    #[test]
+    fn search_assessment_falls_back_to_largest_fitting_quant() {
+        let hit =
+            serde_json::json!({"id": "org/model", "tags": [], "gguf": {"architecture": "llama"}});
+        let entries = [
+            tree_entry("model-Q3_K_M.gguf", 3_000),
+            tree_entry("model-Q6_K.gguf", 6_000),
+        ];
+
+        let assessment = assess_repository(&hit, &entries, 7_200);
+
+        assert_eq!(assessment.recommended_quant.as_deref(), Some("Q6_K"));
+    }
+
+    #[test]
+    fn search_assessment_excludes_auxiliary_repositories() {
+        let hit = serde_json::json!({"id": "org/drafter", "tags": ["draft-model"], "gguf": {"architecture": "dflash"}});
+        let entries = [tree_entry("model-Q4_K_M.gguf", 4_000)];
+
+        let assessment = assess_repository(&hit, &entries, 4_800);
+
+        assert!(!assessment.supported);
+        assert!(assessment.quants.is_empty());
+        assert_eq!(assessment.recommended_quant, None);
     }
 
     #[test]
@@ -868,7 +1099,18 @@ mod tests {
             serde_json::json!({"id": "org/gemma-large", "siblings": [], "gguf": {}}),
         ];
 
-        let table = render_search_table(&hits, &[true, false]);
+        let assessments = [
+            SearchAssessment {
+                supported: true,
+                quants: vec![ModelOption {
+                    quant: "Q4_K_M".to_string(),
+                    bytes: 4_000,
+                }],
+                recommended_quant: Some("Q4_K_M".to_string()),
+            },
+            SearchAssessment::default(),
+        ];
+        let table = render_search_table(&hits, &assessments);
 
         assert!(table.lines().next().unwrap().contains("SUPPORTED"));
         assert!(
@@ -880,6 +1122,66 @@ mod tests {
             table
                 .lines()
                 .any(|line| line.contains("org/gemma-large") && line.contains("No"))
+        );
+    }
+
+    #[test]
+    fn search_output_renders_hardware_capacity_in_binary_gib() {
+        assert_eq!(
+            format_hardware_summary(65_536, 24_576),
+            "Hardware: System RAM 64.0 GiB | NVIDIA VRAM 24.0 GiB | Total 88.0 GiB"
+        );
+    }
+
+    #[test]
+    fn search_output_aligns_long_repository_rows_and_places_quant_last() {
+        let hits = vec![
+            serde_json::json!({"id": "org/short", "siblings": [], "gguf": {"total": 4_000, "architecture": "llama"}}),
+            serde_json::json!({"id": "org/a-very-long-repository-name-that-used-to-overflow", "siblings": [], "gguf": {"total": 8_000, "architecture": "llama"}}),
+        ];
+        let assessments = [
+            SearchAssessment {
+                supported: true,
+                quants: vec![ModelOption {
+                    quant: "Q4_K_M".to_string(),
+                    bytes: 4_000,
+                }],
+                recommended_quant: Some("Q4_K_M".to_string()),
+            },
+            SearchAssessment::default(),
+        ];
+
+        let table = render_search_table(&hits, &assessments);
+        let lines = table.lines().collect::<Vec<_>>();
+        let delimiters = |line: &str| {
+            line.match_indices(" | ")
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>()
+        };
+
+        assert_eq!(delimiters(lines[0]), delimiters(lines[1]));
+        assert_eq!(delimiters(lines[0]), delimiters(lines[2]));
+        assert!(lines[0].ends_with("QUANT"));
+        assert!(lines[1].ends_with("Q4_K_M"));
+        assert!(lines[2].ends_with('-'));
+    }
+
+    #[test]
+    fn search_output_builds_q4_pull_command_and_omits_empty_recommendation() {
+        let hits = vec![serde_json::json!({"id": "org/model"})];
+        let supported = [SearchAssessment {
+            supported: true,
+            quants: vec![],
+            recommended_quant: Some("Q4_K_M".to_string()),
+        }];
+
+        assert_eq!(
+            sample_pull_command(&hits, &supported).as_deref(),
+            Some("Try: ggs models pull org/model --quant Q4_K_M")
+        );
+        assert_eq!(
+            sample_pull_command(&hits, &[SearchAssessment::default()]),
+            None
         );
     }
 

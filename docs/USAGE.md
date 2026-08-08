@@ -43,7 +43,11 @@ Run the same checks manually:
 ggs models search "gemma"
 ```
 
-`Yes` means the repository contains at least one standalone, complete, non-projector GGUF that fits total system RAM plus total NVIDIA VRAM with 20% runtime headroom. Auxiliary speculative-decoding drafters require a separate target model, so they show `No` even when they fit memory. CPU-only systems use system RAM alone. This is a discovery estimate: context size, KV cache, GPU offload, and other runtime allocations can still prevent a model from loading.
+Search prints total system RAM, NVIDIA VRAM, and their combined capacity before an aligned table. The `QUANT` column lists every named standalone quantization that fits with 20% runtime headroom, ordered from smallest to largest complete file size. Complete split-file models are counted once. `SUPPORTED` is `Yes` exactly when this list is non-empty.
+
+Auxiliary speculative-decoding drafters require a separate target model, so they show `No` and `QUANT` shows `-` even when they fit memory. CPU-only systems use system RAM alone. This is a discovery estimate: context size, KV cache, GPU offload, and other runtime allocations can still prevent a model from loading.
+
+After the results, search prints a pull command for the first supported repository. It recommends `Q4_K_M` when available; otherwise it selects the largest fitting quantization.
 
 ## Systemd service
 

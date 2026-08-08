@@ -11,7 +11,10 @@ Replace the single smallest-model calculation with a pure option extractor that 
 - A normal model GGUF is one option.
 - A split GGUF is one option only when every declared shard exists; its bytes are the checked sum of all shard sizes.
 - Derive the split option's quant from the common filename prefix.
+- Recognize quant labels preceded by either `-` or `.`, including filenames such as `nomic-embed-text-v1.5.Q4_K_M.gguf`. The same parser serves search, files, and pull commands.
+- Accept only standard quant-shaped tokens (`Q<digit>_...`, `IQ<digit>_...`) and explicit precision labels (`BF16`, `FP16`, `FP32`, `F16`, `F32`, `MXFP4`, `NVFP4`). Descriptive fragments such as `Q8Out` and `Q2KDown` are not pullable quant labels.
 - Continue excluding projectors, adapters, tokenizers, vocabularies, and other non-model GGUF files.
+- Exclude clearly auxiliary options within otherwise normal repositories: filenames with an `MTP` token, filenames beginning with `dspark-`, and filenames containing both `DSpark` and `support` tokens.
 - Ignore options whose filename has no recognized quant label for the `QUANT` column and pull recommendation. An unnamed option must not make `SUPPORTED=Yes` because it cannot produce the required `--quant` command reliably.
 - When several files represent the same quant, retain the smallest complete byte size for that quant.
 
@@ -71,6 +74,8 @@ Update `docs/USAGE.md` to explain the column and recommendation rule.
 Write failing tests first for:
 
 - extracting named normal options;
+- extracting a quant separated from the model name by a dot;
+- rejecting descriptive Q-prefixed filename fragments and auxiliary DSpark/MTP files;
 - grouping complete split options and rejecting incomplete shards;
 - deduplicating a quant to its smallest complete option;
 - filtering options with the 20 percent headroom rule;
