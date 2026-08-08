@@ -53,7 +53,7 @@ version = 1
 models_dir = "/models"                        # Root directory for GGUF files
 llama_server = "/usr/local/bin/llama-server"  # Backend binary (auto-detected on discover)
 host = "127.0.0.1"                            # llama-server bind host
-base_port = 8081                              # First model port; others increment from here
+base_port = 18081                              # First internal model port; others increment from here
 context_size = 16384                          # Safe default for consumer GPUs; raise if you have VRAM headroom
 ngl = 999                                     # Default -ngl (GPU layers)
 backend = "llama.cpp"
@@ -67,7 +67,7 @@ display_name = "Gemma 4 E4B"
 kind = "chat"             # chat | coder | vision | embedding (inferred when omitted)
 enabled = true            # false = hide from /v1/models and scheduling
 priority = true           # Auto-load after idle_timeout (only one should be true)
-# port = 8085             # Override auto-assigned port (optional)
+# port = 18081            # Internal assigned port; refresh normalizes the sequence
 # context_size = 32768    # Override VRAM-based default from config.toml vram_gb (optional)
 # ngl = 40                # Pin GPU layers (disables auto_ngl for this model)
 # description = "..."     # Optional blurb for /v1/models + Swagger (or run sync-hf-metadata)
@@ -92,7 +92,7 @@ priority = true           # Auto-load after idle_timeout (only one should be tru
 | `[[models]].kind` | `chat`, `coder`, `vision`, or `embedding` — inferred from alias/file when omitted |
 | `[[models]].enabled` | When `false`, model is omitted from `/v1/models` and scheduling |
 | `[[models]].priority` | If `true`, this model loads automatically after `idle_timeout` |
-| `[[models]].port` | Override the auto-assigned backend port |
+| `[[models]].port` | Normalized internal backend port; discovery and refresh rewrite it from `defaults.base_port` |
 | `[[models]].context_size` | Override per-model `-c` (otherwise sized from `vram_gb`) |
 | `[[models]].ngl` | Override per-model `-ngl` (pins against `auto_ngl`) |
 | `[[models]].description` | Optional description shown in `/v1/models` and Swagger |
@@ -167,15 +167,15 @@ Set `enabled = false` to keep a model in the registry but hide it from `/v1/mode
 
 #### Port assignment
 
-Ports are assigned sequentially from `defaults.base_port`:
+Ports are internal implementation details assigned sequentially from `defaults.base_port` after models are sorted deterministically:
 
-| Index | Port (default base 8081) |
+| Index | Port (default base 18081) |
 |-------|--------------------------|
-| 0 | 8081 |
-| 1 | 8082 |
-| 2 | 8083 |
+| 0 | 18081 |
+| 1 | 18082 |
+| 2 | 18083 |
 
-Set `port` on a specific `[[models]]` entry to pin a backend to a fixed port.
+Discovery and refresh replace existing per-model `port` values with this normalized sequence. Set `defaults.base_port` to move the entire internal range.
 
 #### Alias generation
 
@@ -354,12 +354,12 @@ command = "/usr/local/bin/llama-server"
 args = [
     "-m", "/models/gemma-3-4b.gguf",
     "--host", "127.0.0.1",
-    "--port", "8081",
+    "--port", "18081",
     "-c", "16384",
     "-ngl", "999",
 ]
-backend_url = "http://127.0.0.1:8081/v1"
-health_url = "http://127.0.0.1:8081/health"
+backend_url = "http://127.0.0.1:18081/v1"
+health_url = "http://127.0.0.1:18081/health"
 priority = true                # Auto-load after idle timeout
 
 [models.local-qwen-coder]
@@ -369,12 +369,12 @@ command = "/usr/local/bin/llama-server"
 args = [
     "-m", "/models/qwen2.5-coder-7b.gguf",
     "--host", "127.0.0.1",
-    "--port", "8082",
+    "--port", "18082",
     "-c", "16384",
     "-ngl", "999",
 ]
-backend_url = "http://127.0.0.1:8082/v1"
-health_url = "http://127.0.0.1:8082/health"
+backend_url = "http://127.0.0.1:18082/v1"
+health_url = "http://127.0.0.1:18082/health"
 priority = false
 ```
 

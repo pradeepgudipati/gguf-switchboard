@@ -66,7 +66,7 @@ pub struct RegistryEntry {
     pub enabled: bool,
     #[serde(default)]
     pub priority: bool,
-    /// Override the auto-assigned backend port.
+    /// Backend port assigned from the registry's consecutive internal range.
     #[serde(default)]
     pub port: Option<u16>,
     /// Override `defaults.context_size` for this model.
@@ -184,7 +184,7 @@ fn default_host() -> String {
 }
 
 fn default_base_port() -> u16 {
-    8081
+    18081
 }
 
 fn default_context_size() -> u32 {
@@ -731,6 +731,27 @@ fn dedupe_registry_entries(entries: &mut Vec<RegistryEntry>) {
     *entries = deduped;
 }
 
+fn assign_consecutive_ports(
+    entries: &mut [RegistryEntry],
+    base_port: u16,
+) -> Result<(), RuntimeError> {
+    let model_count = entries.len();
+    for (index, entry) in entries.iter_mut().enumerate() {
+        let offset = u16::try_from(index).map_err(|_| {
+            RuntimeError::ConfigError(format!(
+                "Model port range exhausted from base {base_port} for {model_count} models"
+            ))
+        })?;
+        let port = base_port.checked_add(offset).ok_or_else(|| {
+            RuntimeError::ConfigError(format!(
+                "Model port range exhausted from base {base_port} for {model_count} models"
+            ))
+        })?;
+        entry.port = Some(port);
+    }
+    Ok(())
+}
+
 fn merge_registry_entry(target: &mut RegistryEntry, incoming: &RegistryEntry) {
     if target.display_name.is_none() {
         target.display_name = incoming.display_name.clone();
@@ -1077,7 +1098,8 @@ impl ModelsRegistry {
     ///
     /// `dirs` may be a single path or comma-separated list (e.g. `"/models,/data/gguf"`).
     /// When merging, entries are matched by normalized `file` path. Existing
-    /// `alias`, `display_name`, `priority`, `port`, and `context_size` are preserved.
+    /// `alias`, `display_name`, `priority`, and `context_size` are preserved.
+    /// Ports are normalized into a consecutive internal range.
     /// Entries whose files are gone are dropped (including when the scan finds zero GGUFs).
     pub fn discover_with_merge(
         dirs: &str,
@@ -1182,6 +1204,7 @@ impl ModelsRegistry {
         }
 
         dedupe_registry_entries(&mut registry.models);
+        assign_consecutive_ports(&mut registry.models, registry.defaults.base_port)?;
         assign_default_priority(&mut registry, &models_dirs, merge_from);
         normalize_priority_entries(&mut registry.models);
 
@@ -1363,6 +1386,7 @@ impl ModelsRegistry {
         }
 
         validate_unique_aliases(&entries)?;
+        assign_consecutive_ports(&mut entries, self.defaults.base_port)?;
 
         let backend = if self.defaults.backend.is_empty() {
             fallback_backend.to_string()
@@ -1371,11 +1395,14 @@ impl ModelsRegistry {
         };
 
         let mut models = HashMap::new();
-        for (index, entry) in entries.iter().enumerate() {
+        for entry in &entries {
             let model_path = resolve_model_path(&models_dirs, &entry.file)?;
-            let port = entry
-                .port
-                .unwrap_or(self.defaults.base_port.saturating_add(index as u16));
+            let port = entry.port.ok_or_else(|| {
+                RuntimeError::ConfigError(format!(
+                    "Model '{}' has no assigned backend port",
+                    entry.alias
+                ))
+            })?;
             let context_size =
                 suggest_context_size(vram_gb, entry, &model_path, self.defaults.context_size);
             let ngl = entry.ngl.unwrap_or(self.defaults.ngl);
@@ -1635,6 +1662,54 @@ fn collect_gguf_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), RuntimeE
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_ports_default_to_obscure_range() {
+        assert_eq!(RegistryDefaults::default().base_port, 18081);
+    }
+
+    #[test]
+    fn model_ports_are_consecutive_and_replace_existing_values() {
+        let mut entries = vec![
+            RegistryEntry {
+                alias: "alpha".to_string(),
+                port: Some(8081),
+                ..Default::default()
+            },
+            RegistryEntry {
+                alias: "beta".to_string(),
+                port: None,
+                ..Default::default()
+            },
+            RegistryEntry {
+                alias: "gamma".to_string(),
+                port: Some(65500),
+                ..Default::default()
+            },
+        ];
+
+        assign_consecutive_ports(&mut entries, 18081).unwrap();
+        assert_eq!(
+            entries.iter().map(|entry| entry.port).collect::<Vec<_>>(),
+            vec![Some(18081), Some(18082), Some(18083)]
+        );
+
+        assign_consecutive_ports(&mut entries, 18081).unwrap();
+        assert_eq!(
+            entries.iter().map(|entry| entry.port).collect::<Vec<_>>(),
+            vec![Some(18081), Some(18082), Some(18083)]
+        );
+    }
+
+    #[test]
+    fn model_ports_error_when_range_is_exhausted() {
+        let mut entries = vec![RegistryEntry::default(), RegistryEntry::default()];
+
+        let error = assign_consecutive_ports(&mut entries, u16::MAX).unwrap_err();
+        assert!(matches!(error, RuntimeError::ConfigError(_)));
+        assert!(error.to_string().contains("65535"));
+        assert!(error.to_string().contains("2 models"));
+    }
 
     fn write_gguf_string(buf: &mut Vec<u8>, value: &str) {
         buf.extend_from_slice(&(value.len() as u64).to_le_bytes());

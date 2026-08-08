@@ -19,7 +19,7 @@ version = 1
 models_dir = "/models"
 llama_server = "/usr/local/bin/llama-server"
 host = "127.0.0.1"
-base_port = 8081
+base_port = 18081
 # Fallback context when VRAM heuristics do not apply; see config.toml `vram_gb`.
 # 16384 is safe on most consumer GPUs — raise to 32768/65536 if you have headroom.
 context_size = 16384
@@ -32,7 +32,7 @@ backend = "llama.cpp"
 # validation and are warn+skipped when they fail (path existence alone is not enough).
 auto_discover = true
 
-# Optional [[models]] entries pin aliases, display names, ports, or priority for
+# Optional [[models]] entries pin aliases, display names, or priority for
 # specific files. The GGUF must still pass validation to be registered.
 # Any other valid .gguf under models_dir is picked up by auto_discover.
 #
