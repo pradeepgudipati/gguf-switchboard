@@ -134,4 +134,22 @@ rm -f "$MODELS_FILE.bak"
 configure_llama_server /usr/bin/llama-server
 grep -q "llama_server = \"$custom_llama\"" "$MODELS_FILE"
 
+empty_models="$TMP/empty-models"
+mkdir -p "$empty_models"
+sed -i.bak -e "s|^models_dir = .*|models_dir = \"$empty_models\"|" "$MODELS_FILE"
+rm -f "$MODELS_FILE.bak"
+! registry_has_model_candidates "$MODELS_FILE"
+
+write_minimal_gguf "$empty_models/starter.gguf" llama
+registry_has_model_candidates "$MODELS_FILE"
+
+model_help="$(model_setup_help "$empty_models")"
+grep -q 'ggs models search "Qwen3.5 9B"' <<<"$model_help"
+grep -q 'ggs models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M' <<<"$model_help"
+grep -q './deploy.sh --refresh-models' <<<"$model_help"
+
+empty_check_line="$(grep -n 'registry_has_model_candidates "\$MODELS_FILE"' deploy.sh | tail -1 | cut -d: -f1)"
+start_line="$(grep -n '^sudo systemctl start gguf-switchboard$' deploy.sh | cut -d: -f1)"
+test "$empty_check_line" -lt "$start_line"
+
 echo "deploy models generation validation passed"

@@ -246,6 +246,8 @@ When generation runs:
 
 If discovery finds no valid GGUF files, deploy keeps the runtime registry created from `models.example.toml` and prints next-step guidance. Ordinary deployments preserve existing runtime configuration; only `--refresh-models` regenerates the model registry.
 
+An empty first installation completes successfully without starting the systemd service. Deploy prints concrete `ggs models search` and `ggs models pull` commands; after downloading a model, run `./deploy.sh --refresh-models` to generate the registry and start the service.
+
 Deploy resolves `llama-server` from `PATH`, `/usr/local/bin`, `/usr/bin`, `~/llama.cpp/build/bin`, or `/opt/llama.cpp/build/bin`. It writes a detected path to `defaults.llama_server` in a new or untouched example registry. A custom `llama_server` value is never replaced. The executable belongs in `models.toml`; `config.toml` contains the `models_file` reference rather than a duplicate backend path.
 
 Set `models_dir` in `models.toml` or pass `MODELS_DIR` when models live outside `/models`:

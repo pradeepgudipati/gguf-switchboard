@@ -102,7 +102,7 @@ print_models_from_config() {
 read_models_dir_from_toml() {
     local file="$1"
     [[ -r "$file" ]] || return 1
-    awk -F'"' '/^models_dir\s*=/ { print $2; exit }' "$file"
+    awk -F'"' '/^models_dir[[:space:]]*=/ { print $2; exit }' "$file"
 }
 
 print_models_dir_hints() {
@@ -188,6 +188,41 @@ configure_llama_server() {
     sed -i.bak -e "s|^llama_server = .*|llama_server = \"$resolved\"|" "$MODELS_FILE"
     rm -f "$MODELS_FILE.bak"
     echo "==> Configured llama-server: $resolved"
+}
+
+registry_has_model_candidates() {
+    local registry="$1" dirs dir
+    [[ -r "$registry" ]] || return 1
+
+    if grep -q '^\[\[models\]\]' "$registry"; then
+        return 0
+    fi
+
+    dirs="$(read_models_dir_from_toml "$registry" 2>/dev/null || true)"
+    [[ -n "$dirs" ]] || return 1
+    IFS=',' read -r -a model_dirs <<<"$dirs"
+    for dir in "${model_dirs[@]}"; do
+        if [[ -d "$dir" ]] && find "$dir" -type f -iname '*.gguf' -print -quit | grep -q .; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+model_setup_help() {
+    local models_dir="$1"
+    cat <<EOF
+==> gguf-switchboard installed. No GGUF models are available yet.
+
+Search for a model:
+  ggs models search "Qwen3.5 9B"
+
+Download a recommended quantization:
+  ggs models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --dir "$models_dir"
+
+Then finish service setup:
+  ./deploy.sh --refresh-models
+EOF
 }
 
 # Copy src → dst without sudo when possible; avoid no-op self-copies.
@@ -528,6 +563,13 @@ sudo systemctl stop gguf-switchboard || true
 
 echo "==> Installing binary..."
 sudo cp target/release/gguf-switchboard /usr/local/bin/
+
+if ! registry_has_model_candidates "$MODELS_FILE"; then
+    sudo systemctl disable --now gguf-switchboard >/dev/null 2>&1 || true
+    echo ""
+    model_setup_help "${MODELS_DIR:-$HOME/models}"
+    exit 0
+fi
 
 echo "==> Starting service..."
 sudo systemctl start gguf-switchboard

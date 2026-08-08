@@ -9,6 +9,7 @@ use std::process::Stdio;
 use futures::StreamExt;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
+use tokio::fs::OpenOptions;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
 
@@ -37,8 +38,7 @@ fn aria2_args(
         OsString::from(format!("--dir={}", dest_dir.display())),
         OsString::from(format!("--out={filename}")),
     ];
-    #[cfg(target_os = "linux")]
-    args.push(OsString::from("--file-allocation=falloc"));
+    args.push(OsString::from("--file-allocation=none"));
     if let Some(checksum) = checksum {
         args.push(OsString::from(format!("--checksum=sha-256={checksum}")));
     }
@@ -128,22 +128,6 @@ pub async fn download_file(
     dest_dir: &Path,
 ) -> Result<PathBuf, RuntimeError> {
     let url = download_url(repo, filename);
-    let resp = client.get(&url).send().await.map_err(RuntimeError::from)?;
-
-    if resp.status() == reqwest::StatusCode::NOT_FOUND {
-        return Err(RuntimeError::ConfigError(format!(
-            "File not found: {repo}/{filename}"
-        )));
-    }
-    if !resp.status().is_success() {
-        return Err(RuntimeError::ProxyError(format!(
-            "HF download failed for {repo}/{filename}: HTTP {}",
-            resp.status()
-        )));
-    }
-
-    let total = resp.content_length().unwrap_or(0);
-
     tokio::fs::create_dir_all(dest_dir).await.map_err(|e| {
         RuntimeError::ConfigError(format!(
             "Failed to create directory '{}': {e}",
@@ -152,16 +136,62 @@ pub async fn download_file(
     })?;
 
     let dest_path = dest_dir.join(filename);
-    let file = tokio::fs::File::create(&dest_path).await.map_err(|e| {
-        RuntimeError::ConfigError(format!(
-            "Failed to create file '{}': {e}",
-            dest_path.display()
-        ))
-    })?;
+    download_url_to_path(client, &url, &dest_path).await?;
+    Ok(dest_path)
+}
+
+async fn download_url_to_path(
+    client: &reqwest::Client,
+    url: &str,
+    dest_path: &Path,
+) -> Result<(), RuntimeError> {
+    let existing = tokio::fs::metadata(dest_path)
+        .await
+        .map(|metadata| metadata.len())
+        .unwrap_or(0);
+    let mut request = client.get(url);
+    if existing > 0 {
+        request = request.header(reqwest::header::RANGE, format!("bytes={existing}-"));
+        println!("Resuming native download at {}", format_bytes(existing));
+    }
+    let resp = request.send().await.map_err(RuntimeError::from)?;
+
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(RuntimeError::ConfigError(format!("File not found: {url}")));
+    }
+    if resp.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE && existing > 0 {
+        return Ok(());
+    }
+    if !resp.status().is_success() {
+        return Err(RuntimeError::ProxyError(format!(
+            "Download failed for {url}: HTTP {}",
+            resp.status()
+        )));
+    }
+
+    let resumed = existing > 0 && resp.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+    let starting_size = if resumed { existing } else { 0 };
+    let total = resp
+        .content_length()
+        .map(|length| length + starting_size)
+        .unwrap_or(0);
+    let file = OpenOptions::new()
+        .create(true)
+        .write(true)
+        .append(resumed)
+        .truncate(!resumed)
+        .open(dest_path)
+        .await
+        .map_err(|e| {
+            RuntimeError::ConfigError(format!(
+                "Failed to create file '{}': {e}",
+                dest_path.display()
+            ))
+        })?;
     let mut writer = tokio::io::BufWriter::new(file);
 
     let mut stream = resp.bytes_stream();
-    let mut downloaded: u64 = 0;
+    let mut downloaded = starting_size;
 
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(RuntimeError::from)?;
@@ -195,7 +225,7 @@ pub async fn download_file(
         println!("\rDownloading... {} complete", format_bytes(downloaded));
     }
 
-    Ok(dest_path)
+    Ok(())
 }
 
 /// Download through aria2c when it is available and safe, otherwise use reqwest.
@@ -249,11 +279,16 @@ pub async fn download_file_auto(
             .await
             .map_err(|e| RuntimeError::ConfigError(format!("Failed to start aria2c: {e}")))?;
         if !status.success() {
-            return Err(RuntimeError::ConfigError(format!(
-                "aria2c download failed with status {status}; rerun the command to resume"
-            )));
+            eprintln!(
+                "Warning: aria2c failed with status {status}; resuming with native downloader"
+            );
+            let downloaded = download_file(client, repo, &entry.path, dest_dir).await?;
+            let control_file = PathBuf::from(format!("{}.aria2", downloaded.display()));
+            let _ = tokio::fs::remove_file(control_file).await;
+            downloaded
+        } else {
+            dest_dir.join(filename)
         }
-        dest_dir.join(filename)
     } else {
         if authenticated {
             println!("HF_TOKEN detected; using secure native downloader");
@@ -339,7 +374,11 @@ pub fn format_bytes(bytes: u64) -> String {
 mod tests {
     use std::ffi::OsString;
 
-    use super::{aria2_args, download_url, verify_download};
+    use axum::Router;
+    use axum::http::{HeaderMap, StatusCode, header};
+    use axum::routing::get;
+
+    use super::{aria2_args, download_url, download_url_to_path, verify_download};
 
     #[test]
     fn download_url_uses_hugging_face_repository_route() {
@@ -368,6 +407,7 @@ mod tests {
             "--split=8",
             "--max-connection-per-server=8",
             "--min-split-size=64M",
+            "--file-allocation=none",
             "--dir=/home/pradeep/models",
             "--out=model.gguf",
             "--checksum=sha-256=abc123",
@@ -377,8 +417,6 @@ mod tests {
                 "missing {expected}"
             );
         }
-        #[cfg(target_os = "linux")]
-        assert!(args.contains(&OsString::from("--file-allocation=falloc")));
         assert_eq!(
             args.last(),
             Some(&OsString::from(
@@ -405,5 +443,38 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.to_string().contains("SHA-256 mismatch"));
+    }
+
+    #[tokio::test]
+    async fn native_download_resumes_partial_file() {
+        async fn ranged(headers: HeaderMap) -> (StatusCode, HeaderMap, &'static [u8]) {
+            assert_eq!(headers.get(header::RANGE).unwrap(), "bytes=2-");
+            let mut response_headers = HeaderMap::new();
+            response_headers.insert(header::CONTENT_RANGE, "bytes 2-3/4".parse().unwrap());
+            (StatusCode::PARTIAL_CONTENT, response_headers, b"uf")
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, Router::new().route("/model.gguf", get(ranged)))
+                .await
+                .unwrap();
+        });
+
+        let dir = tempfile::tempdir().unwrap();
+        let destination = dir.path().join("model.gguf");
+        tokio::fs::write(&destination, b"gg").await.unwrap();
+        let client = reqwest::Client::new();
+
+        download_url_to_path(
+            &client,
+            &format!("http://{address}/model.gguf"),
+            &destination,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(tokio::fs::read(destination).await.unwrap(), b"gguf");
     }
 }

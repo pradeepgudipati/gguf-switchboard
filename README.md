@@ -211,7 +211,7 @@ gguf-switchboard models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M -
 gguf-switchboard models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --connections 8
 ```
 
-Public downloads automatically use `aria2c` when available, then verify the expected size, Hugging Face LFS checksum, and GGUF metadata before registration. Authenticated downloads using `HF_TOKEN`, or systems without `aria2c`, use the native downloader. A successful pull refreshes a running gguf-switchboard server automatically.
+Public downloads automatically use `aria2c` when available, then verify the expected size, Hugging Face LFS checksum, and GGUF metadata before registration. If Hugging Face rejects parallel range requests, the native downloader resumes the partial file. Authenticated downloads using `HF_TOKEN`, or systems without `aria2c`, use the native downloader directly. A successful pull refreshes a running gguf-switchboard server automatically.
 
 Or download manually — any `.gguf` file in `~/models` works:
 
@@ -300,6 +300,7 @@ ggs config.toml
 | Symptom | Likely fix |
 |---------|------------|
 | Service unhealthy / no models | Put GGUFs in `~/models` (or set `MODELS_DIR`) and run `./deploy.sh --refresh-models` |
+| First install has no GGUF models | This is not fatal. The installer leaves the service stopped and prints `ggs models search`, `ggs models pull`, and the final `./deploy.sh --refresh-models` command. |
 | `llama-server: not found` when loading | Install llama.cpp server; put it on `PATH` or set `defaults.llama_server` in `models.toml` |
 | Empty `/v1/models` | Check `models_dir` in `models.toml`; enable `auto_discover = true`; restart |
 | Deploy "lost" my edits | `git stash list` — deploy stashes dirty trees before pull |
