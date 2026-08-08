@@ -360,38 +360,24 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     // 2. Select file by quant.
     let selected = match &quant {
         Some(q) => {
-            let matches: Vec<&&HfTreeEntry> = model_entries
-                .iter()
-                .filter(|e| extract_quant(&e.path).to_uppercase().contains(q))
-                .collect();
-            match matches.len() {
-                0 => {
-                    println!("No file matches quant \"{q}\". Available:");
+            let capacity_bytes = if q.eq_ignore_ascii_case("auto") {
+                let total_ram_mb = crate::memory::check_memory()
+                    .ok_or("models pull: could not detect system RAM for --quant auto")?
+                    .total_mb;
+                total_ram_mb
+                    .saturating_add(crate::gpu::total_vram_mb().unwrap_or(0))
+                    .saturating_mul(1024 * 1024)
+            } else {
+                0
+            };
+            match select_quant_entry(&model_entries, q, capacity_bytes, &repo) {
+                Ok(entry) => entry,
+                Err(reason) => {
+                    println!("Could not resolve quant \"{q}\": {reason}. Available:");
                     for entry in &model_entries {
                         println!("  {} ({})", entry.path, extract_quant(&entry.path));
                     }
                     return Err("models pull: no matching quantization".into());
-                }
-                1 => matches[0],
-                _ => {
-                    // Multiple matches — prefer exact quant string.
-                    let exact: Vec<&&HfTreeEntry> = matches
-                        .iter()
-                        .filter(|e| extract_quant(&e.path).to_uppercase() == *q)
-                        .copied()
-                        .collect();
-                    if exact.len() == 1 {
-                        exact[0]
-                    } else {
-                        println!("Multiple files match \"{q}\":");
-                        for entry in &matches {
-                            println!("  {} ({})", entry.path, extract_quant(&entry.path));
-                        }
-                        return Err(
-                            "models pull: ambiguous quantization; use a more specific --quant"
-                                .into(),
-                        );
-                    }
                 }
             }
         }
@@ -637,7 +623,10 @@ fn is_auxiliary_model_file(path: &str) -> bool {
 }
 
 fn split_model_part(path: &str) -> Option<(&str, usize, usize)> {
-    let stem = path.strip_suffix(".gguf")?;
+    let stem = path.get(..path.len().checked_sub(5)?)?;
+    if !path.get(path.len() - 5..)?.eq_ignore_ascii_case(".gguf") {
+        return None;
+    }
     let (before_total, total) = stem.rsplit_once("-of-")?;
     let (prefix, index) = before_total.rsplit_once('-')?;
     let index = index.parse::<usize>().ok()?;
@@ -715,6 +704,70 @@ fn complete_model_options(entries: &[HfTreeEntry]) -> Vec<ModelOption> {
 
 fn is_supported(model_bytes: Option<u64>, capacity_bytes: u64) -> bool {
     model_bytes.is_some_and(|bytes| u128::from(bytes) * 120 <= u128::from(capacity_bytes) * 100)
+}
+
+fn select_quant_entry<'a>(
+    entries: &'a [&'a HfTreeEntry],
+    selector: &str,
+    capacity_bytes: u64,
+    repository: &str,
+) -> Result<&'a HfTreeEntry, String> {
+    let selector = selector.trim().to_ascii_uppercase();
+
+    if selector == "AUTO" {
+        if contains_auxiliary_token(repository) {
+            return Err("auto selection is disabled for an auxiliary repository".to_string());
+        }
+        return entries
+            .iter()
+            .copied()
+            .filter(|entry| !is_auxiliary_model_file(&entry.path))
+            .filter(|entry| !contains_auxiliary_token(&entry.path))
+            .filter(|entry| split_model_part(&entry.path).is_none())
+            .filter(|entry| !extract_quant(&entry.path).is_empty())
+            .filter(|entry| is_supported(Some(entry.size), capacity_bytes))
+            .max_by_key(|entry| entry.size)
+            .ok_or_else(|| "no quantization fits the detected hardware capacity".to_string());
+    }
+
+    let target = if selector == "K_M" {
+        "Q4_K_M".to_string()
+    } else if selector.len() >= 2
+        && selector.starts_with('Q')
+        && selector[1..]
+            .chars()
+            .all(|character| character.is_ascii_digit())
+    {
+        let preferences = [
+            format!("{selector}_K_M"),
+            format!("{selector}_K_S"),
+            format!("{selector}_0"),
+            format!("{selector}_1"),
+        ];
+        preferences
+            .into_iter()
+            .find(|preference| {
+                entries
+                    .iter()
+                    .any(|entry| extract_quant(&entry.path) == *preference)
+            })
+            .ok_or_else(|| format!("no preferred {selector} quantization is available"))?
+    } else {
+        selector
+    };
+
+    let matches = entries
+        .iter()
+        .copied()
+        .filter(|entry| extract_quant(&entry.path) == target)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [entry] => Ok(*entry),
+        [] => Err(format!("quantization {target} is not available")),
+        _ => Err(format!(
+            "multiple files provide {target}; use a repository with one file per quantization"
+        )),
+    }
 }
 
 fn contains_auxiliary_token(value: &str) -> bool {
@@ -886,7 +939,7 @@ mod tests {
     use super::{
         ModelOption, SearchAssessment, assess_repository, complete_model_options, extract_quant,
         format_hardware_summary, is_standalone_model, is_supported, parse_connections,
-        refresh_url_from_config, render_search_table, sample_pull_command,
+        refresh_url_from_config, render_search_table, sample_pull_command, select_quant_entry,
     };
     use crate::config::hf_download::HfTreeEntry;
 
@@ -979,6 +1032,96 @@ mod tests {
     fn extract_quant_rejects_descriptive_q_tokens() {
         assert_eq!(extract_quant("model-Q4KExperts-Q8Out-chat.gguf"), "");
         assert_eq!(extract_quant("model-Q2KDown-chat.gguf"), "");
+    }
+
+    #[test]
+    fn quant_selector_prefers_an_exact_quant() {
+        let entries = [
+            tree_entry("model-Q4_K_S.gguf", 3_000),
+            tree_entry("model-Q4_K_M.gguf", 4_000),
+        ];
+        let candidates = entries.iter().collect::<Vec<_>>();
+
+        let selected = select_quant_entry(&candidates, "q4_k_m", 0, "org/model").unwrap();
+
+        assert_eq!(selected.path, "model-Q4_K_M.gguf");
+    }
+
+    #[test]
+    fn quant_selector_uses_q4_family_preference_order() {
+        let entries = [
+            tree_entry("model-Q4_0.gguf", 3_000),
+            tree_entry("model-Q4_K_S.gguf", 3_500),
+            tree_entry("model-Q4_K_M.gguf", 4_000),
+        ];
+        let candidates = entries.iter().collect::<Vec<_>>();
+
+        let selected = select_quant_entry(&candidates, "Q4", 0, "org/model").unwrap();
+
+        assert_eq!(selected.path, "model-Q4_K_M.gguf");
+    }
+
+    #[test]
+    fn quant_selector_maps_k_m_to_q4_k_m() {
+        let entries = [
+            tree_entry("model-Q3_K_M.gguf", 3_000),
+            tree_entry("model-Q4_K_M.gguf", 4_000),
+            tree_entry("model-Q5_K_M.gguf", 5_000),
+        ];
+        let candidates = entries.iter().collect::<Vec<_>>();
+
+        let selected = select_quant_entry(&candidates, "K_M", 0, "org/model").unwrap();
+
+        assert_eq!(selected.path, "model-Q4_K_M.gguf");
+    }
+
+    #[test]
+    fn quant_selector_auto_chooses_largest_quant_with_headroom() {
+        let entries = [
+            tree_entry("model-Q3_K_M.gguf", 3_000),
+            tree_entry("model-Q4_K_M.gguf", 4_000),
+            tree_entry("model-Q5_K_M.gguf", 5_000),
+        ];
+        let candidates = entries.iter().collect::<Vec<_>>();
+
+        let selected = select_quant_entry(&candidates, "auto", 4_800, "org/model").unwrap();
+
+        assert_eq!(selected.path, "model-Q4_K_M.gguf");
+    }
+
+    #[test]
+    fn quant_selector_auto_rejects_hardware_with_no_fitting_quant() {
+        let entries = [tree_entry("model-Q2_K.gguf", 3_000)];
+        let candidates = entries.iter().collect::<Vec<_>>();
+
+        let error = select_quant_entry(&candidates, "auto", 3_599, "org/model").unwrap_err();
+
+        assert!(error.contains("no quantization fits"));
+    }
+
+    #[test]
+    fn quant_selector_auto_ignores_auxiliary_and_split_files() {
+        let entries = [
+            tree_entry("model-Q8_0-00001-of-00002.GGUF", 8_000),
+            tree_entry("model-speculator-Q6_K.gguf", 6_000),
+            tree_entry("model-Q4_K_M.gguf", 4_000),
+        ];
+        let candidates = entries.iter().collect::<Vec<_>>();
+
+        let selected = select_quant_entry(&candidates, "auto", 9_600, "org/model").unwrap();
+
+        assert_eq!(selected.path, "model-Q4_K_M.gguf");
+    }
+
+    #[test]
+    fn quant_selector_auto_rejects_auxiliary_repository() {
+        let entries = [tree_entry("model-Q4_K_M.gguf", 4_000)];
+        let candidates = entries.iter().collect::<Vec<_>>();
+
+        let error =
+            select_quant_entry(&candidates, "auto", 4_800, "org/model-drafter-GGUF").unwrap_err();
+
+        assert!(error.contains("auxiliary repository"));
     }
 
     #[test]

@@ -274,7 +274,7 @@ Search, browse, and download GGUF models from Hugging Face:
 ./gguf-switchboard models pull bartowski/Qwen3.5-9B-GGUF --quant Q4_K_M --dir /models --registry models.toml
 ```
 
-`models pull` performs the complete workflow: fetches the repo tree, matches by `--quant` (case-insensitive), streams the download with progress, validates the GGUF header, generates an alias, and merges into `models.toml`. The running server picks up the new entry on the next `POST /v1/models/refresh` or restart.
+`models pull` performs the complete workflow: fetches the repo tree, resolves `--quant` case-insensitively, streams the download with progress, validates the GGUF header, generates an alias, and merges into `models.toml`. Use an exact label such as `Q4_K_M`, a family such as `Q4` (preference order: `Q4_K_M`, `Q4_K_S`, `Q4_0`, `Q4_1`), `K_M` as a predictable alias for `Q4_K_M`, or `auto` to select the largest standalone quant that fits total system RAM plus NVIDIA VRAM with 20% runtime headroom. The running server picks up the new entry on the next `POST /v1/models/refresh` or restart.
 
 Set `HF_TOKEN` in the environment for gated models:
 
