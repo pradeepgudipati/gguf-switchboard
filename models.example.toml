@@ -7,7 +7,6 @@
 #   ./gguf-switchboard discover-models /path/to/models -o models.toml
 #
 # discover-models also writes a portable models.json alongside this file.
-# deploy.sh syncs the production registry to models.local.toml / models.local.json.
 #
 # Multiple directories (comma-separated):
 #   models_dir = "/models,/home/you/extra-gguf"

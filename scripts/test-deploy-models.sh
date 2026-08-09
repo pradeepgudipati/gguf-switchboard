@@ -118,7 +118,15 @@ test "$init_line" -lt "$service_line"
 
 fake_llama="$runtime_home/llama.cpp/build/bin/llama-server"
 mkdir -p "$(dirname "$fake_llama")"
-touch "$fake_llama"
+cat >"$fake_llama" <<'EOF'
+#!/bin/sh
+# Minimal stand-in for deploy llama-server readiness checks.
+if [ "${1:-}" = "--version" ]; then
+  echo "fake llama-server 0.0.0"
+  exit 0
+fi
+exit 0
+EOF
 chmod +x "$fake_llama"
 fake_llama="$(realpath "$fake_llama")"
 
@@ -128,15 +136,26 @@ test "$resolved_llama" = "$fake_llama"
 configure_llama_server "$resolved_llama"
 grep -q "llama_server = \"$fake_llama\"" "$MODELS_FILE"
 
+llama_server_ready
+test "$(effective_llama_server)" = "$fake_llama"
+
 custom_llama="$TMP/custom/llama-server"
 sed -i.bak -e "s|^llama_server = .*|llama_server = \"$custom_llama\"|" "$MODELS_FILE"
 rm -f "$MODELS_FILE.bak"
 configure_llama_server /usr/bin/llama-server
 grep -q "llama_server = \"$custom_llama\"" "$MODELS_FILE"
+! llama_server_ready
+
+mkdir -p "$(dirname "$custom_llama")"
+cp "$fake_llama" "$custom_llama"
+chmod +x "$custom_llama"
+llama_server_ready
 
 empty_models="$TMP/empty-models"
 mkdir -p "$empty_models"
 sed -i.bak -e "s|^models_dir = .*|models_dir = \"$empty_models\"|" "$MODELS_FILE"
+# Point at a working binary so readiness tests stay focused on models next.
+sed -i.bak -e "s|^llama_server = .*|llama_server = \"$fake_llama\"|" "$MODELS_FILE"
 rm -f "$MODELS_FILE.bak"
 ! registry_has_model_candidates "$MODELS_FILE"
 
@@ -148,8 +167,14 @@ grep -q 'ggs models search "Qwen3.5 9B"' <<<"$model_help"
 grep -q 'ggs models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M' <<<"$model_help"
 grep -q './deploy.sh --refresh-models' <<<"$model_help"
 
+llama_help="$(llama_setup_help)"
+grep -q './scripts/update-llama-cpp.sh' <<<"$llama_help"
+grep -q 'llama_server = "/path/to/llama-server"' <<<"$llama_help"
+
+llama_check_line="$(grep -n '^if ! llama_server_ready; then$' deploy.sh | cut -d: -f1)"
 empty_check_line="$(grep -n 'registry_has_model_candidates "\$MODELS_FILE"' deploy.sh | tail -1 | cut -d: -f1)"
 start_line="$(grep -n '^sudo systemctl start gguf-switchboard$' deploy.sh | cut -d: -f1)"
+test "$llama_check_line" -lt "$empty_check_line"
 test "$empty_check_line" -lt "$start_line"
 
 echo "deploy models generation validation passed"

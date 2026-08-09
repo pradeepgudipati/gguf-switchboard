@@ -10,7 +10,6 @@ Configuration is split across two files:
 | **`models.toml`** | Model registry — aliases, GGUF paths, priorities, per-model overrides |
 
 Default runtime paths after `deploy.sh`: gitignored `config.toml` and `models.toml` in the repo checkout. Tracked defaults live in `config.example.toml` and `models.example.toml`.
-Machine-specific copies are also synced to **`models.local.toml`** and **`models.local.json`** (gitignored).
 
 Override the config directory (optional):
 
@@ -150,8 +149,6 @@ Export manually:
 
 `models_file` in `config.toml` may also point directly at a **`models.json`** registry (portable subset — no `llama_server` / port defaults; those fall back to built-in defaults).
 
-After `deploy.sh`, copies land in the repo as **`models.local.toml`** and **`models.local.json`** (gitignored) so `git pull` updates do not conflict with your machine-specific registry.
-
 #### `kind` inference
 
 When `kind` is omitted on a `[[models]]` entry, it is inferred from the alias and filename:
@@ -236,8 +233,7 @@ When generation runs:
 3. Runs `discover-models` to scan for `.gguf` files
 4. Merges with the existing registry when present — preserves `alias`, `display_name`, `priority`, `port`, `context_size`, `kind`, `enabled`, and `extra_args` per file; **duplicate alias/file entries are deduplicated**
 5. Installs the result to `$CONFIG_DIR/models.toml` and writes sibling **`models.json`**
-6. Syncs copies to **`models.local.toml`** / **`models.local.json`** in the repo (gitignored)
-7. Prints a table of configured models after the service is healthy
+6. Prints a table of configured models after the service is healthy
 
 **Models directory detection**:
 

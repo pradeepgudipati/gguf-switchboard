@@ -21,8 +21,6 @@ LEGACY_CONFIG_DIR="/etc/gguf-switchboard"
 CONFIG_DIR=""
 CONFIG_FILE=""
 MODELS_FILE=""
-LOCAL_REGISTRY_TOML="models.local.toml"
-LOCAL_REGISTRY_JSON="models.local.json"
 CONFIG_TEMPLATE="config.example.toml"
 MODELS_TEMPLATE="models.example.toml"
 
@@ -153,6 +151,11 @@ initialize_runtime_config() {
     fi
 }
 
+read_configured_llama_server() {
+    [[ -r "${MODELS_FILE:-}" ]] || return 1
+    awk -F'"' '/^llama_server[[:space:]]*=/ { print $2; exit }' "$MODELS_FILE"
+}
+
 resolve_llama_server() {
     local candidate=""
     candidate="$(command -v llama-server 2>/dev/null || true)"
@@ -175,10 +178,29 @@ resolve_llama_server() {
     return 1
 }
 
+# Prefer models.toml path when set; otherwise search PATH / common install locations.
+effective_llama_server() {
+    local configured=""
+    configured="$(read_configured_llama_server 2>/dev/null || true)"
+    if [[ -n "$configured" ]]; then
+        printf '%s\n' "$configured"
+        return 0
+    fi
+    resolve_llama_server
+}
+
+# Executable exists and can at least print --version (catches missing/broken shared libs).
+llama_server_ready() {
+    local bin=""
+    bin="$(effective_llama_server || true)"
+    [[ -n "$bin" && -x "$bin" ]] || return 1
+    "$bin" --version >/dev/null 2>&1
+}
+
 configure_llama_server() {
     local resolved="$1" configured=""
     [[ -n "$resolved" && -f "$MODELS_FILE" ]] || return 0
-    configured="$(awk -F'"' '/^llama_server[[:space:]]*=/ { print $2; exit }' "$MODELS_FILE")"
+    configured="$(read_configured_llama_server || true)"
 
     if [[ -n "$configured" && "$configured" != "/usr/local/bin/llama-server" ]]; then
         echo "==> Keeping configured llama-server: $configured"
@@ -222,6 +244,31 @@ Download a recommended quantization:
 
 Then finish service setup:
   ./deploy.sh --refresh-models
+EOF
+}
+
+llama_setup_help() {
+    cat <<EOF
+==> gguf-switchboard installed, but a working llama-server was not found.
+
+gguf-switchboard is a swap proxy — it needs llama.cpp's llama-server before models can load.
+
+Recommended (NVIDIA / CUDA Linux): install or refresh llama-server into /usr/local:
+  ./scripts/update-llama-cpp.sh
+
+That script:
+  - clones or pulls ~/llama.cpp
+  - builds with GGML_CUDA=ON
+  - installs to /usr/local and strips stale RUNPATH
+  - restarts gguf-switchboard when the systemd unit exists
+
+Then re-run:
+  ./deploy.sh
+
+Or point the registry at an existing binary:
+  # models.toml
+  [defaults]
+  llama_server = "/path/to/llama-server"
 EOF
 }
 
@@ -279,30 +326,6 @@ maybe_migrate_legacy_config() {
     fi
 }
 
-sync_registry_to_repo() {
-    if [[ ! -r "$MODELS_FILE" ]]; then
-        return 0
-    fi
-
-    echo "==> Syncing registry to repo ($LOCAL_REGISTRY_TOML, $LOCAL_REGISTRY_JSON)..."
-    if [[ -w "$MODELS_FILE" ]]; then
-        cp "$MODELS_FILE" "$LOCAL_REGISTRY_TOML"
-    else
-        sudo cat "$MODELS_FILE" > "$LOCAL_REGISTRY_TOML"
-    fi
-
-    local json_source="${MODELS_FILE%.toml}.json"
-    if [[ -r "$json_source" ]]; then
-        if [[ -w "$json_source" ]]; then
-            cp "$json_source" "$LOCAL_REGISTRY_JSON"
-        else
-            sudo cat "$json_source" > "$LOCAL_REGISTRY_JSON"
-        fi
-    elif [[ -x ./target/release/gguf-switchboard ]]; then
-        ./target/release/gguf-switchboard export-registry "$LOCAL_REGISTRY_TOML" -o "$LOCAL_REGISTRY_JSON" || true
-    fi
-}
-
 generate_models_toml() {
     local refresh="${1:-false}"
     local merge_source generated="models.toml.generated"
@@ -332,11 +355,9 @@ generate_models_toml() {
 
     if "${discover_cmd[@]}"; then
         install_file "$generated" "$MODELS_FILE"
-        cp "$generated" "$LOCAL_REGISTRY_TOML"
         local generated_json="${generated/.toml/.json}"
         if [[ -f "$generated_json" ]]; then
             install_file "$generated_json" "${MODELS_FILE%.toml}.json"
-            cp "$generated_json" "$LOCAL_REGISTRY_JSON"
         fi
         rm -f "$generated" "$generated_json"
         echo "==> Installed $MODELS_FILE"
@@ -486,9 +507,8 @@ LLAMA_SERVER_PATH="$(resolve_llama_server || true)"
 if [[ -n "$LLAMA_SERVER_PATH" ]]; then
     configure_llama_server "$LLAMA_SERVER_PATH"
 else
-    echo "==> Warning: llama-server not found on PATH."
-    echo "    Install llama.cpp with server support before loading models."
-    echo "    Or set defaults.llama_server in models.toml after deploy."
+    echo "==> Warning: llama-server not found yet (checked again before service start)."
+    echo "    After install, run: ./scripts/update-llama-cpp.sh"
 fi
 
 if command -v apt-get >/dev/null 2>&1; then
@@ -556,13 +576,19 @@ else
     generate_models_toml "$REFRESH_MODELS"
 fi
 claim_config_files
-sync_registry_to_repo
 
 echo "==> Stopping service..."
 sudo systemctl stop gguf-switchboard || true
 
 echo "==> Installing binary..."
 sudo cp target/release/gguf-switchboard /usr/local/bin/
+
+if ! llama_server_ready; then
+    sudo systemctl disable --now gguf-switchboard >/dev/null 2>&1 || true
+    echo ""
+    llama_setup_help
+    exit 0
+fi
 
 if ! registry_has_model_candidates "$MODELS_FILE"; then
     sudo systemctl disable --now gguf-switchboard >/dev/null 2>&1 || true

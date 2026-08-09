@@ -4,11 +4,11 @@
 
 **One API. Any GGUF Model. Seamless local LLM switching.**
 
-A lightweight OpenAI- and Anthropic-compatible API server that loads, manages, and switches between GGUF models on a single GPU. Point any OpenAI or Anthropic SDK or tool at it (Python, Node, Cursor, Cline, Continue) — no manual process or port juggling.
+A lightweight OpenAI and Anthropic-compatible API server that loads, manages, and switches between GGUF models on a single GPU. Point any OpenAI or Anthropic SDK or tool at it (Python, Node, Cursor, Cline, Continue) — no manual process or port juggling.
 
 A **[llama-swap](https://github.com/mostlygeek/llama-swap) alternative in Rust** with system memory-pressure eviction, OOM-only context fallback, Swagger UI, Hugging Face metadata enrichment, and built-in usage tracking.
 
-**Requires** [llama.cpp](https://github.com/ggerganov/llama.cpp) `llama-server` and GGUF model files — see [Prerequisites](#prerequisites).
+**Requires** [llama.cpp](https://github.com/ggerganov/llama.cpp) `llama-server` and GGUF model files — on Linux NVIDIA hosts install with `./scripts/update-llama-cpp.sh` (see [Quick Start](#quick-start)).
 
 > **Status:** Experimental — single-GPU home labs and development machines on a **trusted LAN**. One model loaded at a time. System RAM is monitored for pressure eviction; `vram_gb` sizes context heuristically. Opt-in `auto_ngl` can pick GPU layers from free VRAM (nvidia-smi or `vram_gb` fallback) — still a heuristic, not live layer telemetry. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
 
@@ -64,76 +64,49 @@ Full landscape table and vs llama-swap feature matrix: **[docs/COMPARISON.md](do
 
 ### Prerequisites
 
-gguf-switchboard is a **swap proxy** — it does not run inference itself. You must install **[llama.cpp](https://github.com/ggerganov/llama.cpp)** (`llama-server`) and have GGUF models on disk before models will load.
+gguf-switchboard is a **swap proxy** — it does not run inference itself. You need a working **[llama.cpp](https://github.com/ggerganov/llama.cpp)** `llama-server` and GGUF models on disk before the systemd service will stay enabled.
 
 | Requirement | Notes |
 |-------------|--------|
-| **`llama-server` (required)** | From [llama.cpp](https://github.com/ggerganov/llama.cpp). Must be on `PATH` or set via `defaults.llama_server` in `models.toml`. |
+| **`llama-server` (required)** | From [llama.cpp](https://github.com/ggerganov/llama.cpp). On Linux NVIDIA hosts prefer `./scripts/update-llama-cpp.sh` → `/usr/local/bin/llama-server`. Otherwise put it on `PATH` or set `defaults.llama_server` in `models.toml`. |
 | **GGUF model files** | Directory of `.gguf` weights (default scan: `~/models`, or set `MODELS_DIR`). |
 | **Linux** (recommended) | Ubuntu/Debian for `deploy.sh` (`apt`). Other distros: install build deps yourself. |
 | **macOS** | Build from source only — no systemd. See [macOS](#macos). |
 | **Rust** | Installed automatically by `deploy.sh` if missing; otherwise [rustup](https://rustup.rs/). |
 | **GPU stack** | NVIDIA + CUDA toolkit on Linux, or Apple Metal on macOS (CPU-only llama.cpp works but is slow). |
 
-#### Install llama.cpp (`llama-server`)
+### Install (Linux + NVIDIA / CUDA)
 
-Build from [llama.cpp](https://github.com/ggerganov/llama.cpp) and put `llama-server` on your `PATH` (commonly `/usr/local/bin`).
-
-**Linux (NVIDIA / CUDA):**
+Clone the repo, install a CUDA `llama-server` into `/usr/local`, then deploy the switchboard service:
 
 ```bash
-git clone https://github.com/ggerganov/llama.cpp.git
-cd llama.cpp
-cmake -B build -DGGML_CUDA=ON
-cmake --build build --config Release -j"$(nproc)"
-sudo cp build/bin/llama-server /usr/local/bin/
-llama-server --version
-```
-
-**macOS (Metal):**
-
-```bash
-git clone https://github.com/ggerganov/llama.cpp.git
-cd llama.cpp
-cmake -B build -DGGML_METAL=ON
-cmake --build build --config Release -j"$(sysctl -n hw.ncpu)"
-sudo cp build/bin/llama-server /usr/local/bin/
-llama-server --version
-```
-
-If the binary is not on `PATH`, point the registry at it:
-
-```toml
-# models.toml
-[defaults]
-llama_server = "/path/to/llama-server"
-```
-
-`deploy.sh` does **not** install llama.cpp — only gguf-switchboard, its config, and the systemd unit. Without `llama-server`, the proxy starts but model loads fail.
-
-### Install gguf-switchboard (Linux + systemd)
-
-Clone, review `deploy.sh`, then run it. The script builds from source and installs a systemd service — no remote pipe-to-bash.
-
-```bash
-# Before first deploy (required):
-#   Install llama-server (see Prerequisites above)
-
 git clone --branch main https://github.com/pradeepgudipati/gguf-switchboard.git
 cd gguf-switchboard
+
+# 1) Build + install llama.cpp with CUDA (idempotent upgrade path)
+#    Run as your user; the script sudo's only for install / service steps.
+./scripts/update-llama-cpp.sh
+
+# 2) Build + install gguf-switchboard and enable the systemd unit
 ./deploy.sh
 ```
 
-What `deploy.sh` does:
+`./scripts/update-llama-cpp.sh` does: check CUDA → clone/pull `~/llama.cpp` → CUDA Release build → verify GPU → stop `gguf-switchboard` if present → `cmake --install` to `/usr/local` → strip stale RUNPATH → `ldconfig` → assert libs are not resolved from the source build tree → restart the unit only if it exists.
+
+Overrides: `LLAMA_DIR` (default `~/llama.cpp`), `PREFIX` (default `/usr/local`), `SERVICE` (default `gguf-switchboard`), `SKIP_PULL=1`, `SKIP_SERVICE=1`.
+
+`deploy.sh` does **not** install llama.cpp. Before starting the unit it checks for a working `llama-server` (`--version`). If missing or broken, it still installs the switchboard binary, leaves the service disabled, and prints the `./scripts/update-llama-cpp.sh` help. The same gate applies when no GGUF models are registered yet.
+
+What `deploy.sh` does when ready:
 
 1. Pulls latest `main` (stashes dirty working tree first — see [Updating](#updating))
 2. Installs build deps + Rust if needed
 3. Builds the release binary → `/usr/local/bin/gguf-switchboard`
 4. Creates **user-owned, gitignored `config.toml` / `models.toml`** in the repo checkout (override with `GGUF_SWITCHBOARD_CONFIG_DIR`)
 5. Creates `~/models` by default, or the single directory supplied through `MODELS_DIR`
-6. Detects `llama-server` from `PATH` or common llama.cpp install locations and records it in `models.toml`
-7. Generates `models.toml` on first install; syncs gitignored `models.local.toml` / `models.local.json`
-8. Enables and starts the systemd service on `0.0.0.0:9090`
+6. Detects `llama-server` from `PATH` / common install locations and records it in `models.toml`
+7. Generates `models.toml` on first install
+8. Verifies `llama-server` and model candidates, then enables and starts the systemd service on `0.0.0.0:9090`
 
 ```bash
 # Custom GGUF directory on first install
@@ -145,7 +118,41 @@ GGUF_SWITCHBOARD_CONFIG_DIR=/etc/gguf-switchboard ./deploy.sh
 
 Then open **http://localhost:9090/swagger-ui/**.
 
+If the binary is not on `PATH`, point the registry at it:
+
+```toml
+# models.toml
+[defaults]
+llama_server = "/path/to/llama-server"
+```
+
+#### Manual llama.cpp (optional)
+
+Prefer `./scripts/update-llama-cpp.sh` on CUDA hosts — it installs shared libs correctly and strips RUNPATH. Manual one-shot (binary copy only):
+
+```bash
+git clone https://github.com/ggerganov/llama.cpp.git
+cd llama.cpp
+cmake -B build -DGGML_CUDA=ON
+cmake --build build --config Release -j"$(nproc)"
+sudo cp build/bin/llama-server /usr/local/bin/
+llama-server --version
+```
+
+**macOS (Metal)** — no systemd; build `llama-server` yourself, then use [Build without systemd](#build-without-systemd):
+
+```bash
+git clone https://github.com/ggerganov/llama.cpp.git
+cd llama.cpp
+cmake -B build -DGGML_METAL=ON
+cmake --build build --config Release -j"$(sysctl -n hw.ncpu)"
+sudo cp build/bin/llama-server /usr/local/bin/
+llama-server --version
+```
+
 ### Prebuilt binary (Linux)
+
+Still needs a working `llama-server` first (`./scripts/update-llama-cpp.sh` on CUDA hosts).
 
 ```bash
 # amd64 (see Releases for arm64 + checksums)
@@ -233,17 +240,23 @@ curl -s http://localhost:9090/v1/models | jq '.data[].id'
 
 ### Updating
 
-From the existing checkout, re-run deploy. That is the supported upgrade path:
+Supported upgrade path from an existing checkout:
 
 ```bash
 cd ~/gguf-switchboard   # or wherever you cloned
+
+# Refresh CUDA llama-server first when the backend changed upstream
+./scripts/update-llama-cpp.sh
+
+# Then rebuild / reinstall the switchboard service
 ./deploy.sh
 ```
 
 | Goal | Command |
 |------|---------|
-| Pull + rebuild + restart | `./deploy.sh` |
+| Pull + rebuild + restart switchboard | `./deploy.sh` |
 | Rebuild only (no `git pull`) | `./deploy.sh --skip-pull` |
+| Install / refresh CUDA `llama-server` in `/usr/local` | `./scripts/update-llama-cpp.sh` |
 | Pick up new GGUF files (merge registry) | `./deploy.sh --refresh-models` |
 | Live rescan while running | `curl -X POST http://localhost:9090/v1/models/refresh` (or Swagger **Rescan Models**) |
 | Restart without rebuild | `sudo systemctl restart gguf-switchboard` |
@@ -253,6 +266,7 @@ cd ~/gguf-switchboard   # or wherever you cloned
 - Deploy **stashes uncommitted changes** (including untracked files) before `git pull`. Recover with `git stash list` / `git stash pop`.
 - Your live `config.toml`, `models.toml`, and `models.json` are gitignored and preserved across deploys. Tracked defaults live in `config.example.toml` and `models.example.toml`.
 - After editing aliases / `priority` / `extra_args`, restart: `sudo systemctl restart gguf-switchboard`.
+- `deploy.sh` will not start the unit if `llama-server` is missing/broken or no GGUF models are registered — fix with `./scripts/update-llama-cpp.sh` and/or model pull, then re-run deploy.
 
 ```bash
 # Logs
@@ -299,9 +313,10 @@ ggs config.toml
 
 | Symptom | Likely fix |
 |---------|------------|
+| Deploy leaves service disabled; prints `./scripts/update-llama-cpp.sh` | Install or refresh CUDA `llama-server`: `./scripts/update-llama-cpp.sh`, then `./deploy.sh` |
+| `llama-server: not found` / models fail to load | Same as above, or set `defaults.llama_server` in `models.toml` to a working binary |
 | Service unhealthy / no models | Put GGUFs in `~/models` (or set `MODELS_DIR`) and run `./deploy.sh --refresh-models` |
-| First install has no GGUF models | This is not fatal. The installer leaves the service stopped and prints `ggs models search`, `ggs models pull`, and the final `./deploy.sh --refresh-models` command. |
-| `llama-server: not found` when loading | Install llama.cpp server; put it on `PATH` or set `defaults.llama_server` in `models.toml` |
+| First install has no GGUF models | Not fatal. Installer leaves the service stopped and prints `ggs models search`, `ggs models pull`, and `./deploy.sh --refresh-models` |
 | Empty `/v1/models` | Check `models_dir` in `models.toml`; enable `auto_discover = true`; restart |
 | Deploy "lost" my edits | `git stash list` — deploy stashes dirty trees before pull |
 | Port 9090 in use | Change `bind` in `config.toml` and restart |

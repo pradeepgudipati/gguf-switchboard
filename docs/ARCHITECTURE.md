@@ -41,9 +41,7 @@ Client Request
 ├── config.docker.toml      # Docker server configuration
 ├── models.example.toml     # Tracked default for runtime models.toml
 ├── models.docker.toml      # Docker model registry
-├── models.local.toml       # Deploy-synced registry copy (gitignored)
-├── models.local.json       # Portable registry export (gitignored)
-├── deploy.sh               # Build, install, discover models, sync registry
+├── deploy.sh               # Build, install, discover models
 ├── banner.png              # README hero banner
 ├── docs/                   # Configuration, usage, architecture, comparison
 ├── CHANGELOG.md            # Version index (details in releases/)
