@@ -69,7 +69,7 @@ gguf-switchboard is a **swap proxy** — it does not run inference itself. You n
 | Requirement | Notes |
 |-------------|--------|
 | **`llama-server` (required)** | From [llama.cpp](https://github.com/ggerganov/llama.cpp). On Linux NVIDIA hosts prefer `./scripts/update-llama-cpp.sh` → `/usr/local/bin/llama-server`. Otherwise put it on `PATH` or set `defaults.llama_server` in `models.toml`. |
-| **GGUF model files** | Directory of `.gguf` weights (default scan: `~/models`, or set `MODELS_DIR`). |
+| **GGUF model files** | Directory of `.gguf` weights (system default: `/var/lib/gguf-switchboard/models`). |
 | **Linux** (recommended) | Ubuntu/Debian for `deploy.sh` (`apt`). Other distros: install build deps yourself. |
 | **macOS** | Build from source only — no systemd. See [macOS](#macos). |
 | **Rust** | Installed automatically by `deploy.sh` if missing; otherwise [rustup](https://rustup.rs/). |
@@ -95,25 +95,25 @@ cd gguf-switchboard
 
 Overrides: `LLAMA_DIR` (default `~/llama.cpp`), `PREFIX` (default `/usr/local`), `SERVICE` (default `gguf-switchboard`), `SKIP_PULL=1`, `SKIP_SERVICE=1`.
 
-`deploy.sh` does **not** install llama.cpp. Before starting the unit it checks for a working `llama-server` (`--version`). If missing or broken, it still installs the switchboard binary, leaves the service disabled, and prints the `./scripts/update-llama-cpp.sh` help. The same gate applies when no GGUF models are registered yet.
+`deploy.sh` does **not** install llama.cpp. It requires `/usr/local/bin/llama-server` (`--version` must succeed). If missing or broken, deploy exits after installing the switchboard binary and prints `./scripts/update-llama-cpp.sh` help. If no GGUF models are registered yet, the unit is installed but left stopped.
 
 What `deploy.sh` does when ready:
 
 1. Pulls latest `main` (stashes dirty working tree first — see [Updating](#updating))
-2. Installs build deps + Rust if needed
-3. Builds the release binary → `/usr/local/bin/gguf-switchboard`
-4. Creates **user-owned, gitignored `config.toml` / `models.toml`** in the repo checkout (override with `GGUF_SWITCHBOARD_CONFIG_DIR`)
-5. Creates `~/models` by default, or the single directory supplied through `MODELS_DIR`
-6. Detects `llama-server` from `PATH` / common install locations and records it in `models.toml`
-7. Generates `models.toml` on first install
-8. Verifies `llama-server` and model candidates, then enables and starts the systemd service on `0.0.0.0:9090`
+2. Creates system user `ggs` and directories under `/opt/gguf-switchboard` + `/var/lib/gguf-switchboard`
+3. Installs build deps + Rust if needed
+4. Builds the release binary → `/usr/local/bin/gguf-switchboard` (root-owned)
+5. Syncs the project into `/opt/gguf-switchboard` (skips rsync if already running from there)
+6. Writes `config.toml` / generates `models.toml` with absolute system paths
+7. Installs the systemd unit as `User=ggs` / `Group=ggs`, then `daemon-reload` + `enable --now`
+8. Validates `ggs` can read configs/models and execute both binaries; checks `/health`
 
 ```bash
-# Custom GGUF directory on first install
-MODELS_DIR=/path/to/gguf-files ./deploy.sh
+# Optional: copy legacy ~/models into the system models dir (never deletes the source)
+./deploy.sh --migrate-models
 
-# Config outside the repo (optional)
-GGUF_SWITCHBOARD_CONFIG_DIR=/etc/gguf-switchboard ./deploy.sh
+# Discover from an alternate directory while still registering the canonical models_dir
+MODELS_DIR=/path/to/gguf-files ./deploy.sh --refresh-models
 ```
 
 Then open **http://localhost:9090/swagger-ui/**.
@@ -161,13 +161,13 @@ curl -fsSL -o gguf-switchboard \
 chmod +x gguf-switchboard
 sudo mv gguf-switchboard /usr/local/bin/
 
-# Copy the tracked examples to user-owned runtime files
+# Copy the tracked examples to system runtime paths (or run ./deploy.sh)
 git clone --branch main --depth 1 https://github.com/pradeepgudipati/gguf-switchboard.git
 cd gguf-switchboard
-cp config.example.toml config.toml
-cp models.example.toml models.toml
-gguf-switchboard discover-models ~/models -o models.toml
-gguf-switchboard config.toml
+sudo mkdir -p /opt/gguf-switchboard /var/lib/gguf-switchboard/models
+sudo cp config.example.toml /opt/gguf-switchboard/config.toml
+gguf-switchboard discover-models /var/lib/gguf-switchboard/models -o /opt/gguf-switchboard/models.toml
+gguf-switchboard /opt/gguf-switchboard/config.toml
 ```
 
 ### Build without systemd
@@ -203,7 +203,7 @@ Use a **Metal** build of `llama-server`. Create runtime files from `config.examp
 With gguf-switchboard installed, search, browse, and download GGUF models from Hugging Face:
 
 ```bash
-mkdir -p ~/models
+sudo mkdir -p /var/lib/gguf-switchboard/models
 
 # Search for models
 gguf-switchboard models search "Qwen3.5 9B"
@@ -211,21 +211,24 @@ gguf-switchboard models search "Qwen3.5 9B"
 # Browse available files in a repo
 gguf-switchboard models files lmstudio-community/Qwen3.5-9B-GGUF
 
-# Download, validate, and register a model
-gguf-switchboard models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --dir ~/models
+# Download, validate, and register a model (runs a quick speed test if the server is up)
+gguf-switchboard models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --dir /var/lib/gguf-switchboard/models
 
 # Optional: tune parallel aria2 connections (default 8, maximum 16)
 gguf-switchboard models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --connections 8
+
+# Skip the post-pull speed test
+gguf-switchboard models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --no-bench
 ```
 
-Public downloads automatically use `aria2c` when available, then verify the expected size, Hugging Face LFS checksum, and GGUF metadata before registration. If Hugging Face rejects parallel range requests, the native downloader resumes the partial file. Authenticated downloads using `HF_TOKEN`, or systems without `aria2c`, use the native downloader directly. A successful pull refreshes a running gguf-switchboard server automatically.
+Public downloads automatically use `aria2c` when available, then verify the expected size, Hugging Face LFS checksum, and GGUF metadata before registration. If Hugging Face rejects parallel range requests, the native downloader resumes the partial file. Authenticated downloads using `HF_TOKEN`, or systems without `aria2c`, use the native downloader directly. A successful pull refreshes a running gguf-switchboard server automatically and (unless `--no-bench`) runs a short chat completion to print prompt and generation tok/s.
 
-Or download manually — any `.gguf` file in `~/models` works:
+Or download manually — any `.gguf` file in `/var/lib/gguf-switchboard/models` works:
 
 ```bash
 # Example layout after manual download:
-#   ~/models/Qwen3.5-9B-Q4_K_M.gguf
-#   ~/models/gemma-4-E4B-it-Q4_K_M.gguf
+#   /var/lib/gguf-switchboard/models/Qwen3.5-9B-Q4_K_M.gguf
+#   /var/lib/gguf-switchboard/models/gemma-4-E4B-it-Q4_K_M.gguf
 ```
 
 If you downloaded models manually, run `./deploy.sh --refresh-models` so discovery registers them.
@@ -258,15 +261,16 @@ cd ~/gguf-switchboard   # or wherever you cloned
 | Rebuild only (no `git pull`) | `./deploy.sh --skip-pull` |
 | Install / refresh CUDA `llama-server` in `/usr/local` | `./scripts/update-llama-cpp.sh` |
 | Pick up new GGUF files (merge registry) | `./deploy.sh --refresh-models` |
+| Copy legacy `~/models` into system models dir | `./deploy.sh --migrate-models` |
 | Live rescan while running | `curl -X POST http://localhost:9090/v1/models/refresh` (or Swagger **Rescan Models**) |
 | Restart without rebuild | `sudo systemctl restart gguf-switchboard` |
 
 **Important:**
 
 - Deploy **stashes uncommitted changes** (including untracked files) before `git pull`. Recover with `git stash list` / `git stash pop`.
-- Your live `config.toml`, `models.toml`, and `models.json` are gitignored and preserved across deploys. Tracked defaults live in `config.example.toml` and `models.example.toml`.
+- Live config lives under `/opt/gguf-switchboard/` (`config.toml`, `models.toml`); models and `usage.db` under `/var/lib/gguf-switchboard/`. Tracked defaults live in `config.example.toml` and `models.example.toml`.
 - After editing aliases / `priority` / `extra_args`, restart: `sudo systemctl restart gguf-switchboard`.
-- `deploy.sh` will not start the unit if `llama-server` is missing/broken or no GGUF models are registered — fix with `./scripts/update-llama-cpp.sh` and/or model pull, then re-run deploy.
+- `deploy.sh` will not start the unit if `/usr/local/bin/llama-server` is missing/broken or no GGUF models are registered — fix with `./scripts/update-llama-cpp.sh` and/or model pull, then re-run deploy.
 
 ```bash
 # Logs
@@ -313,13 +317,13 @@ ggs config.toml
 
 | Symptom | Likely fix |
 |---------|------------|
-| Deploy leaves service disabled; prints `./scripts/update-llama-cpp.sh` | Install or refresh CUDA `llama-server`: `./scripts/update-llama-cpp.sh`, then `./deploy.sh` |
-| `llama-server: not found` / models fail to load | Same as above, or set `defaults.llama_server` in `models.toml` to a working binary |
-| Service unhealthy / no models | Put GGUFs in `~/models` (or set `MODELS_DIR`) and run `./deploy.sh --refresh-models` |
+| Deploy exits; prints `./scripts/update-llama-cpp.sh` | Install or refresh CUDA `llama-server` into `/usr/local/bin`: `./scripts/update-llama-cpp.sh`, then `./deploy.sh` |
+| `llama-server: not found` / models fail to load | Same as above |
+| Service unhealthy / no models | Put GGUFs in `/var/lib/gguf-switchboard/models` and run `./deploy.sh --refresh-models` |
 | First install has no GGUF models | Not fatal. Installer leaves the service stopped and prints `ggs models search`, `ggs models pull`, and `./deploy.sh --refresh-models` |
-| Empty `/v1/models` | Check `models_dir` in `models.toml`; enable `auto_discover = true`; restart |
+| Empty `/v1/models` | Check `models_dir` in `/opt/gguf-switchboard/models.toml`; enable `auto_discover = true`; restart |
 | Deploy "lost" my edits | `git stash list` — deploy stashes dirty trees before pull |
-| Port 9090 in use | Change `bind` in `config.toml` and restart |
+| Port 9090 in use | Change `bind` in `/opt/gguf-switchboard/config.toml` and restart |
 
 ## Further documentation
 
@@ -334,7 +338,7 @@ ggs config.toml
 
 ### Configuration (short)
 
-Two runtime files: **`config.toml`** (bind, idle timeout, `vram_gb`) and **`models.toml`** (aliases → GGUF paths). `deploy.sh` creates these gitignored files from the tracked `.example.toml` defaults when required. Full reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+Two runtime files under **`/opt/gguf-switchboard/`**: **`config.toml`** (bind, idle timeout, `vram_gb`) and **`models.toml`** (aliases → GGUF paths). Models live in **`/var/lib/gguf-switchboard/models/`**. Full reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
 
 ```bash
 # After install, tweak models then restart

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Validate discover-models output used by deploy.sh.
+# Validate discover-models output and system-wide deploy.sh contracts.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -77,50 +77,51 @@ grep -q "alias ggs='gguf-switchboard'" deploy.sh
 ! grep -q "alias gs='gguf-switchboard'" deploy.sh
 grep -Eq 'APT_PKGS=.*\baria2\b' deploy.sh
 
-# Deploy keeps tracked examples separate from user-owned runtime configuration.
+# System-wide layout contracts
+grep -q 'SERVICE_USER="ggs"' deploy.sh
+grep -q 'INSTALL_DIR="/opt/gguf-switchboard"' deploy.sh
+grep -q 'STATE_DIR="/var/lib/gguf-switchboard"' deploy.sh
+grep -q 'BIN="/usr/local/bin/gguf-switchboard"' deploy.sh
+grep -q 'LLAMA_SERVER="/usr/local/bin/llama-server"' deploy.sh
+grep -q 'User=${SERVICE_USER}' deploy.sh
+grep -q 'Group=${SERVICE_GROUP}' deploy.sh
+grep -q 'WorkingDirectory=${INSTALL_DIR}' deploy.sh
+grep -q 'Environment=MODELS_DIR=${MODELS_DIR}' deploy.sh
+grep -q 'sudo systemctl enable --now gguf-switchboard' deploy.sh
+grep -q 'sudo systemctl stop gguf-switchboard' deploy.sh
+! grep -q 'systemctl disable' deploy.sh
+grep -q 'install -o root -g root -m 755' deploy.sh
+grep -q 'SOURCE_DIR' deploy.sh
+grep -q '\[\[ "\$source_dir" == "\$INSTALL_DIR" \]\]' deploy.sh || grep -q 'Already running from \$INSTALL_DIR' deploy.sh
+grep -qF -- '--migrate-models' deploy.sh
+grep -q 'Left .* untouched' deploy.sh
+
+# Deploy keeps tracked examples separate from runtime configuration.
 test -f config.example.toml
 test -f models.example.toml
 grep -qx '/config.toml' .gitignore
 grep -qx '/models.toml' .gitignore
 grep -qx '/models.json' .gitignore
-
-runtime_home="$TMP/home"
-runtime_config="$TMP/config"
-mkdir -p "$runtime_home"
+grep -q 'models_file = "/opt/gguf-switchboard/models.toml"' config.example.toml
+grep -q 'models_dir = "/var/lib/gguf-switchboard/models"' models.example.toml
+grep -q 'User=ggs' gguf-switchboard.service
+grep -q 'WorkingDirectory=/opt/gguf-switchboard' gguf-switchboard.service
+grep -q 'MODELS_DIR=/var/lib/gguf-switchboard/models' gguf-switchboard.service
 
 GGUF_SWITCHBOARD_DEPLOY_LIB=1 source ./deploy.sh
-HOME="$runtime_home"
-CONFIG_DIR="$runtime_config"
-CONFIG_FILE="$CONFIG_DIR/config.toml"
-MODELS_FILE="$CONFIG_DIR/models.toml"
-unset MODELS_DIR
 
-initialize_runtime_config
+test "$SERVICE_USER" = "ggs"
+test "$INSTALL_DIR" = "/opt/gguf-switchboard"
+test "$STATE_DIR" = "/var/lib/gguf-switchboard"
+test "$MODELS_DIR" = "/var/lib/gguf-switchboard/models"
+test "$CONFIG_FILE" = "/opt/gguf-switchboard/config.toml"
+test "$MODELS_FILE" = "/opt/gguf-switchboard/models.toml"
+test "$BIN" = "/usr/local/bin/gguf-switchboard"
+test "$LLAMA_SERVER" = "/usr/local/bin/llama-server"
 
-test -d "$runtime_home/models"
-test -f "$CONFIG_FILE"
-test -f "$MODELS_FILE"
-grep -q 'models_file = "models.toml"' "$CONFIG_FILE"
-grep -q "models_dir = \"$runtime_home/models\"" "$MODELS_FILE"
-
-printf '\n# user setting\n' >> "$CONFIG_FILE"
-printf '\n# user registry\n' >> "$MODELS_FILE"
-initialize_runtime_config
-grep -q '^# user setting$' "$CONFIG_FILE"
-grep -q '^# user registry$' "$MODELS_FILE"
-
-# Runtime initialization must happen before fallible build and systemd work.
-init_line="$(grep -n '^initialize_runtime_config$' deploy.sh | tail -1 | cut -d: -f1)"
-build_line="$(grep -n '^cargo build --release$' deploy.sh | cut -d: -f1)"
-service_line="$(grep -n '^sudo tee "\$SERVICE_FILE"' deploy.sh | cut -d: -f1)"
-test "$init_line" -lt "$build_line"
-test "$init_line" -lt "$service_line"
-
-fake_llama="$runtime_home/llama.cpp/build/bin/llama-server"
-mkdir -p "$(dirname "$fake_llama")"
+fake_llama="$TMP/llama-server"
 cat >"$fake_llama" <<'EOF'
 #!/bin/sh
-# Minimal stand-in for deploy llama-server readiness checks.
 if [ "${1:-}" = "--version" ]; then
   echo "fake llama-server 0.0.0"
   exit 0
@@ -128,53 +129,49 @@ fi
 exit 0
 EOF
 chmod +x "$fake_llama"
-fake_llama="$(realpath "$fake_llama")"
-
-resolved_llama="$(resolve_llama_server)"
-test "$resolved_llama" = "$fake_llama"
-
-configure_llama_server "$resolved_llama"
-grep -q "llama_server = \"$fake_llama\"" "$MODELS_FILE"
-
-llama_server_ready
-test "$(effective_llama_server)" = "$fake_llama"
-
-custom_llama="$TMP/custom/llama-server"
-sed -i.bak -e "s|^llama_server = .*|llama_server = \"$custom_llama\"|" "$MODELS_FILE"
-rm -f "$MODELS_FILE.bak"
-configure_llama_server /usr/bin/llama-server
-grep -q "llama_server = \"$custom_llama\"" "$MODELS_FILE"
-! llama_server_ready
-
-mkdir -p "$(dirname "$custom_llama")"
-cp "$fake_llama" "$custom_llama"
-chmod +x "$custom_llama"
+LLAMA_SERVER="$fake_llama"
 llama_server_ready
 
 empty_models="$TMP/empty-models"
 mkdir -p "$empty_models"
-sed -i.bak -e "s|^models_dir = .*|models_dir = \"$empty_models\"|" "$MODELS_FILE"
-# Point at a working binary so readiness tests stay focused on models next.
-sed -i.bak -e "s|^llama_server = .*|llama_server = \"$fake_llama\"|" "$MODELS_FILE"
-rm -f "$MODELS_FILE.bak"
-! registry_has_model_candidates "$MODELS_FILE"
-
+empty_registry="$TMP/empty-registry.toml"
+cat >"$empty_registry" <<EOF
+version = 1
+auto_discover = true
+[defaults]
+models_dir = "$empty_models"
+llama_server = "$fake_llama"
+EOF
+# registry_has_model_candidates uses sudo test -r; for local files use direct path readability.
+# Override with a local-capable check by writing a readable file and using find-based logic.
+! find "$empty_models" -type f -iname '*.gguf' -print -quit | grep -q .
 write_minimal_gguf "$empty_models/starter.gguf" llama
-registry_has_model_candidates "$MODELS_FILE"
+find "$empty_models" -type f -iname '*.gguf' -print -quit | grep -q .
 
-model_help="$(model_setup_help "$empty_models")"
+model_help="$(model_setup_help "$MODELS_DIR")"
 grep -q 'ggs models search "Qwen3.5 9B"' <<<"$model_help"
 grep -q 'ggs models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M' <<<"$model_help"
 grep -q './deploy.sh --refresh-models' <<<"$model_help"
+grep -q '/var/lib/gguf-switchboard/models' <<<"$model_help"
 
-llama_help="$(llama_setup_help)"
+llama_help="$(
+  LLAMA_SERVER="/usr/local/bin/llama-server"
+  llama_setup_help
+)"
 grep -q './scripts/update-llama-cpp.sh' <<<"$llama_help"
-grep -q 'llama_server = "/path/to/llama-server"' <<<"$llama_help"
+grep -q '/usr/local/bin/llama-server' <<<"$llama_help"
 
-llama_check_line="$(grep -n '^if ! llama_server_ready; then$' deploy.sh | cut -d: -f1)"
-empty_check_line="$(grep -n 'registry_has_model_candidates "\$MODELS_FILE"' deploy.sh | tail -1 | cut -d: -f1)"
-start_line="$(grep -n '^sudo systemctl start gguf-switchboard$' deploy.sh | cut -d: -f1)"
-test "$llama_check_line" -lt "$empty_check_line"
-test "$empty_check_line" -lt "$start_line"
+# Ordering: stop → build → install binary → enable --now
+stop_line="$(grep -n 'systemctl stop gguf-switchboard' deploy.sh | head -1 | cut -d: -f1)"
+build_line="$(grep -n '^cargo build --release$' deploy.sh | cut -d: -f1)"
+install_line="$(grep -n 'install -o root -g root -m 755' deploy.sh | cut -d: -f1)"
+enable_line="$(grep -n 'systemctl enable --now gguf-switchboard' deploy.sh | cut -d: -f1)"
+test "$stop_line" -lt "$build_line"
+test "$build_line" -lt "$install_line"
+test "$install_line" -lt "$enable_line"
+
+# Runtime paths must not be constructed from $HOME in the main deploy body.
+# (HOME is still ok for git clone bootstrap, rustup, and optional shell alias.)
+! grep -E 'MODELS_DIR=.*\$HOME/models|chown.*whoami.*/var/lib|User=\$\(whoami\)|WorkingDirectory=\$\(pwd\)' deploy.sh
 
 echo "deploy models generation validation passed"

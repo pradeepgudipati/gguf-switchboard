@@ -9,13 +9,17 @@ Configuration is split across two files:
 | **`config.toml`** | Server bind address, idle timeout, GPU VRAM, database path |
 | **`models.toml`** | Model registry — aliases, GGUF paths, priorities, per-model overrides |
 
-Default runtime paths after `deploy.sh`: gitignored `config.toml` and `models.toml` in the repo checkout. Tracked defaults live in `config.example.toml` and `models.example.toml`.
+Default runtime paths after `deploy.sh`:
 
-Override the config directory (optional):
+| Path | Role |
+|------|------|
+| `/opt/gguf-switchboard/config.toml` | Server config |
+| `/opt/gguf-switchboard/models.toml` | Model registry |
+| `/var/lib/gguf-switchboard/models/` | GGUF files |
+| `/var/lib/gguf-switchboard/usage.db` | Token usage SQLite |
+| `/usr/local/bin/gguf-switchboard` | Binary (root-owned) |
 
-```bash
-GGUF_SWITCHBOARD_CONFIG_DIR=/etc/gguf-switchboard ./deploy.sh
-```
+Tracked defaults live in `config.example.toml` and `models.example.toml`. The systemd unit runs as `User=ggs` / `Group=ggs`.
 
 ### Server configuration (`config.toml`)
 
@@ -34,8 +38,8 @@ auto_ngl = false
 
 database_path = "/var/lib/gguf-switchboard/usage.db"
 
-# Model registry (TOML or portable JSON)
-models_file = "models.toml"
+# Model registry (absolute path — does not depend on WorkingDirectory)
+models_file = "/opt/gguf-switchboard/models.toml"
 ```
 
 If `models_file` is omitted but a sibling `models.toml` exists next to your config, it is loaded automatically.
@@ -219,37 +223,39 @@ You can omit `[[models]]` entirely and rely on auto-discover, or add entries onl
 
 #### Deploy-time auto-generation
 
-Immediately after updating the checkout, `./deploy.sh` creates `$CONFIG_DIR/config.toml` from `config.example.toml` when missing and creates `~/models` when `MODELS_DIR` is unset. This happens before dependency installation, compilation, and systemd setup. It then generates `$CONFIG_DIR/models.toml` (default: repo checkout) when:
+`./deploy.sh` installs a system-wide layout:
 
-- **First install** — no existing `models.toml` in the config dir (auto-discovers from GGUF files)
+- `/opt/gguf-switchboard/config.toml` + `models.toml`
+- `/var/lib/gguf-switchboard/models/` for GGUF files
+- systemd unit as `User=ggs`
+
+It generates `/opt/gguf-switchboard/models.toml` when:
+
+- **First install** — no existing `models.toml` (auto-discovers from GGUF files)
 - **`--refresh-models`** — explicitly regenerate from disk, merging with the existing registry
 
 Subsequent deploys without `--refresh-models` keep the existing registry unchanged.
 
 When generation runs:
 
-1. Builds the release binary (required before `discover-models`)
-2. Detects the models directory (see below)
-3. Runs `discover-models` to scan for `.gguf` files
+1. Builds the release binary and installs it to `/usr/local/bin/gguf-switchboard`
+2. Requires `/usr/local/bin/llama-server`
+3. Runs `discover-models` as `ggs` against `/var/lib/gguf-switchboard/models`
 4. Merges with the existing registry when present — preserves `alias`, `display_name`, `priority`, `port`, `context_size`, `kind`, `enabled`, and `extra_args` per file; **duplicate alias/file entries are deduplicated**
-5. Installs the result to `$CONFIG_DIR/models.toml` and writes sibling **`models.json`**
-6. Prints a table of configured models after the service is healthy
+5. Installs the result to `/opt/gguf-switchboard/models.toml` and writes sibling **`models.json`**
+6. Prints a checklist + configured models after `/health` succeeds
 
-**Models directory detection**:
+**Models directory**:
 
-1. `$MODELS_DIR` environment variable (may be comma-separated)
-2. `models_dir` from the existing runtime `models.toml` or tracked `models.example.toml`
-
-If discovery finds no valid GGUF files, deploy keeps the runtime registry created from `models.example.toml` and prints next-step guidance. Ordinary deployments preserve existing runtime configuration; only `--refresh-models` regenerates the model registry.
+- Canonical: `/var/lib/gguf-switchboard/models`
+- Optional discover override: `MODELS_DIR=/path ./deploy.sh --refresh-models` (registry `models_dir` remains canonical)
+- Legacy `~/models`: copy with `./deploy.sh --migrate-models` (never deletes the source)
 
 An empty first installation completes successfully without starting the systemd service. Deploy prints concrete `ggs models search` and `ggs models pull` commands; after downloading a model, run `./deploy.sh --refresh-models` to generate the registry and start the service.
 
-Deploy resolves `llama-server` from `PATH`, `/usr/local/bin`, `/usr/bin`, `~/llama.cpp/build/bin`, or `/opt/llama.cpp/build/bin`. It writes a detected path to `defaults.llama_server` in a new or untouched example registry. A custom `llama_server` value is never replaced. The executable belongs in `models.toml`; `config.toml` contains the `models_file` reference rather than a duplicate backend path.
-
-Set `models_dir` in `models.toml` or pass `MODELS_DIR` when models live outside `/models`:
-
 ```bash
 MODELS_DIR=/path/to/models ./deploy.sh --refresh-models
+./deploy.sh --migrate-models
 ```
 
 #### `models` CLI (search, files, pull)

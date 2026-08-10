@@ -1,21 +1,22 @@
 # GGUF Switchboard model registry (schema version 1)
 #
 # Use short aliases in API requests (e.g. "gemma-4-e4b") instead of full GGUF filenames.
-# Link this file from config.toml:  models_file = "models.toml"
+# Link this file from config.toml:
+#   models_file = "/opt/gguf-switchboard/models.toml"
 #
 # Generate automatically from configured model directories:
-#   ./gguf-switchboard discover-models /path/to/models -o models.toml
+#   gguf-switchboard discover-models /var/lib/gguf-switchboard/models -o /opt/gguf-switchboard/models.toml
 #
 # discover-models also writes a portable models.json alongside this file.
 #
 # Multiple directories (comma-separated):
-#   models_dir = "/models,/home/you/extra-gguf"
+#   models_dir = "/var/lib/gguf-switchboard/models,/extra/gguf"
 
 version = 1
 
 [defaults]
 # Root directory (or comma-separated directories) scanned for llama.cpp-loadable GGUF files.
-models_dir = "/models"
+models_dir = "/var/lib/gguf-switchboard/models"
 llama_server = "/usr/local/bin/llama-server"
 host = "127.0.0.1"
 base_port = 18081

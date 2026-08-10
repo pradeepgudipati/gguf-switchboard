@@ -35,6 +35,6 @@ database_path = "/var/lib/gguf-switchboard/usage.db"
 
 # ─── Models ───────────────────────────────────────────────────────────────────
 # Models are defined in models.toml using short aliases.
-# deploy.sh auto-generates models.toml on first install (or with --refresh-models).
-# Manual generation:  ./gguf-switchboard discover-models /models -o models.toml
-models_file = "models.toml"
+# deploy.sh writes an absolute path so the unit does not depend on cwd.
+# Manual / local: models_file = "models.toml" next to this file also works.
+models_file = "/opt/gguf-switchboard/models.toml"

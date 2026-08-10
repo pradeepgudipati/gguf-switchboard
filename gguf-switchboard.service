@@ -1,45 +1,21 @@
-# Hardened example unit (optional). `deploy.sh` writes a simpler live unit that
-# points ExecStart at config.toml in the repo checkout (or GGUF_SWITCHBOARD_CONFIG_DIR).
-#
-# For a locked-down install under /etc, set:
-#   GGUF_SWITCHBOARD_CONFIG_DIR=/etc/gguf-switchboard ./deploy.sh
-# and adapt User/ProtectHome/ReadWritePaths below.
+# Reference unit matching deploy.sh. Live install writes the same content to
+# /etc/systemd/system/gguf-switchboard.service.
 
 [Unit]
-Description=GGUF Switchboard — GPU-aware local GGUF model scheduler
+Description=GGUF Switchboard - GPU-aware local GGUF model scheduler
 After=network.target
 Documentation=https://github.com/pradeepgudipati/gguf-switchboard
 
 [Service]
 Type=simple
-User=gguf-switchboard
-Group=gguf-switchboard
+User=ggs
+Group=ggs
 WorkingDirectory=/opt/gguf-switchboard
+Environment=RUST_LOG=info
+Environment=MODELS_DIR=/var/lib/gguf-switchboard/models
 ExecStart=/usr/local/bin/gguf-switchboard /opt/gguf-switchboard/config.toml
 Restart=on-failure
 RestartSec=5
-TimeoutStopSec=30
-
-# Environment
-Environment=RUST_LOG=info
-EnvironmentFile=-/opt/gguf-switchboard/env
-
-# Hardening
-NoNewPrivileges=yes
-ProtectSystem=strict
-ProtectHome=read-only
-ReadWritePaths=/opt/gguf-switchboard /models /var/lib/gguf-switchboard
-PrivateTmp=yes
-ProtectKernelTunables=yes
-ProtectKernelModules=yes
-ProtectControlGroups=yes
-RestrictSUIDSGID=yes
-MemoryDenyWriteExecute=yes
-LockPersonality=yes
-
-# Resource limits
-LimitNOFILE=65536
-LimitNPROC=4096
 
 [Install]
 WantedBy=multi-user.target

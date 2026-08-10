@@ -1,28 +1,43 @@
 #!/usr/bin/env bash
-# Deploy gguf-switchboard as a systemd service.
+# Deploy gguf-switchboard as a system-wide systemd service.
 #
-# Environment:
-#   MODELS_DIR                   Directory containing .gguf files (optional override)
-#   GGUF_SWITCHBOARD_DIR         Repo checkout path (default: ~/gguf-switchboard)
-#   GGUF_SWITCHBOARD_CONFIG_DIR  Config directory (default: repo checkout)
+# Runtime layout (not under the invoking user's $HOME):
+#   /opt/gguf-switchboard/          project + config.toml + models.toml
+#   /var/lib/gguf-switchboard/      models/ + usage.db
+#   /usr/local/bin/gguf-switchboard
+#   /usr/local/bin/llama-server     (required; install via scripts/update-llama-cpp.sh)
+#   /etc/systemd/system/gguf-switchboard.service  (User=ggs)
 #
 # Flags:
-#   --refresh-models   Regenerate models.toml in the config dir from disk
-#   --skip-pull        Rebuild + reinstall without git fetch/pull (keeps local branch)
+#   --refresh-models   Regenerate models.toml from disk (merge existing pins)
+#   --skip-pull        Rebuild + reinstall without git fetch/pull
+#   --migrate-models   Copy legacy ~/models into /var/lib/gguf-switchboard/models
 #
 set -euo pipefail
 
+# ─── Fixed system paths (never derived from $HOME for runtime) ────────────────
+SERVICE_USER="ggs"
+SERVICE_GROUP="ggs"
+INSTALL_DIR="/opt/gguf-switchboard"
+STATE_DIR="/var/lib/gguf-switchboard"
+# Canonical runtime models dir (never $HOME). Capture env override for discover only.
+DISCOVER_MODELS_DIR="${MODELS_DIR:-}"
+MODELS_DIR="${STATE_DIR}/models"
+CONFIG_FILE="${INSTALL_DIR}/config.toml"
+MODELS_FILE="${INSTALL_DIR}/models.toml"
+BIN="/usr/local/bin/gguf-switchboard"
+LLAMA_SERVER="/usr/local/bin/llama-server"
+SERVICE_FILE="/etc/systemd/system/gguf-switchboard.service"
+ETC_DIR="/etc/gguf-switchboard"
+
 REPO_URL="https://github.com/pradeepgudipati/gguf-switchboard.git"
+# Source checkout only (build/rsync). Runtime never lives here.
 REPO_DIR="${GGUF_SWITCHBOARD_DIR:-$HOME/gguf-switchboard}"
 BRANCH="main"
-SERVICE_FILE="/etc/systemd/system/gguf-switchboard.service"
-LEGACY_CONFIG_DIR="/etc/gguf-switchboard"
-# Resolved after ensure_repo (default: repo checkout). Override with GGUF_SWITCHBOARD_CONFIG_DIR.
-CONFIG_DIR=""
-CONFIG_FILE=""
-MODELS_FILE=""
 CONFIG_TEMPLATE="config.example.toml"
 MODELS_TEMPLATE="models.example.toml"
+
+DEPLOY_OWNER="${SUDO_USER:-${USER:-$(id -un)}}"
 
 read_config() {
     if [[ -r "$1" ]]; then
@@ -53,7 +68,9 @@ print_models_from_config() {
     echo ""
     printf "  %-24s %-30s %s\n" "MODEL ID" "DISPLAY NAME" "STATE"
 
-    if [[ -n "$models_path" && -r "$models_path" ]]; then
+    if [[ -n "$models_path" ]] && { [[ -r "$models_path" ]] || sudo test -r "$models_path"; }; then
+        local models_content
+        models_content="$(read_config "$models_path")"
         while IFS= read -r block; do
             [[ -z "$block" ]] && continue
             local alias display_name priority state=""
@@ -62,7 +79,7 @@ print_models_from_config() {
             priority="$(printf '%s\n' "$block" | awk '/^priority = / { print $3; exit }' | tr -d ' ')"
             [[ "$priority" == "true" ]] && state="priority"
             [[ -n "$alias" ]] && printf "  %-24s %-30s %s\n" "$alias" "${display_name:-—}" "$state"
-        done < <(awk '
+        done < <(printf '%s\n' "$models_content" | awk '
             BEGIN { block = "" }
             /^\[\[models\]\]/ {
                 if (block != "") { print block; block = "" }
@@ -72,7 +89,7 @@ print_models_from_config() {
                 block = block $0 "\n"
             }
             END { if (block != "") print block }
-        ' "$models_path")
+        ')
         echo ""
         return
     fi
@@ -99,124 +116,194 @@ print_models_from_config() {
 
 read_models_dir_from_toml() {
     local file="$1"
-    [[ -r "$file" ]] || return 1
-    awk -F'"' '/^models_dir[[:space:]]*=/ { print $2; exit }' "$file"
+    [[ -r "$file" ]] || sudo test -r "$file" || return 1
+    read_config "$file" | awk -F'"' '/^models_dir[[:space:]]*=/ { print $2; exit }'
 }
 
 print_models_dir_hints() {
-    local configured=""
-    configured="$(read_models_dir_from_toml "$MODELS_FILE" 2>/dev/null || read_models_dir_from_toml "$MODELS_TEMPLATE" 2>/dev/null || true)"
-    if [[ -n "$configured" ]]; then
-        echo "    Configured models_dir: $configured"
-    fi
-    echo "    To regenerate models.toml from disk (Rust auto-resolves dirs):"
+    echo "    Canonical models_dir: $MODELS_DIR"
+    echo "    To regenerate models.toml from disk:"
     echo "    ./deploy.sh --refresh-models"
-    echo "    Or: MODELS_DIR=/path/to/models ./deploy.sh --refresh-models"
 }
 
-ensure_config_toml() {
-    if [[ ! -f "$CONFIG_FILE" ]]; then
-        echo "==> Copying default config to $CONFIG_FILE..."
-        install_file "$CONFIG_TEMPLATE" "$CONFIG_FILE"
-        CONFIG_CREATED=true
+ensure_service_account() {
+    if ! id "$SERVICE_USER" >/dev/null 2>&1; then
+        echo "==> Creating system user $SERVICE_USER..."
+        sudo useradd \
+            --system \
+            --home "$STATE_DIR" \
+            --shell /usr/sbin/nologin \
+            "$SERVICE_USER"
     else
-        echo "==> Keeping existing $CONFIG_FILE."
+        echo "==> Service account $SERVICE_USER already exists."
     fi
+    # NVIDIA / DRM device access (ignore if groups absent)
+    sudo usermod -aG video,render "$SERVICE_USER" 2>/dev/null || true
 }
 
-initialize_runtime_config() {
-    mkdir -p "$CONFIG_DIR"
+ensure_system_directories() {
+    echo "==> Ensuring system directories..."
+    sudo mkdir -p \
+        "$INSTALL_DIR" \
+        "$MODELS_DIR" \
+        "$ETC_DIR"
 
-    if [[ -z "${MODELS_DIR:-}" ]]; then
-        MODELS_DIR="$HOME/models"
-        mkdir -p "$MODELS_DIR"
-        echo "==> Models directory: $MODELS_DIR"
-    elif [[ "$MODELS_DIR" != *,* ]]; then
-        mkdir -p "$MODELS_DIR"
-        echo "==> Models directory: $MODELS_DIR"
-    fi
-
-    ensure_config_toml
-
-    if [[ ! -f "$MODELS_FILE" ]]; then
-        echo "==> Copying default model registry to $MODELS_FILE..."
-        install_file "$MODELS_TEMPLATE" "$MODELS_FILE"
-        if [[ "$MODELS_DIR" != *,* ]]; then
-            sed -i.bak -e "s|^models_dir = .*|models_dir = \"$MODELS_DIR\"|" "$MODELS_FILE"
-            rm -f "$MODELS_FILE.bak"
-        fi
-        MODELS_CREATED=true
-    else
-        echo "==> Keeping existing $MODELS_FILE."
-    fi
+    sudo chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$STATE_DIR"
+    sudo chmod 755 "$STATE_DIR"
+    sudo chmod 755 "$MODELS_DIR"
 }
 
-read_configured_llama_server() {
-    [[ -r "${MODELS_FILE:-}" ]] || return 1
-    awk -F'"' '/^llama_server[[:space:]]*=/ { print $2; exit }' "$MODELS_FILE"
+# Shared project tree: deploy owner + ggs group (setgid dirs).
+fix_install_ownership() {
+    sudo chown -R "${DEPLOY_OWNER}:${SERVICE_GROUP}" "$INSTALL_DIR"
+    sudo chmod -R g+rwX "$INSTALL_DIR"
+    sudo find "$INSTALL_DIR" -type d -exec chmod g+s {} \;
 }
 
-resolve_llama_server() {
-    local candidate=""
-    candidate="$(command -v llama-server 2>/dev/null || true)"
-    if [[ -n "$candidate" && -x "$candidate" ]]; then
-        realpath "$candidate" 2>/dev/null || printf '%s\n' "$candidate"
+sync_project_to_install() {
+    local source_dir="$1"
+    if [[ "$source_dir" == "$INSTALL_DIR" ]]; then
+        echo "==> Already running from $INSTALL_DIR; skipping rsync."
+        fix_install_ownership
         return 0
     fi
 
-    for candidate in \
-        /usr/local/bin/llama-server \
-        /usr/bin/llama-server \
-        "$HOME/llama.cpp/build/bin/llama-server" \
-        /opt/llama.cpp/build/bin/llama-server; do
-        if [[ -x "$candidate" ]]; then
-            realpath "$candidate" 2>/dev/null || printf '%s\n' "$candidate"
-            return 0
-        fi
-    done
+    echo "==> Syncing project → $INSTALL_DIR..."
+    sudo rsync -aH \
+        --exclude target/ \
+        --exclude .git/ \
+        --exclude '/config.toml' \
+        --exclude '/models.toml' \
+        --exclude '/models.json' \
+        "${source_dir}/" \
+        "${INSTALL_DIR}/"
 
+    # First system install: seed live config from the checkout if /opt lacks it.
+    if [[ ! -f "$CONFIG_FILE" && -f "${source_dir}/config.toml" ]]; then
+        echo "==> Seeding $CONFIG_FILE from checkout..."
+        sudo cp "${source_dir}/config.toml" "$CONFIG_FILE"
+    fi
+    if [[ ! -f "$MODELS_FILE" && -f "${source_dir}/models.toml" ]]; then
+        echo "==> Seeding $MODELS_FILE from checkout..."
+        sudo cp "${source_dir}/models.toml" "$MODELS_FILE"
+        if [[ -f "${source_dir}/models.json" ]]; then
+            sudo cp "${source_dir}/models.json" "${MODELS_FILE%.toml}.json"
+        fi
+    fi
+
+    fix_install_ownership
+}
+
+write_system_config() {
+    local tmp
+    tmp="$(mktemp)"
+    cat >"$tmp" <<EOF
+# GGUF Switchboard configuration (system install)
+bind = "0.0.0.0:9090"
+startup_timeout = 60
+idle_timeout = 600
+default_backend = "llama.cpp"
+vram_gb = 12
+auto_ngl = false
+switch_drain_timeout_secs = 120
+priority_load_cooldown_secs = 300
+models_rescan_interval_secs = 86400
+database_path = "${STATE_DIR}/usage.db"
+models_file = "${MODELS_FILE}"
+EOF
+
+    if [[ ! -f "$CONFIG_FILE" ]]; then
+        echo "==> Writing $CONFIG_FILE..."
+        sudo install -o "$DEPLOY_OWNER" -g "$SERVICE_GROUP" -m 664 "$tmp" "$CONFIG_FILE"
+        CONFIG_CREATED=true
+    else
+        echo "==> Keeping existing $CONFIG_FILE (ensuring absolute paths)..."
+        # Absolute paths so the unit does not depend on WorkingDirectory for models_file.
+        if sudo grep -q '^models_file[[:space:]]*=' "$CONFIG_FILE"; then
+            sudo sed -i.bak -e "s|^models_file[[:space:]]*=.*|models_file = \"${MODELS_FILE}\"|" "$CONFIG_FILE"
+        else
+            echo "models_file = \"${MODELS_FILE}\"" | sudo tee -a "$CONFIG_FILE" >/dev/null
+        fi
+        if sudo grep -q '^database_path[[:space:]]*=' "$CONFIG_FILE"; then
+            sudo sed -i.bak -e "s|^database_path[[:space:]]*=.*|database_path = \"${STATE_DIR}/usage.db\"|" "$CONFIG_FILE"
+        else
+            echo "database_path = \"${STATE_DIR}/usage.db\"" | sudo tee -a "$CONFIG_FILE" >/dev/null
+        fi
+        sudo rm -f "${CONFIG_FILE}.bak"
+        sudo chown "${DEPLOY_OWNER}:${SERVICE_GROUP}" "$CONFIG_FILE"
+        sudo chmod 664 "$CONFIG_FILE"
+    fi
+    rm -f "$tmp"
+}
+
+legacy_models_dir() {
+    if [[ -n "${SUDO_USER:-}" && -d "/home/${SUDO_USER}/models" ]]; then
+        printf '%s\n' "/home/${SUDO_USER}/models"
+        return 0
+    fi
+    if [[ -n "${HOME:-}" && -d "${HOME}/models" && "${HOME}/models" != "$MODELS_DIR" ]]; then
+        printf '%s\n' "${HOME}/models"
+        return 0
+    fi
     return 1
 }
 
-# Prefer models.toml path when set; otherwise search PATH / common install locations.
-effective_llama_server() {
-    local configured=""
-    configured="$(read_configured_llama_server 2>/dev/null || true)"
-    if [[ -n "$configured" ]]; then
-        printf '%s\n' "$configured"
-        return 0
-    fi
-    resolve_llama_server
+legacy_has_gguf() {
+    local dir="$1"
+    [[ -d "$dir" ]] && find "$dir" -type f -iname '*.gguf' -print -quit 2>/dev/null | grep -q .
 }
 
-# Executable exists and can at least print --version (catches missing/broken shared libs).
+maybe_migrate_legacy_models() {
+    local force="${1:-false}"
+    local legacy=""
+    legacy="$(legacy_models_dir || true)"
+    [[ -n "$legacy" ]] || return 0
+    legacy_has_gguf "$legacy" || return 0
+
+    if [[ "$force" != "true" ]] && legacy_has_gguf "$MODELS_DIR"; then
+        echo "==> Legacy models at $legacy (canonical dir already has GGUFs; skipping copy)."
+        echo "    To merge anyway: ./deploy.sh --migrate-models"
+        return 0
+    fi
+
+    if [[ "$force" != "true" ]] && ! legacy_has_gguf "$MODELS_DIR"; then
+        echo "==> Legacy models detected at $legacy."
+        echo "    Migrating (copy) to $MODELS_DIR..."
+    else
+        echo "==> Migrating legacy models from $legacy → $MODELS_DIR (copy only)..."
+    fi
+
+    sudo rsync -aH "${legacy}/" "${MODELS_DIR}/"
+    sudo chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$STATE_DIR"
+    echo "==> Copied. Left $legacy untouched (not deleted)."
+}
+
+maybe_migrate_legacy_etc_config() {
+    [[ -d "$ETC_DIR" ]] || return 0
+    if [[ ! -f "$MODELS_FILE" && -r "$ETC_DIR/models.toml" ]]; then
+        echo "==> Migrating $ETC_DIR/models.toml → $MODELS_FILE"
+        sudo cp "$ETC_DIR/models.toml" "$MODELS_FILE"
+        sudo chown "${DEPLOY_OWNER}:${SERVICE_GROUP}" "$MODELS_FILE"
+        sudo chmod 664 "$MODELS_FILE"
+    fi
+    if [[ ! -f "$CONFIG_FILE" && -r "$ETC_DIR/config.toml" ]]; then
+        echo "==> Migrating $ETC_DIR/config.toml → $CONFIG_FILE"
+        sudo cp "$ETC_DIR/config.toml" "$CONFIG_FILE"
+        sudo chown "${DEPLOY_OWNER}:${SERVICE_GROUP}" "$CONFIG_FILE"
+        sudo chmod 664 "$CONFIG_FILE"
+    fi
+}
+
 llama_server_ready() {
-    local bin=""
-    bin="$(effective_llama_server || true)"
-    [[ -n "$bin" && -x "$bin" ]] || return 1
-    "$bin" --version >/dev/null 2>&1
-}
-
-configure_llama_server() {
-    local resolved="$1" configured=""
-    [[ -n "$resolved" && -f "$MODELS_FILE" ]] || return 0
-    configured="$(read_configured_llama_server || true)"
-
-    if [[ -n "$configured" && "$configured" != "/usr/local/bin/llama-server" ]]; then
-        echo "==> Keeping configured llama-server: $configured"
-        return 0
-    fi
-
-    sed -i.bak -e "s|^llama_server = .*|llama_server = \"$resolved\"|" "$MODELS_FILE"
-    rm -f "$MODELS_FILE.bak"
-    echo "==> Configured llama-server: $resolved"
+    [[ -x "$LLAMA_SERVER" ]] || return 1
+    "$LLAMA_SERVER" --version >/dev/null 2>&1
 }
 
 registry_has_model_candidates() {
     local registry="$1" dirs dir
-    [[ -r "$registry" ]] || return 1
+    sudo test -r "$registry" || return 1
 
-    if grep -q '^\[\[models\]\]' "$registry"; then
+    if read_config "$registry" | grep -q '^\[\[models\]\]'; then
         return 0
     fi
 
@@ -249,126 +336,136 @@ EOF
 
 llama_setup_help() {
     cat <<EOF
-==> gguf-switchboard installed, but a working llama-server was not found.
+==> gguf-switchboard installed, but $LLAMA_SERVER was not found (or is broken).
 
 gguf-switchboard is a swap proxy — it needs llama.cpp's llama-server before models can load.
 
-Recommended (NVIDIA / CUDA Linux): install or refresh llama-server into /usr/local:
+Recommended (NVIDIA / CUDA Linux):
   ./scripts/update-llama-cpp.sh
 
-That script:
-  - clones or pulls ~/llama.cpp
-  - builds with GGML_CUDA=ON
-  - installs to /usr/local and strips stale RUNPATH
-  - restarts gguf-switchboard when the systemd unit exists
-
-Then re-run:
+That installs llama-server to $LLAMA_SERVER, then re-run:
   ./deploy.sh
-
-Or point the registry at an existing binary:
-  # models.toml
-  [defaults]
-  llama_server = "/path/to/llama-server"
 EOF
-}
-
-# Copy src → dst without sudo when possible; avoid no-op self-copies.
-install_file() {
-    local src="$1" dst="$2"
-    local src_real dst_real
-    src_real="$(realpath "$src" 2>/dev/null || echo "$src")"
-    dst_real="$(realpath "$dst" 2>/dev/null || echo "$dst")"
-    if [[ "$src_real" == "$dst_real" ]]; then
-        return 0
-    fi
-    mkdir -p "$(dirname "$dst")"
-    if [[ -w "$(dirname "$dst")" ]] && { [[ ! -e "$dst" ]] || [[ -w "$dst" ]]; }; then
-        cp "$src" "$dst"
-    else
-        sudo mkdir -p "$(dirname "$dst")"
-        sudo cp "$src" "$dst"
-        sudo chown "$(whoami)":"$(whoami)" "$dst"
-    fi
-}
-
-claim_config_files() {
-    local f
-    for f in "$CONFIG_FILE" "$MODELS_FILE" "${MODELS_FILE%.toml}.json"; do
-        [[ -e "$f" ]] || continue
-        if [[ ! -w "$f" ]]; then
-            sudo chown "$(whoami)":"$(whoami)" "$f"
-        fi
-    done
-}
-
-maybe_migrate_legacy_config() {
-    local legacy="$LEGACY_CONFIG_DIR"
-    local legacy_real config_real
-    [[ -d "$legacy" ]] || return 0
-    legacy_real="$(realpath "$legacy" 2>/dev/null || echo "$legacy")"
-    config_real="$(realpath "$CONFIG_DIR" 2>/dev/null || echo "$CONFIG_DIR")"
-    [[ "$legacy_real" != "$config_real" ]] || return 0
-
-    if [[ ! -f "$MODELS_FILE" && -r "$legacy/models.toml" ]]; then
-        echo "==> Migrating $legacy/models.toml → $MODELS_FILE"
-        install_file "$legacy/models.toml" "$MODELS_FILE"
-        if [[ -r "$legacy/models.json" ]]; then
-            install_file "$legacy/models.json" "${MODELS_FILE%.toml}.json"
-        fi
-    elif [[ -r "$legacy/models.toml" && -f "$MODELS_FILE" ]]; then
-        echo "==> Note: legacy $legacy/models.toml still exists; using $MODELS_FILE."
-        echo "    To import legacy once: cp $legacy/models.toml $MODELS_FILE"
-    fi
-
-    if [[ ! -f "$CONFIG_FILE" && -r "$legacy/config.toml" ]]; then
-        echo "==> Migrating $legacy/config.toml → $CONFIG_FILE"
-        install_file "$legacy/config.toml" "$CONFIG_FILE"
-    fi
 }
 
 generate_models_toml() {
     local refresh="${1:-false}"
-    local merge_source generated="models.toml.generated"
+    local merge_source=""
     local -a discover_cmd
+    local discover_models_dir="${DISCOVER_MODELS_DIR:-$MODELS_DIR}"
 
-    if [[ "$refresh" != "true" && -f "$MODELS_FILE" ]]; then
+    if [[ "$refresh" != "true" ]] && sudo test -f "$MODELS_FILE"; then
         echo "==> Keeping existing $MODELS_FILE (pass --refresh-models to regenerate from disk)."
         print_models_dir_hints
         return 0
     fi
 
-    merge_source=""
-    if [[ -f "$MODELS_FILE" ]]; then
+    if sudo test -f "$MODELS_FILE"; then
         merge_source="$MODELS_FILE"
+    elif [[ -f "$INSTALL_DIR/$MODELS_TEMPLATE" ]]; then
+        merge_source="$INSTALL_DIR/$MODELS_TEMPLATE"
     elif [[ -f "$MODELS_TEMPLATE" ]]; then
         merge_source="$MODELS_TEMPLATE"
     fi
 
-    echo "==> Generating models.toml via discover-models (auto-resolves model directories)..."
-    discover_cmd=(./target/release/gguf-switchboard discover-models -o "$generated")
-    if [[ -n "${MODELS_DIR:-}" ]]; then
-        discover_cmd=(./target/release/gguf-switchboard discover-models "$MODELS_DIR" -o "$generated")
-    fi
+    echo "==> Generating $MODELS_FILE via discover-models..."
+    discover_cmd=(sudo -u "$SERVICE_USER" "$BIN" discover-models "$discover_models_dir" -o "$MODELS_FILE")
     if [[ -n "$merge_source" ]]; then
         discover_cmd+=(--merge "$merge_source")
     fi
 
     if "${discover_cmd[@]}"; then
-        install_file "$generated" "$MODELS_FILE"
-        local generated_json="${generated/.toml/.json}"
-        if [[ -f "$generated_json" ]]; then
-            install_file "$generated_json" "${MODELS_FILE%.toml}.json"
+        sudo chown "${DEPLOY_OWNER}:${SERVICE_GROUP}" "$MODELS_FILE"
+        sudo chmod 664 "$MODELS_FILE"
+        if sudo test -f "${MODELS_FILE%.toml}.json"; then
+            sudo chown "${DEPLOY_OWNER}:${SERVICE_GROUP}" "${MODELS_FILE%.toml}.json"
+            sudo chmod 664 "${MODELS_FILE%.toml}.json"
         fi
-        rm -f "$generated" "$generated_json"
+        # Ensure defaults point at the system layout.
+        sudo sed -i.bak \
+            -e "s|^models_dir[[:space:]]*=.*|models_dir = \"${MODELS_DIR}\"|" \
+            -e "s|^llama_server[[:space:]]*=.*|llama_server = \"${LLAMA_SERVER}\"|" \
+            "$MODELS_FILE"
+        sudo rm -f "${MODELS_FILE}.bak"
         echo "==> Installed $MODELS_FILE"
         return 0
     fi
 
-    echo "==> Warning: discover-models failed; keeping existing models.toml if present."
-    rm -f "$generated"
-    if [[ ! -f "$MODELS_FILE" && -f "$MODELS_TEMPLATE" ]]; then
-        install_file "$MODELS_TEMPLATE" "$MODELS_FILE"
+    echo "==> Warning: discover-models failed; seeding defaults if missing."
+    if ! sudo test -f "$MODELS_FILE"; then
+        local tmp
+        tmp="$(mktemp)"
+        cat >"$tmp" <<EOF
+version = 1
+auto_discover = true
+
+[defaults]
+models_dir = "${MODELS_DIR}"
+llama_server = "${LLAMA_SERVER}"
+host = "127.0.0.1"
+base_port = 18081
+context_size = 16384
+ngl = 999
+backend = "llama.cpp"
+EOF
+        sudo install -o "$DEPLOY_OWNER" -g "$SERVICE_GROUP" -m 664 "$tmp" "$MODELS_FILE"
+        rm -f "$tmp"
+        MODELS_CREATED=true
     fi
+}
+
+write_systemd_unit() {
+    echo "==> Installing systemd unit ($SERVICE_FILE)..."
+    sudo tee "$SERVICE_FILE" >/dev/null <<EOF
+[Unit]
+Description=GGUF Switchboard - GPU-aware local GGUF model scheduler
+After=network.target
+
+[Service]
+Type=simple
+User=${SERVICE_USER}
+Group=${SERVICE_GROUP}
+WorkingDirectory=${INSTALL_DIR}
+Environment=RUST_LOG=info
+Environment=MODELS_DIR=${MODELS_DIR}
+ExecStart=${BIN} ${CONFIG_FILE}
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+validate_runtime_access() {
+    echo "==> Validating runtime access as $SERVICE_USER..."
+    local failed=0
+    sudo -u "$SERVICE_USER" test -r "$CONFIG_FILE" || {
+        echo "ERROR: $SERVICE_USER cannot read $CONFIG_FILE" >&2
+        failed=1
+    }
+    sudo -u "$SERVICE_USER" test -r "$MODELS_FILE" || {
+        echo "ERROR: $SERVICE_USER cannot read $MODELS_FILE" >&2
+        failed=1
+    }
+    sudo -u "$SERVICE_USER" test -x "$BIN" || {
+        echo "ERROR: $SERVICE_USER cannot execute $BIN" >&2
+        failed=1
+    }
+    sudo -u "$SERVICE_USER" test -x "$LLAMA_SERVER" || {
+        echo "ERROR: $SERVICE_USER cannot execute $LLAMA_SERVER" >&2
+        failed=1
+    }
+    sudo -u "$SERVICE_USER" test -r "$MODELS_DIR" || {
+        echo "ERROR: $SERVICE_USER cannot read $MODELS_DIR" >&2
+        failed=1
+    }
+    # usage.db parent must be writable for SQLite create/open
+    sudo -u "$SERVICE_USER" test -w "$STATE_DIR" || {
+        echo "ERROR: $SERVICE_USER cannot write $STATE_DIR (usage.db)" >&2
+        failed=1
+    }
+    return "$failed"
 }
 
 print_models_from_status() {
@@ -398,6 +495,31 @@ print_models_from_status() {
     echo ""
 }
 
+print_deploy_checklist() {
+    local models_ok="✗" db_ok="✗" svc_enabled="✗" svc_active="✗" http_ok="✗" spawn_ok="✗"
+    id "$SERVICE_USER" >/dev/null 2>&1 && echo "✓ $SERVICE_USER service account exists" || echo "✗ $SERVICE_USER service account missing"
+    [[ -d "$INSTALL_DIR" && -d "$MODELS_DIR" ]] && echo "✓ shared directories created" || echo "✗ shared directories missing"
+    [[ -x "$BIN" ]] && echo "✓ binary installed ($BIN)" || echo "✗ binary missing"
+    [[ -x "$LLAMA_SERVER" ]] && echo "✓ llama-server detected ($LLAMA_SERVER)" || echo "✗ llama-server missing"
+    sudo test -f "$MODELS_FILE" && echo "✓ models registry generated" || echo "✗ models registry missing"
+    sudo -u "$SERVICE_USER" test -r "$MODELS_DIR" && models_ok="✓"
+    echo "$models_ok models readable by $SERVICE_USER"
+    sudo -u "$SERVICE_USER" test -w "$STATE_DIR" && db_ok="✓"
+    echo "$db_ok usage.db directory writable by $SERVICE_USER"
+    systemctl is-enabled --quiet gguf-switchboard 2>/dev/null && svc_enabled="✓"
+    echo "$svc_enabled service enabled"
+    systemctl is-active --quiet gguf-switchboard 2>/dev/null && svc_active="✓"
+    echo "$svc_active service running"
+    if curl -fsS http://127.0.0.1:9090/health >/dev/null 2>&1; then
+        http_ok="✓"
+    fi
+    echo "$http_ok HTTP endpoint responding"
+    if sudo -u "$SERVICE_USER" find "$MODELS_DIR" -type f -iname '*.gguf' -print -quit 2>/dev/null | grep -q .; then
+        spawn_ok="✓"
+    fi
+    echo "$spawn_ok model files present under $MODELS_DIR"
+}
+
 in_repo() {
     [[ -f "$1/Cargo.toml" ]] && grep -q 'name = "gguf-switchboard"' "$1/Cargo.toml" 2>/dev/null
 }
@@ -421,7 +543,7 @@ ensure_repo() {
         return 0
     fi
 
-    echo "==> Cloning $REPO_URL (branch: $BRANCH)..."
+    echo "==> Cloning $REPO_URL (branch: $BRANCH) into $REPO_DIR..."
     git clone --branch "$BRANCH" "$REPO_URL" "$REPO_DIR"
     cd "$REPO_DIR"
     exec "$REPO_DIR/deploy.sh" "$@"
@@ -432,9 +554,12 @@ if [[ "${GGUF_SWITCHBOARD_DEPLOY_LIB:-0}" == "1" ]]; then
 fi
 
 ensure_repo
+SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SOURCE_DIR"
 
 REFRESH_MODELS=false
 SKIP_PULL=false
+MIGRATE_MODELS=false
 for arg in "$@"; do
     case "$arg" in
         --refresh-models)
@@ -443,24 +568,32 @@ for arg in "$@"; do
         --skip-pull)
             SKIP_PULL=true
             ;;
+        --migrate-models)
+            MIGRATE_MODELS=true
+            ;;
         -h|--help)
-            cat <<'EOF'
-Usage: ./deploy.sh [--refresh-models] [--skip-pull]
+            cat <<EOF
+Usage: ./deploy.sh [--refresh-models] [--skip-pull] [--migrate-models]
 
-Deploy gguf-switchboard as a systemd service (Linux).
+Deploy gguf-switchboard system-wide (Linux + systemd).
+
+Layout:
+  $INSTALL_DIR
+  $STATE_DIR/models
+  $BIN
+  $SERVICE_FILE  (User=$SERVICE_USER)
 
 Options:
   --refresh-models   Regenerate models.toml from GGUF files on disk (merge)
   --skip-pull        Rebuild + reinstall without git fetch/checkout/pull
+  --migrate-models   Copy legacy ~/models into $MODELS_DIR (never deletes)
 
 Environment:
-  MODELS_DIR                   Optional override dirs for discover-models (comma-separated)
-  GGUF_SWITCHBOARD_DIR         Repo checkout path (default: ~/gguf-switchboard)
-  GGUF_SWITCHBOARD_CONFIG_DIR  Config directory (default: repo checkout)
+  MODELS_DIR / DISCOVER_MODELS_DIR   Override discover scan dirs (comma-separated)
+  GGUF_SWITCHBOARD_DIR               Source checkout for clone/bootstrap only
 
 Post-install:
   Adds a 'ggs' alias to your shell rc file (bash/zsh) when accepted.
-  Windows users: add `Set-Alias -Name ggs -Value gguf-switchboard` to $PROFILE.
 EOF
             exit 0
             ;;
@@ -471,25 +604,35 @@ EOF
     esac
 done
 
-CONFIG_DIR="${GGUF_SWITCHBOARD_CONFIG_DIR:-$(pwd)}"
-CONFIG_FILE="${CONFIG_DIR}/config.toml"
-MODELS_FILE="${CONFIG_DIR}/models.toml"
-echo "==> Config directory: $CONFIG_DIR"
+# Discover may scan an override path; registry defaults still use canonical MODELS_DIR.
+if [[ -z "${DISCOVER_MODELS_DIR:-}" || "$DISCOVER_MODELS_DIR" == "$MODELS_DIR" ]]; then
+    DISCOVER_MODELS_DIR="$MODELS_DIR"
+fi
+
+echo "==> Source:  $SOURCE_DIR"
+echo "==> Install: $INSTALL_DIR"
+echo "==> State:   $STATE_DIR"
+echo "==> Models:  $MODELS_DIR"
+echo "==> Service user: $SERVICE_USER"
 
 if [[ "$SKIP_PULL" != "true" ]]; then
-    echo "==> Checking out $BRANCH..."
-    git fetch origin "$BRANCH" 2>/dev/null || true
-    git checkout "$BRANCH" 2>/dev/null || git checkout -B "$BRANCH" "origin/$BRANCH"
+    if [[ -d "$SOURCE_DIR/.git" ]]; then
+        echo "==> Checking out $BRANCH..."
+        git fetch origin "$BRANCH" 2>/dev/null || true
+        git checkout "$BRANCH" 2>/dev/null || git checkout -B "$BRANCH" "origin/$BRANCH"
 
-    if [[ -n "$(git status --porcelain)" ]]; then
-        STASH_LABEL="deploy-auto-stash-$(date +%Y%m%d-%H%M%S)"
-        echo "==> Local changes detected; stashing as '$STASH_LABEL'..."
-        git stash push --include-untracked --message "$STASH_LABEL" >/dev/null
-        echo "==> Stashed local changes. (Use 'git stash list' / 'git stash pop' to recover.)"
+        if [[ -n "$(git status --porcelain)" ]]; then
+            STASH_LABEL="deploy-auto-stash-$(date +%Y%m%d-%H%M%S)"
+            echo "==> Local changes detected; stashing as '$STASH_LABEL'..."
+            git stash push --include-untracked --message "$STASH_LABEL" >/dev/null
+            echo "==> Stashed local changes. (Use 'git stash list' / 'git stash pop' to recover.)"
+        fi
+
+        echo "==> Pulling latest changes..."
+        git pull origin "$BRANCH"
+    else
+        echo "==> No .git in source tree; skipping pull."
     fi
-
-    echo "==> Pulling latest changes..."
-    git pull origin "$BRANCH"
 else
     echo "==> Skipping git pull (--skip-pull)."
 fi
@@ -497,19 +640,14 @@ fi
 CONFIG_CREATED=false
 MODELS_CREATED=false
 
-maybe_migrate_legacy_config
+# Stop before replacing binaries/config (do not disable).
+echo "==> Stopping service (if running)..."
+sudo systemctl stop gguf-switchboard 2>/dev/null || true
 
-# Create user-owned runtime files and the default model directory before any
-# dependency installation, build, or systemd operation can fail.
-initialize_runtime_config
-
-LLAMA_SERVER_PATH="$(resolve_llama_server || true)"
-if [[ -n "$LLAMA_SERVER_PATH" ]]; then
-    configure_llama_server "$LLAMA_SERVER_PATH"
-else
-    echo "==> Warning: llama-server not found yet (checked again before service start)."
-    echo "    After install, run: ./scripts/update-llama-cpp.sh"
-fi
+ensure_service_account
+ensure_system_directories
+maybe_migrate_legacy_etc_config
+maybe_migrate_legacy_models "$MIGRATE_MODELS"
 
 if command -v apt-get >/dev/null 2>&1; then
     APT_PKGS=(libssl-dev pkg-config build-essential cmake curl git jq aria2)
@@ -537,75 +675,61 @@ if ! command -v cargo >/dev/null 2>&1; then
 fi
 
 echo "==> Building release..."
-export SWAGGER_UI_OVERWRITE_FOLDER="$(pwd)/swagger-ui-overrides"
-# Override files are baked into utoipa-swagger-ui at compile time; debug clean
-# leaves release artifacts, so the old swagger-initializer.js keeps shipping.
+export SWAGGER_UI_OVERWRITE_FOLDER="${SOURCE_DIR}/swagger-ui-overrides"
 cargo clean -p utoipa-swagger-ui --release 2>/dev/null || true
 cargo build --release
 
-echo "==> Ensuring runtime directories..."
-mkdir -p "$CONFIG_DIR" 2>/dev/null || sudo mkdir -p "$CONFIG_DIR"
-sudo mkdir -p /var/lib/gguf-switchboard
-sudo chown "$(whoami)":"$(whoami)" /var/lib/gguf-switchboard
+sync_project_to_install "$SOURCE_DIR"
+write_system_config
 
-echo "==> Installing systemd service (config: $CONFIG_FILE)..."
-sudo tee "$SERVICE_FILE" > /dev/null <<EOF
-[Unit]
-Description=GGUF Switchboard - GPU-aware local GGUF model scheduler
-After=network.target
+echo "==> Installing binary → $BIN..."
+sudo install -o root -g root -m 755 \
+    "${SOURCE_DIR}/target/release/gguf-switchboard" \
+    "$BIN"
 
-[Service]
-Type=simple
-User=$(whoami)
-WorkingDirectory=$(pwd)
-ExecStart=/usr/local/bin/gguf-switchboard $CONFIG_FILE
-Restart=on-failure
-RestartSec=5
-Environment=RUST_LOG=info
+if [[ ! -x "$LLAMA_SERVER" ]]; then
+    echo "ERROR: $LLAMA_SERVER not found or not executable." >&2
+    llama_setup_help
+    exit 1
+fi
+if ! llama_server_ready; then
+    echo "ERROR: $LLAMA_SERVER failed --version (missing libs?)." >&2
+    llama_setup_help
+    exit 1
+fi
 
-[Install]
-WantedBy=multi-user.target
-EOF
-
-sudo systemctl daemon-reload
-sudo systemctl enable gguf-switchboard
-
-if [[ "$MODELS_CREATED" == "true" ]]; then
+if [[ "$MODELS_CREATED" == "true" ]] || ! sudo test -f "$MODELS_FILE"; then
     generate_models_toml true
 else
     generate_models_toml "$REFRESH_MODELS"
 fi
-claim_config_files
 
-echo "==> Stopping service..."
-sudo systemctl stop gguf-switchboard || true
-
-echo "==> Installing binary..."
-sudo cp target/release/gguf-switchboard /usr/local/bin/
-
-if ! llama_server_ready; then
-    sudo systemctl disable --now gguf-switchboard >/dev/null 2>&1 || true
-    echo ""
-    llama_setup_help
-    exit 0
-fi
+write_systemd_unit
+sudo systemctl daemon-reload
 
 if ! registry_has_model_candidates "$MODELS_FILE"; then
-    sudo systemctl disable --now gguf-switchboard >/dev/null 2>&1 || true
     echo ""
-    model_setup_help "${MODELS_DIR:-$HOME/models}"
+    model_setup_help "$MODELS_DIR"
+    echo ""
+    echo "==> Service unit installed but not started (no GGUF models yet)."
+    echo "    After pulling models: ./deploy.sh --refresh-models"
     exit 0
 fi
 
-echo "==> Starting service..."
-sudo systemctl start gguf-switchboard
+validate_runtime_access || {
+    echo "==> FAILED: runtime access validation" >&2
+    exit 1
+}
 
-# Offer to add the ggs shell alias
+echo "==> Enabling and starting service..."
+sudo systemctl enable --now gguf-switchboard
+
+# Offer to add the ggs shell alias for the deploying user
 SHELL_RC=""
 if [[ "${SHELL:-}" == */zsh ]]; then
-    SHELL_RC="$HOME/.zshrc"
+    SHELL_RC="${HOME}/.zshrc"
 elif [[ "${SHELL:-}" == */bash ]]; then
-    SHELL_RC="$HOME/.bashrc"
+    SHELL_RC="${HOME}/.bashrc"
 fi
 
 if [[ -n "$SHELL_RC" ]] && ! grep -q "alias ggs='gguf-switchboard'" "$SHELL_RC" 2>/dev/null; then
@@ -619,41 +743,40 @@ if [[ -n "$SHELL_RC" ]] && ! grep -q "alias ggs='gguf-switchboard'" "$SHELL_RC" 
     fi
 fi
 
-# Resolve bind address from config (default 0.0.0.0:9090)
-BIND_ADDR="$(read_config "$CONFIG_FILE" | grep -E '^bind\s*=' | head -1 | sed -E 's/^bind\s*=\s*"([^"]+)".*/\1/' || true)"
-BIND_ADDR="${BIND_ADDR:-0.0.0.0:9090}"
-BASE_URL="http://${BIND_ADDR/0.0.0.0/localhost}"
+BASE_URL="http://127.0.0.1:9090"
 
 echo "==> Waiting for health check..."
 for i in {1..30}; do
     sleep 1
-    if curl -sf "${BASE_URL}/health" > /dev/null 2>&1; then
+    if curl -fsS "${BASE_URL}/health" >/dev/null 2>&1; then
+        if ! systemctl is-active --quiet gguf-switchboard; then
+            echo "==> FAILED: service is not active"
+            sudo journalctl -u gguf-switchboard -n 100 --no-pager
+            exit 1
+        fi
         echo ""
         echo "==> Deploy complete."
         echo ""
-        echo "  Swagger UI:  ${BASE_URL}/swagger-ui/"
-        echo "               (use the Model dropdown in the top bar — applies to all APIs)"
-        echo "  OpenAPI spec:  ${BASE_URL}/api-docs/openapi.json"
-        echo "  Model registry: ${BASE_URL}/v1/models/registry.json"
+        echo "  Install dir:   $INSTALL_DIR"
+        echo "  Models dir:    $MODELS_DIR"
+        echo "  Config:        $CONFIG_FILE"
+        echo "  Registry:      $MODELS_FILE"
+        echo "  Swagger UI:    ${BASE_URL}/swagger-ui/"
         echo "  Health:        ${BASE_URL}/health"
         echo "  Status:        ${BASE_URL}/status"
         echo ""
-        echo "==> Health: $(curl -s "${BASE_URL}/health")"
-        echo "==> Status: $(curl -s "${BASE_URL}/status")"
+        echo "==> Health: $(curl -fsS "${BASE_URL}/health")"
         if command -v jq >/dev/null 2>&1; then
             print_models_from_status "$BASE_URL"
         else
             print_models_from_config "$CONFIG_FILE"
         fi
-        if [[ "$CONFIG_CREATED" == "true" ]]; then
-            echo "==> Next step: place GGUF files in ~/models (or set MODELS_DIR),"
-            echo "    then re-run:"
-            echo "    MODELS_DIR=/path/to/models ./deploy.sh --refresh-models"
-            echo "    Or edit $CONFIG_FILE / $MODELS_FILE manually and restart:"
-            echo "    sudo systemctl restart gguf-switchboard"
-        elif [[ "$REFRESH_MODELS" == "true" ]]; then
+        echo "==> Checklist:"
+        print_deploy_checklist
+        if [[ "$REFRESH_MODELS" == "true" ]]; then
             echo "==> models.toml was regenerated from disk."
-            echo "    Edit aliases, display_name, or priority in $MODELS_FILE as needed."
+            echo "    Edit aliases / priority in $MODELS_FILE as needed, then:"
+            echo "    sudo systemctl restart gguf-switchboard"
         fi
         exit 0
     fi
@@ -661,5 +784,5 @@ for i in {1..30}; do
 done
 
 echo "==> FAILED: service did not become healthy in 30s"
-journalctl -u gguf-switchboard --no-pager -n 10
+sudo journalctl -u gguf-switchboard -n 100 --no-pager
 exit 1
