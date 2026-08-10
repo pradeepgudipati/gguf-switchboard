@@ -292,13 +292,14 @@ pub async fn cmd_files(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 
 // ── models pull ──────────────────────────────────────────────────────────────
 
-/// `gguf-switchboard models pull <repo-id> [--quant Q4_K_M] [--dir /path]`
+/// `gguf-switchboard models pull <repo-id> [--quant Q4_K_M] [--dir /path] [--no-bench]`
 pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut repo: Option<String> = None;
     let mut quant: Option<String> = None;
     let mut dest_override: Option<String> = None;
     let mut models_file: Option<String> = None;
     let mut connections: u16 = 8;
+    let mut no_bench = false;
 
     let mut i = 1; // args[0] is "pull"
     while i < args.len() {
@@ -334,6 +335,10 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
                 } else {
                     return Err("models pull: missing value for --connections".into());
                 }
+            }
+            "--no-bench" => {
+                no_bench = true;
+                i += 1;
             }
             arg if arg.starts_with('-') => {
                 return Err(format!("models pull: unknown flag '{arg}'").into());
@@ -452,11 +457,14 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         }
     };
 
+    let kind = infer_kind_from_filename(&selected.path);
+
     // Check if file is already registered.
-    let already_registered = registry.models.iter().any(|e| e.file == file_ref);
-    if already_registered {
-        println!("✓ Already registered as: {alias}");
-        refresh_after_pull().await;
+    if let Some(existing) = registry.models.iter().find(|e| e.file == file_ref) {
+        let registered_alias = existing.alias.clone();
+        println!("✓ Already registered as: {registered_alias}");
+        let refreshed = refresh_after_pull().await;
+        maybe_bench_after_pull(&registered_alias, &kind, no_bench, refreshed).await;
         return Ok(());
     }
 
@@ -467,7 +475,7 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         alias: alias.clone(),
         file: file_ref,
         display_name: Some(display_name_from_alias(&alias)),
-        kind: Some(infer_kind_from_filename(&selected.path)),
+        kind: Some(kind.clone()),
         enabled: true,
         hf_repo: Some(repo.clone()),
         min_vram_gb: Some(((selected.size as f64 / 1_000_000_000.0).ceil() as u32).max(1)),
@@ -477,7 +485,8 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
     registry.write(&registry_path)?;
     println!("✓ Registered as: {alias}");
-    refresh_after_pull().await;
+    let refreshed = refresh_after_pull().await;
+    maybe_bench_after_pull(&alias, &kind, no_bench, refreshed).await;
 
     Ok(())
 }
@@ -492,7 +501,7 @@ fn parse_connections(value: &str) -> Result<u16, &'static str> {
     Ok(connections)
 }
 
-fn refresh_url_from_config(config_path: &Path) -> Result<String, RuntimeError> {
+fn client_address_from_config(config_path: &Path) -> Result<String, RuntimeError> {
     let raw = std::fs::read_to_string(config_path).map_err(|e| {
         RuntimeError::ConfigError(format!("Cannot read '{}': {e}", config_path.display()))
     })?;
@@ -502,13 +511,26 @@ fn refresh_url_from_config(config_path: &Path) -> Result<String, RuntimeError> {
         .get("bind")
         .and_then(toml::Value::as_str)
         .ok_or_else(|| RuntimeError::ConfigError("config.toml has no bind address".to_string()))?;
-    let client_address = match bind.parse::<SocketAddr>() {
+    Ok(match bind.parse::<SocketAddr>() {
         Ok(address) if address.ip().is_unspecified() => {
             SocketAddr::new(IpAddr::from([127, 0, 0, 1]), address.port()).to_string()
         }
         _ => bind.to_string(),
-    };
-    Ok(format!("http://{client_address}/v1/models/refresh"))
+    })
+}
+
+fn refresh_url_from_config(config_path: &Path) -> Result<String, RuntimeError> {
+    Ok(format!(
+        "http://{}/v1/models/refresh",
+        client_address_from_config(config_path)?
+    ))
+}
+
+fn chat_url_from_config(config_path: &Path) -> Result<String, RuntimeError> {
+    Ok(format!(
+        "http://{}/v1/chat/completions",
+        client_address_from_config(config_path)?
+    ))
 }
 
 async fn refresh_running_server(
@@ -526,7 +548,8 @@ async fn refresh_running_server(
     Ok(())
 }
 
-async fn refresh_after_pull() {
+/// Returns true when a running gguf-switchboard accepted the registry refresh.
+async fn refresh_after_pull() -> bool {
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
@@ -537,16 +560,187 @@ async fn refresh_after_pull() {
                 "Warning: model downloaded and registered, but refresh setup failed: {error}"
             );
             eprintln!("Start or restart gguf-switchboard to load the updated registry.");
-            return;
+            return false;
         }
     };
     match refresh_running_server(&client, Path::new("config.toml")).await {
-        Ok(()) => println!("✓ Running server refreshed"),
+        Ok(()) => {
+            println!("✓ Running server refreshed");
+            true
+        }
         Err(error) => {
             eprintln!("Warning: model downloaded and registered, but live refresh failed: {error}");
             eprintln!("Start or restart gguf-switchboard to load the updated registry.");
+            false
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SpeedStats {
+    prompt_tps: f64,
+    prompt_tokens: u64,
+    gen_tps: f64,
+    gen_tokens: u64,
+    from_timings: bool,
+}
+
+/// Extract prompt/generation tok/s from a chat-completions JSON body.
+/// Prefers llama.cpp `timings`; falls back to `usage` / wall-clock seconds.
+fn extract_speed_stats(body: &Value, wall_secs: f64) -> Option<SpeedStats> {
+    if let Some(timings) = body.get("timings") {
+        let prompt_tokens = timings
+            .get("prompt_n")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                body.get("usage")
+                    .and_then(|u| u.get("prompt_tokens"))
+                    .and_then(Value::as_u64)
+            })
+            .unwrap_or(0);
+        let gen_tokens = timings
+            .get("predicted_n")
+            .and_then(Value::as_u64)
+            .or_else(|| {
+                body.get("usage")
+                    .and_then(|u| u.get("completion_tokens"))
+                    .and_then(Value::as_u64)
+            })
+            .unwrap_or(0);
+
+        let prompt_tps = timings
+            .get("prompt_per_second")
+            .and_then(Value::as_f64)
+            .or_else(|| {
+                let ms = timings.get("prompt_ms").and_then(Value::as_f64)?;
+                if ms > 0.0 && prompt_tokens > 0 {
+                    Some(prompt_tokens as f64 / (ms / 1000.0))
+                } else {
+                    None
+                }
+            });
+        let gen_tps = timings
+            .get("predicted_per_second")
+            .and_then(Value::as_f64)
+            .or_else(|| {
+                let ms = timings.get("predicted_ms").and_then(Value::as_f64)?;
+                if ms > 0.0 && gen_tokens > 0 {
+                    Some(gen_tokens as f64 / (ms / 1000.0))
+                } else {
+                    None
+                }
+            });
+
+        if let (Some(prompt_tps), Some(gen_tps)) = (prompt_tps, gen_tps) {
+            return Some(SpeedStats {
+                prompt_tps,
+                prompt_tokens,
+                gen_tps,
+                gen_tokens,
+                from_timings: true,
+            });
+        }
+    }
+
+    if wall_secs <= 0.0 {
+        return None;
+    }
+    let usage = body.get("usage")?;
+    let prompt_tokens = usage
+        .get("prompt_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let gen_tokens = usage
+        .get("completion_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    if prompt_tokens == 0 && gen_tokens == 0 {
+        return None;
+    }
+    Some(SpeedStats {
+        prompt_tps: prompt_tokens as f64 / wall_secs,
+        prompt_tokens,
+        gen_tps: gen_tokens as f64 / wall_secs,
+        gen_tokens,
+        from_timings: false,
+    })
+}
+
+fn print_speed_stats(alias: &str, stats: &SpeedStats) {
+    println!("✓ Speed test ({alias})");
+    println!(
+        "  Prompt:     {:>7.1} tok/s  ({} tokens)",
+        stats.prompt_tps, stats.prompt_tokens
+    );
+    println!(
+        "  Generation: {:>7.1} tok/s  ({} tokens)",
+        stats.gen_tps, stats.gen_tokens
+    );
+    if !stats.from_timings {
+        println!("  (wall-clock estimate — llama.cpp timings not present in response)");
+    }
+}
+
+async fn maybe_bench_after_pull(alias: &str, kind: &str, no_bench: bool, refreshed: bool) {
+    if no_bench {
+        return;
+    }
+    if kind.eq_ignore_ascii_case("embedding") {
+        eprintln!("Speed test skipped: embedding models have no chat generation");
+        return;
+    }
+    if !refreshed {
+        eprintln!(
+            "Speed test skipped: gguf-switchboard is not running (start it, then re-pull or chat)"
+        );
+        return;
+    }
+    if let Err(reason) = bench_pulled_model(alias).await {
+        eprintln!("Speed test skipped: {reason}");
+    }
+}
+
+async fn bench_pulled_model(alias: &str) -> Result<(), String> {
+    let config_path = Path::new("config.toml");
+    let url = chat_url_from_config(config_path).map_err(|e| e.to_string())?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(300))
+        .build()
+        .map_err(|e| format!("HTTP client: {e}"))?;
+
+    let body = serde_json::json!({
+        "model": alias,
+        "messages": [{"role": "user", "content": "Say hello in one short sentence."}],
+        "max_tokens": 64,
+        "stream": false
+    });
+
+    println!("Running speed test (first load may take a while)...");
+    let started = std::time::Instant::now();
+    let response = client
+        .post(&url)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("chat request failed: {e}"))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let detail = response.text().await.unwrap_or_default();
+        let detail = detail.trim();
+        if detail.is_empty() {
+            return Err(format!("chat request failed: HTTP {status}"));
+        }
+        return Err(format!("chat request failed: HTTP {status}: {detail}"));
+    }
+    let json: Value = response
+        .json()
+        .await
+        .map_err(|e| format!("invalid chat response: {e}"))?;
+    let wall_secs = started.elapsed().as_secs_f64();
+    let stats = extract_speed_stats(&json, wall_secs)
+        .ok_or_else(|| "response missing usable timings/usage".to_string())?;
+    print_speed_stats(alias, &stats);
+    Ok(())
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -937,9 +1131,10 @@ fn dedupe_alias(alias: &str, used: &HashSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelOption, SearchAssessment, assess_repository, complete_model_options, extract_quant,
-        format_hardware_summary, is_standalone_model, is_supported, parse_connections,
-        refresh_url_from_config, render_search_table, sample_pull_command, select_quant_entry,
+        ModelOption, SearchAssessment, assess_repository, chat_url_from_config,
+        complete_model_options, extract_quant, extract_speed_stats, format_hardware_summary,
+        is_standalone_model, is_supported, parse_connections, refresh_url_from_config,
+        render_search_table, sample_pull_command, select_quant_entry,
     };
     use crate::config::hf_download::HfTreeEntry;
 
@@ -1352,5 +1547,59 @@ mod tests {
             refresh_url_from_config(&config).unwrap(),
             "http://127.0.0.1:9090/v1/models/refresh"
         );
+        assert_eq!(
+            chat_url_from_config(&config).unwrap(),
+            "http://127.0.0.1:9090/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn extract_speed_prefers_llama_timings() {
+        let body = serde_json::json!({
+            "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+            "timings": {
+                "prompt_n": 12,
+                "prompt_ms": 30.0,
+                "prompt_per_second": 400.0,
+                "predicted_n": 64,
+                "predicted_ms": 1600.0,
+                "predicted_per_second": 40.0
+            }
+        });
+        let stats = extract_speed_stats(&body, 10.0).expect("stats");
+        assert!(stats.from_timings);
+        assert_eq!(stats.prompt_tokens, 12);
+        assert_eq!(stats.gen_tokens, 64);
+        assert!((stats.prompt_tps - 400.0).abs() < f64::EPSILON);
+        assert!((stats.gen_tps - 40.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn extract_speed_falls_back_to_usage_over_wall_clock() {
+        let body = serde_json::json!({
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150}
+        });
+        let stats = extract_speed_stats(&body, 2.0).expect("stats");
+        assert!(!stats.from_timings);
+        assert_eq!(stats.prompt_tokens, 100);
+        assert_eq!(stats.gen_tokens, 50);
+        assert!((stats.prompt_tps - 50.0).abs() < f64::EPSILON);
+        assert!((stats.gen_tps - 25.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn extract_speed_computes_from_timing_ms_when_per_second_missing() {
+        let body = serde_json::json!({
+            "timings": {
+                "prompt_n": 100,
+                "prompt_ms": 250.0,
+                "predicted_n": 50,
+                "predicted_ms": 1000.0
+            }
+        });
+        let stats = extract_speed_stats(&body, 9.0).expect("stats");
+        assert!(stats.from_timings);
+        assert!((stats.prompt_tps - 400.0).abs() < 0.01);
+        assert!((stats.gen_tps - 50.0).abs() < 0.01);
     }
 }
