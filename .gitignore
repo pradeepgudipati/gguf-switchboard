@@ -34,3 +34,4 @@ models.local.json
 /target-docker-arm64
 local_commands.md
 .worktrees/
+.zcode/
