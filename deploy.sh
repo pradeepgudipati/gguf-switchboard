@@ -639,6 +639,10 @@ echo "==> Service user: $SERVICE_USER"
 
 if [[ "$SKIP_PULL" != "true" ]]; then
     if [[ -d "$SOURCE_DIR/.git" ]]; then
+        # Avoid "dubious ownership" errors when the deploy user differs from
+        # the repo owner (e.g. root-owned checkout, ggs running deploy).
+        git config --global --add safe.directory "$SOURCE_DIR" 2>/dev/null || true
+
         echo "==> Checking out $BRANCH..."
         git fetch origin "$BRANCH" 2>/dev/null || true
         git checkout "$BRANCH" 2>/dev/null || git checkout -B "$BRANCH" "origin/$BRANCH"
