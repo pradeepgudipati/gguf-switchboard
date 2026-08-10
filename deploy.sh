@@ -148,9 +148,16 @@ ensure_system_directories() {
         "$MODELS_DIR" \
         "$ETC_DIR"
 
+    # STATE_DIR (usage.db): owned by service user, writable by owner only.
     sudo chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$STATE_DIR"
     sudo chmod 755 "$STATE_DIR"
-    sudo chmod 755 "$MODELS_DIR"
+
+    # MODELS_DIR: shared between service user and deploy user via ggs group.
+    #   2775 = rwxrwsr-x  (setgid ensures new files inherit the ggs group)
+    #   664 for files     (group-writable so deploy user can download models)
+    sudo chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$MODELS_DIR"
+    sudo find "$MODELS_DIR" -type d -exec chmod 2775 {} \;
+    sudo find "$MODELS_DIR" -type f -exec chmod 664 {} \;
 }
 
 # Shared project tree: deploy owner + ggs group (setgid dirs).
@@ -460,11 +467,23 @@ validate_runtime_access() {
         echo "ERROR: $SERVICE_USER cannot read $MODELS_DIR" >&2
         failed=1
     }
+    sudo -u "$SERVICE_USER" test -w "$MODELS_DIR" || {
+        echo "ERROR: $SERVICE_USER cannot write $MODELS_DIR" >&2
+        failed=1
+    }
     # usage.db parent must be writable for SQLite create/open
     sudo -u "$SERVICE_USER" test -w "$STATE_DIR" || {
         echo "ERROR: $SERVICE_USER cannot write $STATE_DIR (usage.db)" >&2
         failed=1
     }
+    # Deploy user must be able to write new model files into MODELS_DIR.
+    if [[ "$DEPLOY_OWNER" != "root" ]] && id "$DEPLOY_OWNER" >/dev/null 2>&1; then
+        sudo -u "$DEPLOY_OWNER" test -w "$MODELS_DIR" || {
+            echo "WARNING: $DEPLOY_OWNER cannot write $MODELS_DIR (ggs models pull may fail)" >&2
+            echo "         Run: newgrp $SERVICE_GROUP  (or log out and back in)" >&2
+            failed=1
+        }
+    fi
     return "$failed"
 }
 
@@ -646,6 +665,17 @@ sudo systemctl stop gguf-switchboard 2>/dev/null || true
 
 ensure_service_account
 ensure_system_directories
+
+# Add the deploying user to the ggs group so they can write to MODELS_DIR.
+if [[ "$DEPLOY_OWNER" != "root" ]] && id "$DEPLOY_OWNER" >/dev/null 2>&1; then
+    if ! id -nG "$DEPLOY_OWNER" 2>/dev/null | tr ' ' '\n' | grep -qx "$SERVICE_GROUP"; then
+        echo "==> Adding $DEPLOY_OWNER to the $SERVICE_GROUP group..."
+        sudo usermod -aG "$SERVICE_GROUP" "$DEPLOY_OWNER"
+        echo "    NOTE: Group membership changes require logout/login."
+        echo "          Alternatively run: newgrp $SERVICE_GROUP"
+    fi
+fi
+
 maybe_migrate_legacy_etc_config
 maybe_migrate_legacy_models "$MIGRATE_MODELS"
 
