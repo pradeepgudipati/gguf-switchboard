@@ -330,7 +330,7 @@ async fn run_models_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
 fn json_sibling_path_for_output(toml_path: &str) -> String {
     if let Some(idx) = toml_path.rfind(".toml") {
-        format!("{}json{}", &toml_path[..idx], &toml_path[idx + 5..])
+        format!("{}.json{}", &toml_path[..idx], &toml_path[idx + 5..])
     } else {
         format!("{toml_path}.json")
     }
