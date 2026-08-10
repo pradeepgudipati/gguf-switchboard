@@ -15,6 +15,9 @@
 #
 set -euo pipefail
 
+# Group-writable by default so files created during deploy stay rw for ggs.
+umask 0002
+
 # ─── Fixed system paths (never derived from $HOME for runtime) ────────────────
 SERVICE_USER="ggs"
 SERVICE_GROUP="ggs"
@@ -762,14 +765,33 @@ elif [[ "${SHELL:-}" == */bash ]]; then
     SHELL_RC="${HOME}/.bashrc"
 fi
 
-if [[ -n "$SHELL_RC" ]] && ! grep -q "alias ggs='gguf-switchboard'" "$SHELL_RC" 2>/dev/null; then
-    read -r -p "Add 'ggs' alias to $SHELL_RC? [Y/n] " REPLY
-    REPLY="${REPLY:-Y}"
-    if [[ "$REPLY" =~ ^[Yy]$ ]]; then
-        echo "" >> "$SHELL_RC"
-        echo "# gguf-switchboard shortcut" >> "$SHELL_RC"
-        echo "alias ggs='gguf-switchboard'" >> "$SHELL_RC"
-        echo "==> Added alias to $SHELL_RC (run 'source $SHELL_RC' or open a new terminal)"
+if [[ -n "$SHELL_RC" ]]; then
+    _changed=false
+
+    if ! grep -q "alias ggs='gguf-switchboard'" "$SHELL_RC" 2>/dev/null; then
+        read -r -p "Add 'ggs' alias to $SHELL_RC? [Y/n] " REPLY
+        REPLY="${REPLY:-Y}"
+        if [[ "$REPLY" =~ ^[Yy]$ ]]; then
+            echo "" >> "$SHELL_RC"
+            echo "# gguf-switchboard shortcut" >> "$SHELL_RC"
+            echo "alias ggs='gguf-switchboard'" >> "$SHELL_RC"
+            _changed=true
+        fi
+    fi
+
+    if ! grep -q 'umask 0002' "$SHELL_RC" 2>/dev/null; then
+        read -r -p "Add 'umask 0002' to $SHELL_RC? (keeps group-writable new files) [Y/n] " REPLY
+        REPLY="${REPLY:-Y}"
+        if [[ "$REPLY" =~ ^[Yy]$ ]]; then
+            echo "" >> "$SHELL_RC"
+            echo "# gguf-switchboard: group-writable files for ggs collaboration" >> "$SHELL_RC"
+            echo "umask 0002" >> "$SHELL_RC"
+            _changed=true
+        fi
+    fi
+
+    if [[ "$_changed" == "true" ]]; then
+        echo "==> Updated $SHELL_RC (run 'source $SHELL_RC' or open a new terminal)"
     fi
 fi
 

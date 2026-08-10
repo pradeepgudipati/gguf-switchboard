@@ -861,7 +861,7 @@ pub fn suggest_context_size(
 
 fn json_sibling_path(toml_path: &str) -> String {
     if let Some(idx) = toml_path.rfind(".toml") {
-        format!("{}json{}", &toml_path[..idx], &toml_path[idx + 5..])
+        format!("{}.json{}", &toml_path[..idx], &toml_path[idx + 5..])
     } else {
         format!("{toml_path}.json")
     }
