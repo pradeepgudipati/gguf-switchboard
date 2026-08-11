@@ -479,12 +479,12 @@ validate_runtime_access() {
         echo "ERROR: $SERVICE_USER cannot write $STATE_DIR (usage.db)" >&2
         failed=1
     }
-    # Deploy user must be able to write new model files into MODELS_DIR.
+    # Deploy-user write access is convenient for interactive model pulls,
+    # but is not required for the system service to run.
     if [[ "$DEPLOY_OWNER" != "root" ]] && id "$DEPLOY_OWNER" >/dev/null 2>&1; then
         sudo -u "$DEPLOY_OWNER" test -w "$MODELS_DIR" || {
-            echo "WARNING: $DEPLOY_OWNER cannot write $MODELS_DIR (ggs models pull may fail)" >&2
+            echo "WARNING: $DEPLOY_OWNER cannot write $MODELS_DIR (interactive model pulls may fail)" >&2
             echo "         Run: newgrp $SERVICE_GROUP  (or log out and back in)" >&2
-            failed=1
         }
     fi
     return "$failed"
