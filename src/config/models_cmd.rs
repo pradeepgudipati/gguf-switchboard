@@ -300,6 +300,7 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let mut models_file: Option<String> = None;
     let mut connections: u16 = 8;
     let mut no_bench = false;
+    let mut fit_dry_run = false;
 
     let mut i = 1; // args[0] is "pull"
     while i < args.len() {
@@ -338,6 +339,10 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
             }
             "--no-bench" => {
                 no_bench = true;
+                i += 1;
+            }
+            "--fit-dry-run" => {
+                fit_dry_run = true;
                 i += 1;
             }
             arg if arg.starts_with('-') => {
@@ -417,14 +422,138 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         hf_download::download_file_auto(&client, &repo, selected, &dest_dir, connections).await?;
 
     // 5. Validate GGUF.
-    match validate_gguf_model(&downloaded) {
-        Ok(_) => println!("✓ GGUF metadata validated"),
+    let gguf_meta = match validate_gguf_model(&downloaded) {
+        Ok(meta) => {
+            println!("✓ GGUF metadata validated");
+            meta
+        }
         Err(reason) => {
             return Err(format!("Downloaded file is not a valid GGUF model: {reason}").into());
         }
+    };
+
+    // 6. Hardware fit preflight — compute best-fit params for this machine.
+    let default_context = 16384u32;
+    let model_path_str = downloaded.to_string_lossy().into_owned();
+    let block_count = gguf_meta.block_count.and_then(|n| u32::try_from(n).ok());
+    let max_context = gguf_meta.context_length.and_then(|n| u32::try_from(n).ok());
+
+    // These will be written into the registry entry so the first load uses them.
+    let fit_context_size: Option<u32>;
+    let fit_ngl: Option<u32>;
+    let fit_extra_args: Vec<String>;
+
+    {
+        use crate::fit::{FitConfig, FitPlanner, HardwareSummary, ModelSummary};
+
+        let hardware = HardwareSummary::probe(12); // default vram_gb fallback
+        let model = ModelSummary::from_file(
+            &model_path_str,
+            block_count,
+            gguf_meta.architecture.clone(),
+            max_context,
+            default_context,
+            false,
+            None,
+        );
+
+        println!("── Hardware Fit ──");
+        if hardware.gpus.is_empty() {
+            println!(
+                "RAM: {:.1} GiB | GPU: not detected (CPU-only)",
+                hardware.system_ram_mb as f64 / 1024.0
+            );
+        } else {
+            for g in &hardware.gpus {
+                println!(
+                    "GPU{}: {} — {:.1}/{:.1} GiB free",
+                    g.index,
+                    g.name,
+                    g.free_mb as f64 / 1024.0,
+                    g.total_mb as f64 / 1024.0,
+                );
+            }
+        }
+        println!(
+            "Model: {:.1} GiB | Blocks: {} | Max context: {}",
+            model.file_size_mb as f64 / 1024.0,
+            block_count
+                .map(|b| b.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+            max_context
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "unknown".to_string()),
+        );
+
+        let fit_config = FitConfig::default();
+        let planner = FitPlanner::new(hardware, model, fit_config);
+        let initial = planner.current_plan();
+        println!(
+            "Estimated profile: ctx={} ngl={} kv={}/{} split={:?} ts={:?}",
+            initial.context_size,
+            initial.ngl,
+            initial.cache_type_k.as_deref().unwrap_or("f16"),
+            initial.cache_type_v.as_deref().unwrap_or("f16"),
+            initial.split_mode,
+            initial.tensor_split,
+        );
+        if initial.context_size < default_context {
+            println!(
+                "⚠ Context reduced from {} to {} to fit available VRAM",
+                default_context, initial.context_size
+            );
+        }
+        if planner.total_plans() > 1 {
+            println!(
+                "Fallback ladder: {} attempts configured (run with fit.enabled=true to use)",
+                planner.total_plans()
+            );
+        }
+
+        if fit_dry_run {
+            println!();
+            println!("── Fit Dry Run ──");
+            println!("Full fallback ladder:");
+            for plan in planner.all_plans() {
+                println!("  Attempt {}: {}", plan.attempt, plan);
+            }
+        }
+
+        // Capture the best-fit params so they're written into the registry entry.
+        fit_context_size = Some(initial.context_size);
+        fit_ngl = if initial.ngl < 999 {
+            Some(initial.ngl)
+        } else {
+            None
+        };
+        let mut extra = Vec::new();
+        if let Some(ref mode) = initial.split_mode {
+            extra.push("--split-mode".to_string());
+            extra.push(mode.clone());
+        }
+        if let Some(ref ts) = initial.tensor_split {
+            extra.push("--tensor-split".to_string());
+            extra.push(
+                ts.iter()
+                    .map(|v| format!("{v:.1}"))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+        }
+        if let Some(ref ct) = initial.cache_type_k {
+            extra.push("--cache-type-k".to_string());
+            extra.push(ct.clone());
+        }
+        if let Some(ref ct) = initial.cache_type_v {
+            extra.push("--cache-type-v".to_string());
+            extra.push(ct.clone());
+        }
+        fit_extra_args = extra;
     }
 
-    // 6. Generate alias and register.
+    println!();
+
+    // 7. Generate alias and register.
     let alias = alias_from_filename(&downloaded);
     let file_ref = downloaded
         .file_name()
@@ -479,6 +608,9 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         enabled: true,
         hf_repo: Some(repo.clone()),
         min_vram_gb: Some(((selected.size as f64 / 1_000_000_000.0).ceil() as u32).max(1)),
+        context_size: fit_context_size,
+        ngl: fit_ngl,
+        extra_args: fit_extra_args,
         ..Default::default()
     };
     registry.models.push(entry);

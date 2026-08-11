@@ -4,6 +4,8 @@ pub mod config;
 pub mod context;
 pub mod db;
 pub mod errors;
+pub mod fit;
+pub mod fit_profile;
 pub mod gpu;
 pub mod kind_guard;
 pub mod load_failure;

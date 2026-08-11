@@ -93,6 +93,15 @@ pub struct RegistryEntry {
     /// Matched Hugging Face repo id (e.g. `lmstudio-community/Qwen3.5-9B-GGUF`).
     #[serde(default)]
     pub hf_repo: Option<String>,
+    /// GPU fitting strategy override: "auto" | "manual".
+    #[serde(default)]
+    pub gpu_fit: Option<String>,
+    /// Per-model split-mode override ("layer", "row", "none").
+    #[serde(default)]
+    pub split_mode: Option<String>,
+    /// Per-model KV cache type override (e.g. "q8_0", "q4_0").
+    #[serde(default)]
+    pub kv_cache_type: Option<String>,
 }
 
 impl Default for RegistryEntry {
@@ -113,6 +122,9 @@ impl Default for RegistryEntry {
             min_vram_gb: None,
             capabilities: Vec::new(),
             hf_repo: None,
+            gpu_fit: None,
+            split_mode: None,
+            kv_cache_type: None,
         }
     }
 }
@@ -423,6 +435,8 @@ pub struct GgufMetadata {
     pub architecture: Option<String>,
     pub file_type: Option<String>,
     pub block_count: Option<u64>,
+    /// Maximum context length from `{arch}.context_length` GGUF KV pair.
+    pub context_length: Option<u64>,
 }
 
 impl GgufMetadata {
@@ -611,6 +625,18 @@ fn inspect_gguf_metadata(path: &Path) -> Result<GgufMetadata, GgufSkipReason> {
             metadata.block_count = Some(
                 read_gguf_u64(&data, &mut offset, value_type).ok_or(GgufSkipReason::Unreadable)?,
             );
+        } else if key.ends_with(".context_length")
+            && matches!(
+                value_type,
+                GGUF_METADATA_UINT32
+                    | GGUF_METADATA_INT32
+                    | GGUF_METADATA_UINT64
+                    | GGUF_METADATA_INT64
+            )
+        {
+            metadata.context_length = Some(
+                read_gguf_u64(&data, &mut offset, value_type).ok_or(GgufSkipReason::Unreadable)?,
+            );
         } else {
             skip_gguf_value(&data, &mut offset, value_type).ok_or(GgufSkipReason::Unreadable)?;
         }
@@ -706,7 +732,7 @@ fn infer_kind(alias: &str, file: &str) -> String {
 fn dedupe_registry_entries(entries: &mut Vec<RegistryEntry>) {
     let mut by_file = HashMap::new();
     for entry in entries.drain(..) {
-        let key = entry.file.clone();
+        let key = file_dedupe_key(&entry.file);
         by_file
             .entry(key)
             .and_modify(|existing: &mut RegistryEntry| {
@@ -729,6 +755,19 @@ fn dedupe_registry_entries(entries: &mut Vec<RegistryEntry>) {
     let mut deduped: Vec<RegistryEntry> = by_alias.into_values().collect();
     deduped.sort_by(|a, b| a.alias.cmp(&b.alias));
     *entries = deduped;
+}
+
+/// Normalize a file reference to a dedup key.
+///
+/// Pull stores bare filenames (`model.gguf`), auto-discover stores absolute
+/// paths (`/models/model.gguf`).  We normalize to the lowercase filename so
+/// both resolve to the same key.  If the path has no filename component we
+/// fall back to the lowercased raw string.
+fn file_dedupe_key(file: &str) -> String {
+    Path::new(file)
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_else(|| file.to_ascii_lowercase())
 }
 
 fn assign_consecutive_ports(
@@ -1030,6 +1069,9 @@ impl ModelsRegistry {
                     min_vram_gb: entry.min_vram_gb,
                     capabilities: entry.capabilities,
                     hf_repo: entry.hf_repo,
+                    gpu_fit: None,
+                    split_mode: None,
+                    kv_cache_type: None,
                 })
                 .collect(),
         };
@@ -1085,6 +1127,57 @@ impl ModelsRegistry {
         std::fs::write(path, content).map_err(|e| {
             RuntimeError::ConfigError(format!("Failed to write models JSON '{path}': {e}"))
         })?;
+        Ok(())
+    }
+
+    /// Persist effective fit parameters for a model back to `models.toml`.
+    ///
+    /// Updates the matching registry entry's `context_size`, `ngl`, and
+    /// `extra_args` (for `--split-mode`, `--tensor-split`, `--cache-type-k/v`)
+    /// so the next startup uses the known-good profile immediately without
+    /// re-running the fallback ladder.
+    pub fn persist_fit_params(
+        models_file: &str,
+        alias: &str,
+        context_size: u32,
+        ngl: u32,
+        extra_args: &[String],
+    ) -> Result<(), RuntimeError> {
+        let mut registry = Self::load(models_file)?;
+        let Some(entry) = registry.models.iter_mut().find(|e| e.alias == alias) else {
+            tracing::debug!(
+                alias,
+                "persist_fit_params: alias not found in registry; skipping"
+            );
+            return Ok(());
+        };
+        entry.context_size = Some(context_size);
+        entry.ngl = Some(ngl);
+        // Merge fit-related extra_args (--split-mode, --tensor-split, --cache-type-k/v)
+        // while preserving other existing extra_args (e.g. --jinja, --chat-template).
+        let fit_flags = [
+            "--split-mode",
+            "--tensor-split",
+            "--cache-type-k",
+            "--cache-type-v",
+        ];
+        entry
+            .extra_args
+            .retain(|a| !fit_flags.contains(&a.as_str()));
+        // Append new fit args in pairs.
+        let mut i = 0;
+        while i + 1 < extra_args.len() {
+            entry.extra_args.push(extra_args[i].clone());
+            entry.extra_args.push(extra_args[i + 1].clone());
+            i += 2;
+        }
+        registry.write(models_file)?;
+        tracing::info!(
+            alias,
+            context_size,
+            ngl,
+            "Persisted fit parameters to models registry"
+        );
         Ok(())
     }
 
@@ -1180,6 +1273,9 @@ impl ModelsRegistry {
                     min_vram_gb: existing.min_vram_gb,
                     capabilities: existing.capabilities.clone(),
                     hf_repo: existing.hf_repo.clone(),
+                    gpu_fit: existing.gpu_fit.clone(),
+                    split_mode: existing.split_mode.clone(),
+                    kv_cache_type: existing.kv_cache_type.clone(),
                 });
                 continue;
             }
@@ -1408,10 +1504,25 @@ impl ModelsRegistry {
             let ngl = entry.ngl.unwrap_or(self.defaults.ngl);
             let extra = effective_extra_args(entry);
             let ngl_pinned = entry.ngl.is_some() || extra_args_pin_ngl(&extra);
-            let block_count = inspect_gguf_metadata(Path::new(&model_path))
-                .ok()
+            let gguf_meta = inspect_gguf_metadata(Path::new(&model_path)).ok();
+            let block_count = gguf_meta
+                .as_ref()
                 .and_then(|m| m.block_count)
                 .and_then(|n| u32::try_from(n).ok());
+            let max_context_from_gguf = gguf_meta
+                .as_ref()
+                .and_then(|m| m.context_length)
+                .and_then(|n| u32::try_from(n).ok());
+            let model_fingerprint = {
+                let fname = std::path::Path::new(&model_path)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| model_path.clone());
+                let size_mb = std::fs::metadata(&model_path)
+                    .map(|m| m.len() / (1024 * 1024))
+                    .unwrap_or(0);
+                format!("{fname}:{size_mb}")
+            };
 
             let mut args = vec![
                 "-m".to_string(),
@@ -1443,12 +1554,15 @@ impl ModelsRegistry {
                 priority: entry.priority,
                 kind: entry.effective_kind(),
                 description: entry.description.clone(),
-                max_context_length: entry.max_context_length,
+                max_context_length: entry.max_context_length.or(max_context_from_gguf),
                 min_vram_gb: entry.min_vram_gb,
                 capabilities: entry.capabilities.clone(),
                 hf_repo: entry.hf_repo.clone(),
                 block_count,
                 ngl_pinned,
+                model_fingerprint: Some(model_fingerprint),
+                max_context_from_gguf,
+                runtime_profile: None,
             };
             models.insert(entry.alias.clone(), config);
         }
@@ -2469,6 +2583,34 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].display_name.as_deref(), Some("First"));
         assert!(entries[0].priority);
+    }
+
+    #[test]
+    fn dedupe_normalizes_relative_and_absolute_paths() {
+        let mut entries = vec![
+            RegistryEntry {
+                alias: "kimi-dev-72b-iq4-xs".to_string(),
+                file: "kimi-dev-72b-iq4-xs.gguf".to_string(),
+                display_name: Some("From pull".to_string()),
+                enabled: true,
+                ..Default::default()
+            },
+            RegistryEntry {
+                alias: "kimi-dev-72b-iq4-xs".to_string(),
+                file: "/models/kimi-dev-72b-iq4-xs.gguf".to_string(),
+                display_name: Some("From auto-discover".to_string()),
+                enabled: true,
+                ..Default::default()
+            },
+        ];
+
+        dedupe_registry_entries(&mut entries);
+
+        assert_eq!(
+            entries.len(),
+            1,
+            "relative + absolute path to same file should be deduplicated"
+        );
     }
 
     #[test]

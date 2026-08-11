@@ -43,6 +43,9 @@ mod tests {
             hf_repo: None,
             block_count: None,
             ngl_pinned: false,
+            model_fingerprint: None,
+            max_context_from_gguf: None,
+            runtime_profile: None,
         }
     }
 

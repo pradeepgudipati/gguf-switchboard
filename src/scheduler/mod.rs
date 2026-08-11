@@ -639,6 +639,12 @@ impl SchedulerInner {
         &self,
         model_id: &str,
     ) -> Result<Arc<dyn Backend>, RuntimeError> {
+        // Use the ModelFitPlanner when enabled.
+        if self.config.fit.enabled {
+            return self.load_model_with_fit_planner(model_id).await;
+        }
+
+        // Legacy path: auto_ngl + context halving.
         self.apply_auto_ngl(model_id).await?;
 
         loop {
@@ -714,6 +720,257 @@ impl SchedulerInner {
                     return Err(e);
                 }
             }
+        }
+    }
+
+    /// Load a model using the ModelFitPlanner: hardware-aware planning + bounded fallback.
+    async fn load_model_with_fit_planner(
+        &self,
+        model_id: &str,
+    ) -> Result<Arc<dyn Backend>, RuntimeError> {
+        use crate::fit::{FitPlanner, HardwareSummary, ModelSummary};
+        use crate::fit_profile::{ProfileStore, default_profile_store_path};
+
+        let model_cfg = self
+            .models
+            .read()
+            .get(model_id)
+            .cloned()
+            .ok_or_else(|| RuntimeError::ModelNotFound(model_id.to_string()))?;
+
+        let base_args = self.effective_args(model_id).await?;
+        let model_path = crate::ngl::model_path_from_args(&base_args)
+            .unwrap_or("")
+            .to_string();
+        let requested_ctx =
+            get_context_size(&base_args).unwrap_or(self.config.fit.context_minimum());
+
+        let hardware = HardwareSummary::probe(self.config.vram_gb);
+        let model = ModelSummary::from_file(
+            &model_path,
+            model_cfg.block_count,
+            None, // architecture — not critical for fit
+            model_cfg.max_context_from_gguf,
+            requested_ctx,
+            model_cfg.ngl_pinned,
+            crate::ngl::get_ngl(&base_args),
+        );
+
+        // Check profile cache first.
+        let mut profile_store = if self.config.fit.cache_profiles {
+            Some(ProfileStore::load(&default_profile_store_path()))
+        } else {
+            None
+        };
+
+        if let Some(store) = &profile_store
+            && let Some(cached) =
+                store.get(&hardware.hardware_fingerprint, &model.model_fingerprint)
+        {
+            info!(
+                model = %model_id,
+                ctx = cached.plan.context_size,
+                ngl = cached.plan.ngl,
+                "Using cached known-good profile"
+            );
+            let fit_args = FitPlanner::apply_plan_to_args(&base_args, &cached.plan);
+            self.backends.write().await.remove(model_id);
+            self.runtime_args
+                .write()
+                .await
+                .insert(model_id.to_string(), fit_args);
+
+            let backend = self.get_or_create_backend(model_id).await?;
+            let start = Instant::now();
+            match backend.load().await {
+                Ok(()) => match self.wait_until_healthy(model_id, &backend).await {
+                    Ok(()) => {
+                        let elapsed = start.elapsed();
+                        MODEL_LOAD_LATENCY.observe(elapsed.as_secs_f64());
+                        LOADED_MODEL.set(1);
+                        BACKEND_HEALTH.set(1);
+                        self.store_runtime_profile(model_id, &cached.plan, "cached")
+                            .await;
+                        info!(
+                            model = %model_id,
+                            elapsed_ms = elapsed.as_millis(),
+                            "Model loaded from cached profile"
+                        );
+                        return Ok(backend);
+                    }
+                    Err(e) => {
+                        warn!(
+                            model = %model_id,
+                            error = %e,
+                            "Cached profile failed health check; falling back to planner"
+                        );
+                        let _ = backend.unload().await;
+                        self.backends.write().await.remove(model_id);
+                    }
+                },
+                Err(e) => {
+                    warn!(
+                        model = %model_id,
+                        error = %e,
+                        "Cached profile failed to load; falling back to planner"
+                    );
+                    let _ = backend.unload().await;
+                    self.backends.write().await.remove(model_id);
+                }
+            }
+        }
+
+        // Build and run the fit planner.
+        let fit_config = crate::fit::FitConfig {
+            enabled: true,
+            vram_reserve_mb: self.config.fit.vram_reserve_mb,
+            multi_gpu: self.config.fit.multi_gpu.clone(),
+            split_mode: self.config.fit.split_mode.clone(),
+            max_attempts: self.config.fit.max_attempts,
+            cache_profiles: self.config.fit.cache_profiles,
+        };
+        let mut planner = FitPlanner::new(hardware, model, fit_config);
+
+        loop {
+            let plan = planner.current_plan();
+            let attempt = plan.attempt;
+            info!(
+                model = %model_id,
+                attempt,
+                plan = %plan,
+                "FitPlanner: attempting load"
+            );
+
+            let fit_args = FitPlanner::apply_plan_to_args(&base_args, plan);
+            self.backends.write().await.remove(model_id);
+            self.runtime_args
+                .write()
+                .await
+                .insert(model_id.to_string(), fit_args);
+
+            let backend = self.get_or_create_backend(model_id).await?;
+            let start = Instant::now();
+
+            if let Err(e) = backend.load().await {
+                let stderr = backend.take_startup_stderr().await;
+                let message = e.to_string();
+                let kind = crate::load_failure::classify_load_failure(&message, &stderr);
+                warn!(
+                    model = %model_id,
+                    attempt,
+                    error = %message,
+                    failure_kind = ?kind,
+                    "FitPlanner: load failed"
+                );
+                let _ = backend.unload().await;
+
+                if kind.is_oom()
+                    && let Some(next) = planner.advance(&message)
+                {
+                    warn!(
+                        model = %model_id,
+                        next_attempt = next.attempt,
+                        next_plan = %next,
+                        "FitPlanner: retrying with fallback"
+                    );
+                    continue;
+                }
+
+                // Non-OOM or planner exhausted.
+                self.backends.write().await.remove(model_id);
+                return Err(RuntimeError::ModelLoadingFailed(format!(
+                    "Failed to start model '{model_id}' after {attempt} attempt(s): {message}"
+                )));
+            }
+
+            match self.wait_until_healthy(model_id, &backend).await {
+                Ok(()) => {
+                    let elapsed = start.elapsed();
+                    MODEL_LOAD_LATENCY.observe(elapsed.as_secs_f64());
+                    LOADED_MODEL.set(1);
+                    BACKEND_HEALTH.set(1);
+                    self.store_runtime_profile(model_id, plan, "auto-fit").await;
+
+                    // Cache successful profile.
+                    if let Some(store) = &mut profile_store {
+                        use crate::fit_profile::KnownGoodProfile;
+                        store.put(KnownGoodProfile {
+                            hardware_fingerprint: planner.hardware().hardware_fingerprint.clone(),
+                            model_fingerprint: planner.model().model_fingerprint.clone(),
+                            plan: plan.clone(),
+                            validated_at: chrono::Utc::now().to_rfc3339(),
+                        });
+                        let _ = store.flush();
+                    }
+
+                    // Persist effective params to models.toml so next startup uses them directly.
+                    if let Some(ref models_file) = self.config.models_file {
+                        let fit_extra = build_fit_extra_args(plan);
+                        if let Err(e) = crate::config::ModelsRegistry::persist_fit_params(
+                            models_file,
+                            model_id,
+                            plan.context_size,
+                            plan.ngl,
+                            &fit_extra,
+                        ) {
+                            warn!(model = %model_id, error = %e, "Failed to persist fit params to registry");
+                        }
+                    }
+
+                    info!(
+                        model = %model_id,
+                        attempt,
+                        plan = %plan,
+                        elapsed_ms = elapsed.as_millis(),
+                        "FitPlanner: model loaded successfully"
+                    );
+                    return Ok(backend);
+                }
+                Err(e) => {
+                    let stderr = backend.take_startup_stderr().await;
+                    let message = e.to_string();
+                    let kind = crate::load_failure::classify_load_failure(&message, &stderr);
+                    warn!(
+                        model = %model_id,
+                        attempt,
+                        error = %message,
+                        failure_kind = ?kind,
+                        "FitPlanner: health check failed"
+                    );
+
+                    if kind.is_oom()
+                        && let Some(next) = planner.advance(&message)
+                    {
+                        warn!(
+                            model = %model_id,
+                            next_attempt = next.attempt,
+                            next_plan = %next,
+                            "FitPlanner: retrying with fallback"
+                        );
+                        continue;
+                    }
+
+                    self.backends.write().await.remove(model_id);
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    /// Store the effective runtime profile on the model config.
+    async fn store_runtime_profile(
+        &self,
+        model_id: &str,
+        plan: &crate::fit::FitPlan,
+        source: &str,
+    ) {
+        use crate::config::RuntimeProfile;
+        let profile = RuntimeProfile::from_fit_plan(plan, source);
+        // We store it by mutating the model in the models map.
+        // Since ModelConfig has runtime_profile as skip_serializing, this is safe.
+        let mut models = self.models.write();
+        if let Some(cfg) = models.get_mut(model_id) {
+            cfg.runtime_profile = Some(profile);
         }
     }
 
@@ -819,4 +1076,32 @@ fn model_config_with_args(base: &ModelConfig, args: Vec<String>) -> ModelConfig 
         args,
         ..base.clone()
     }
+}
+
+/// Extract only the fit-related extra args (`--split-mode`, `--tensor-split`,
+/// `--cache-type-k`, `--cache-type-v`) from a [`FitPlan`] as flag/value pairs.
+fn build_fit_extra_args(plan: &crate::fit::FitPlan) -> Vec<String> {
+    let mut args = Vec::new();
+    if let Some(ref mode) = plan.split_mode {
+        args.push("--split-mode".to_string());
+        args.push(mode.clone());
+    }
+    if let Some(ref ts) = plan.tensor_split {
+        args.push("--tensor-split".to_string());
+        args.push(
+            ts.iter()
+                .map(|v| format!("{v:.1}"))
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
+    if let Some(ref ct) = plan.cache_type_k {
+        args.push("--cache-type-k".to_string());
+        args.push(ct.clone());
+    }
+    if let Some(ref ct) = plan.cache_type_v {
+        args.push("--cache-type-v".to_string());
+        args.push(ct.clone());
+    }
+    args
 }

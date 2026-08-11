@@ -36,6 +36,7 @@ use crate::state::AppState;
         metrics::metrics,
         models::list_models,
         models::get_model,
+        models::get_model_runtime,
         models::registry_json,
         models::refresh_models,
         chat::chat_completions,
@@ -53,6 +54,7 @@ use crate::state::AppState;
         health::StatusResponse,
         crate::types::ModelInfo,
         crate::types::ListModelsResponse,
+        crate::types::RuntimeProfileInfo,
         models::RefreshModelsResponse,
         crate::types::Usage,
         crate::types::FunctionCall,
@@ -181,6 +183,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/models/registry.json",
             axum::routing::get(models::registry_json),
+        )
+        .route(
+            "/v1/models/{model_id}/runtime",
+            axum::routing::get(models::get_model_runtime),
         )
         .route(
             "/v1/models/{model_id}",

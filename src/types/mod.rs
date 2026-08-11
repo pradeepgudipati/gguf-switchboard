@@ -52,6 +52,27 @@ pub struct ModelInfo {
     pub capabilities: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hf_repo: Option<String>,
+    /// The effective runtime profile after the last successful load.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime_profile: Option<RuntimeProfileInfo>,
+}
+
+/// Runtime profile exposed via the API.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct RuntimeProfileInfo {
+    pub effective_context: u32,
+    pub gpu_layers: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub split_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tensor_split: Option<Vec<f64>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_type_k: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_type_v: Option<String>,
+    pub reason: String,
+    /// How this profile was determined: "auto-fit", "cached", "manual".
+    pub profile_source: String,
 }
 
 impl ModelInfo {
@@ -69,11 +90,25 @@ impl ModelInfo {
             min_vram_gb: None,
             capabilities: Vec::new(),
             hf_repo: None,
+            runtime_profile: None,
         }
     }
 
     pub fn from_config(id: impl Into<String>, config: &ModelConfig) -> Self {
         let context_size = crate::context::get_context_size(&config.args);
+        let runtime_profile = config
+            .runtime_profile
+            .as_ref()
+            .map(|rp| RuntimeProfileInfo {
+                effective_context: rp.context_size,
+                gpu_layers: rp.ngl,
+                split_mode: rp.split_mode.clone(),
+                tensor_split: rp.tensor_split.clone(),
+                cache_type_k: rp.cache_type_k.clone(),
+                cache_type_v: rp.cache_type_v.clone(),
+                reason: rp.reason.clone(),
+                profile_source: rp.profile_source.clone(),
+            });
         Self {
             id: id.into(),
             object: "model".to_string(),
@@ -87,6 +122,7 @@ impl ModelInfo {
             min_vram_gb: config.min_vram_gb,
             capabilities: config.capabilities.clone(),
             hf_repo: config.hf_repo.clone(),
+            runtime_profile,
         }
     }
 }

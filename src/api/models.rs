@@ -10,7 +10,7 @@ use utoipa::ToSchema;
 
 use crate::errors::RuntimeError;
 use crate::state::AppState;
-use crate::types::{ListModelsResponse, ModelInfo};
+use crate::types::{ListModelsResponse, ModelInfo, RuntimeProfileInfo};
 
 /// List all configured models.
 #[utoipa::path(
@@ -61,6 +61,47 @@ pub async fn get_model(
         return Err(RuntimeError::ModelNotFound(model_id));
     };
     Ok(Json(ModelInfo::from_config(model_id, &cfg)))
+}
+
+/// Retrieve the runtime profile for a model.
+///
+/// Returns the effective load parameters (context, ngl, split, KV cache) that
+/// were used to successfully start the model, along with the reason for any
+/// degradation from the requested parameters.
+#[utoipa::path(
+    get,
+    path = "/v1/models/{model_id}/runtime",
+    tag = "models",
+    params(
+        ("model_id" = String, Path, description = "The model ID", example = "gemma-4-e4b")
+    ),
+    responses(
+        (status = 200, description = "Runtime profile", body = RuntimeProfileInfo),
+        (status = 404, description = "Model not found")
+    )
+)]
+pub async fn get_model_runtime(
+    State(state): State<Arc<AppState>>,
+    Path(model_id): Path<String>,
+) -> Result<Json<RuntimeProfileInfo>, RuntimeError> {
+    let Some(cfg) = state.scheduler.model_config(&model_id) else {
+        return Err(RuntimeError::ModelNotFound(model_id));
+    };
+    let Some(rp) = cfg.runtime_profile else {
+        return Err(RuntimeError::ModelNotFound(format!(
+            "{model_id} has no runtime profile (model has not been loaded yet)"
+        )));
+    };
+    Ok(Json(RuntimeProfileInfo {
+        effective_context: rp.context_size,
+        gpu_layers: rp.ngl,
+        split_mode: rp.split_mode,
+        tensor_split: rp.tensor_split,
+        cache_type_k: rp.cache_type_k,
+        cache_type_v: rp.cache_type_v,
+        reason: rp.reason,
+        profile_source: rp.profile_source,
+    }))
 }
 
 /// Download the portable model registry as JSON (shared across local AI tools).

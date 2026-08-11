@@ -36,6 +36,23 @@ pub fn next_lower_context(current: u32, min: u32) -> Option<u32> {
     Some(next)
 }
 
+/// Compute the context size for a given attempt using configured step ratios.
+///
+/// `steps` are descending ratios (e.g. `[1.0, 0.75, 0.5, 0.25]`).  The
+/// `attempt` is zero-indexed.  The result is clamped to `minimum`.
+///
+/// Returns `None` when `attempt` exceeds the available steps.
+pub fn context_for_attempt(
+    requested: u32,
+    minimum: u32,
+    steps: &[f64],
+    attempt: usize,
+) -> Option<u32> {
+    let ratio = steps.get(attempt)?;
+    let ctx = (requested as f64 * ratio).floor() as u32;
+    Some(ctx.max(minimum.max(512)))
+}
+
 fn context_value_index(args: &[String]) -> Option<(usize, usize)> {
     for (idx, arg) in args.iter().enumerate() {
         if CONTEXT_FLAGS.contains(&arg.as_str()) {
@@ -80,5 +97,32 @@ mod tests {
         assert_eq!(next_lower_context(32768, 8192), Some(16384));
         assert_eq!(next_lower_context(16384, 8192), Some(8192));
         assert_eq!(next_lower_context(8192, 8192), None);
+    }
+
+    #[test]
+    fn context_for_attempt_stepped() {
+        let steps = [1.0, 0.75, 0.5, 0.25];
+        assert_eq!(context_for_attempt(32768, 4096, &steps, 0), Some(32768));
+        assert_eq!(context_for_attempt(32768, 4096, &steps, 1), Some(24576));
+        assert_eq!(context_for_attempt(32768, 4096, &steps, 2), Some(16384));
+        assert_eq!(context_for_attempt(32768, 4096, &steps, 3), Some(8192));
+        assert_eq!(context_for_attempt(32768, 4096, &steps, 4), None);
+    }
+
+    #[test]
+    fn context_for_attempt_clamped_to_minimum() {
+        let steps = [1.0, 0.25];
+        // 0.25 * 4096 = 1024, but minimum is 4096
+        assert_eq!(context_for_attempt(4096, 4096, &steps, 1), Some(4096));
+    }
+
+    #[test]
+    fn context_for_attempt_minimum_floor() {
+        let steps = [1.0, 0.1];
+        // 0.1 * 8192 = 819, which is above both minimum=256 and absolute floor=512
+        assert_eq!(context_for_attempt(8192, 256, &steps, 1), Some(819));
+        // But with a very small ratio: 0.01 * 8192 = 81, clamped to max(256, 512) = 512
+        let tiny_steps = [1.0, 0.01];
+        assert_eq!(context_for_attempt(8192, 256, &tiny_steps, 1), Some(512));
     }
 }

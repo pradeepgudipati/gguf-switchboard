@@ -33,6 +33,24 @@ models_rescan_interval_secs = 86400
 # Path to token usage SQLite database (defaults to token_usage.db)
 database_path = "/var/lib/gguf-switchboard/usage.db"
 
+# ─── ModelFitPlanner ─────────────────────────────────────────────────────────
+# When enabled, the planner inspects GPU topology / free VRAM, model metadata,
+# and requested context before every load, then produces a safe launch profile.
+# On OOM it advances through a bounded fallback ladder instead of blindly retrying.
+[fit]
+enabled = false
+# Safety headroom subtracted from free VRAM when planning (MB).
+vram_reserve_mb = 2048
+# Multi-GPU strategy: "auto" detects GPUs and computes tensor-split from free VRAM.
+multi_gpu = "auto"
+# Split mode for multi-GPU: "layer" (recommended), "row", or "none".
+split_mode = "layer"
+# Maximum load attempts before giving up (default 5).
+max_attempts = 5
+# Persist successful profiles to /var/lib/gguf-switchboard/model-profiles.json
+# so subsequent loads skip the fallback ladder entirely.
+cache_profiles = true
+
 # ─── Models ───────────────────────────────────────────────────────────────────
 # Models are defined in models.toml using short aliases.
 # deploy.sh writes an absolute path so the unit does not depend on cwd.

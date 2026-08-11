@@ -13,6 +13,7 @@ pub use models_cmd::{cmd_files, cmd_pull, cmd_search};
 pub use models_registry::{ModelsRegistry, RescanResult};
 
 use crate::errors::RuntimeError;
+use crate::fit::{FitConfig, FitPlan};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {
@@ -67,6 +68,9 @@ pub struct Config {
     /// Seconds between automatic model-directory rescans (default 86400 = 1 day). `0` disables.
     #[serde(default = "default_models_rescan_interval_secs")]
     pub models_rescan_interval_secs: u64,
+    /// ModelFitPlanner configuration for hardware-aware load planning.
+    #[serde(default)]
+    pub fit: FitConfig,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -105,6 +109,43 @@ pub struct ModelConfig {
     /// When true, auto_ngl must not rewrite `-ngl` (pinned via `models.ngl` or `extra_args`).
     #[serde(default, skip_serializing)]
     pub ngl_pinned: bool,
+    /// Fingerprint for profile cache keying (`{filename}:{file_size_mb}`).
+    #[serde(default, skip_serializing)]
+    pub model_fingerprint: Option<String>,
+    /// Maximum context length from GGUF metadata (distinct from serving context_size).
+    #[serde(default, skip_serializing)]
+    pub max_context_from_gguf: Option<u32>,
+    /// The active runtime profile after a successful load.
+    #[serde(default, skip_serializing)]
+    pub runtime_profile: Option<RuntimeProfile>,
+}
+
+/// The effective load profile that was used to successfully start a model.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct RuntimeProfile {
+    pub context_size: u32,
+    pub ngl: u32,
+    pub split_mode: Option<String>,
+    pub tensor_split: Option<Vec<f64>>,
+    pub cache_type_k: Option<String>,
+    pub cache_type_v: Option<String>,
+    pub reason: String,
+    pub profile_source: String,
+}
+
+impl RuntimeProfile {
+    pub fn from_fit_plan(plan: &FitPlan, source: &str) -> Self {
+        Self {
+            context_size: plan.context_size,
+            ngl: plan.ngl,
+            split_mode: plan.split_mode.clone(),
+            tensor_split: plan.tensor_split.clone(),
+            cache_type_k: plan.cache_type_k.clone(),
+            cache_type_v: plan.cache_type_v.clone(),
+            reason: plan.reason.clone(),
+            profile_source: source.to_string(),
+        }
+    }
 }
 
 fn default_model_kind() -> String {

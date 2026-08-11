@@ -48,6 +48,77 @@ fn ngl_value_index(args: &[String]) -> Option<(usize, usize)> {
     None
 }
 
+// ── Split mode helpers ───────────────────────────────────────────────────────
+
+const SPLIT_MODE_FLAG: &str = "--split-mode";
+
+pub fn get_split_mode(args: &[String]) -> Option<&str> {
+    flag_value(args, SPLIT_MODE_FLAG)
+}
+
+pub fn with_split_mode(args: &[String], mode: &str) -> Vec<String> {
+    set_flag_value(args, SPLIT_MODE_FLAG, mode)
+}
+
+// ── Tensor split helpers ─────────────────────────────────────────────────────
+
+const TENSOR_SPLIT_FLAG: &str = "--tensor-split";
+
+pub fn get_tensor_split(args: &[String]) -> Option<&str> {
+    flag_value(args, TENSOR_SPLIT_FLAG)
+}
+
+pub fn with_tensor_split(args: &[String], split: &str) -> Vec<String> {
+    set_flag_value(args, TENSOR_SPLIT_FLAG, split)
+}
+
+// ── KV cache type helpers ────────────────────────────────────────────────────
+
+const CACHE_TYPE_K_FLAG: &str = "--cache-type-k";
+const CACHE_TYPE_V_FLAG: &str = "--cache-type-v";
+
+pub fn get_cache_type_k(args: &[String]) -> Option<&str> {
+    flag_value(args, CACHE_TYPE_K_FLAG)
+}
+
+pub fn with_cache_type_k(args: &[String], t: &str) -> Vec<String> {
+    set_flag_value(args, CACHE_TYPE_K_FLAG, t)
+}
+
+pub fn get_cache_type_v(args: &[String]) -> Option<&str> {
+    flag_value(args, CACHE_TYPE_V_FLAG)
+}
+
+pub fn with_cache_type_v(args: &[String], t: &str) -> Vec<String> {
+    set_flag_value(args, CACHE_TYPE_V_FLAG, t)
+}
+
+// ── Generic flag helpers ─────────────────────────────────────────────────────
+
+/// Read the value of `--flag` from args.
+fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    for i in 0..args.len() {
+        if args[i] == flag && i + 1 < args.len() {
+            return Some(&args[i + 1]);
+        }
+    }
+    None
+}
+
+/// Return a copy of `args` with `--flag value` set (replaced or appended).
+fn set_flag_value(args: &[String], flag: &str, value: &str) -> Vec<String> {
+    let mut updated = args.to_vec();
+    for i in 0..updated.len() {
+        if updated[i] == flag && i + 1 < updated.len() {
+            updated[i + 1] = value.to_string();
+            return updated;
+        }
+    }
+    updated.push(flag.to_string());
+    updated.push(value.to_string());
+    updated
+}
+
 /// Inputs for the auto_ngl heuristic.
 #[derive(Debug, Clone, Copy)]
 pub struct AutoNglInput {
@@ -194,5 +265,49 @@ mod tests {
             }),
             0
         );
+    }
+
+    #[test]
+    fn split_mode_get_and_set() {
+        let args = vec![
+            "-m".to_string(),
+            "model.gguf".to_string(),
+            "--split-mode".to_string(),
+            "row".to_string(),
+        ];
+        assert_eq!(get_split_mode(&args), Some("row"));
+        let updated = with_split_mode(&args, "layer");
+        assert_eq!(get_split_mode(&updated), Some("layer"));
+    }
+
+    #[test]
+    fn split_mode_append_when_missing() {
+        let args = vec!["-m".to_string(), "model.gguf".to_string()];
+        let updated = with_split_mode(&args, "layer");
+        assert_eq!(get_split_mode(&updated), Some("layer"));
+    }
+
+    #[test]
+    fn tensor_split_get_and_set() {
+        let args = vec!["--tensor-split".to_string(), "1,1".to_string()];
+        assert_eq!(get_tensor_split(&args), Some("1,1"));
+        let updated = with_tensor_split(&args, "2,1");
+        assert_eq!(get_tensor_split(&updated), Some("2,1"));
+    }
+
+    #[test]
+    fn cache_type_k_get_and_set() {
+        let args = vec!["--cache-type-k".to_string(), "f16".to_string()];
+        assert_eq!(get_cache_type_k(&args), Some("f16"));
+        let updated = with_cache_type_k(&args, "q8_0");
+        assert_eq!(get_cache_type_k(&updated), Some("q8_0"));
+    }
+
+    #[test]
+    fn cache_type_v_get_and_set() {
+        let args = vec!["--cache-type-v".to_string(), "f16".to_string()];
+        assert_eq!(get_cache_type_v(&args), Some("f16"));
+        let updated = with_cache_type_v(&args, "q4_0");
+        assert_eq!(get_cache_type_v(&updated), Some("q4_0"));
     }
 }
