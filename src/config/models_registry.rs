@@ -102,6 +102,14 @@ pub struct RegistryEntry {
     /// Per-model KV cache type override (e.g. "q8_0", "q4_0").
     #[serde(default)]
     pub kv_cache_type: Option<String>,
+    /// Per-model batch size override (`-b`). Controls the maximum number of tokens
+    /// processed in a single batch. Important for embedding models with large inputs.
+    #[serde(default)]
+    pub batch_size: Option<u32>,
+    /// Per-model micro-batch size override (`-ub`). Controls the physical batch size
+    /// for prompt processing. Must be <= batch_size. Critical for embedding models.
+    #[serde(default)]
+    pub ubatch_size: Option<u32>,
 }
 
 impl Default for RegistryEntry {
@@ -125,6 +133,8 @@ impl Default for RegistryEntry {
             gpu_fit: None,
             split_mode: None,
             kv_cache_type: None,
+            batch_size: None,
+            ubatch_size: None,
         }
     }
 }
@@ -1072,6 +1082,8 @@ impl ModelsRegistry {
                     gpu_fit: None,
                     split_mode: None,
                     kv_cache_type: None,
+                    batch_size: None,
+                    ubatch_size: None,
                 })
                 .collect(),
         };
@@ -1133,7 +1145,7 @@ impl ModelsRegistry {
     /// Persist effective fit parameters for a model back to `models.toml`.
     ///
     /// Updates the matching registry entry's `context_size`, `ngl`, and
-    /// `extra_args` (for `--split-mode`, `--tensor-split`, `--cache-type-k/v`)
+    /// `extra_args` (for `--split-mode`, `--tensor-split`, `--cache-type-k/v`, `-b`, `-ub`)
     /// so the next startup uses the known-good profile immediately without
     /// re-running the fallback ladder.
     pub fn persist_fit_params(
@@ -1160,6 +1172,8 @@ impl ModelsRegistry {
             "--tensor-split",
             "--cache-type-k",
             "--cache-type-v",
+            "-b",
+            "-ub",
         ];
         entry
             .extra_args
@@ -1276,6 +1290,8 @@ impl ModelsRegistry {
                     gpu_fit: existing.gpu_fit.clone(),
                     split_mode: existing.split_mode.clone(),
                     kv_cache_type: existing.kv_cache_type.clone(),
+                    batch_size: existing.batch_size,
+                    ubatch_size: existing.ubatch_size,
                 });
                 continue;
             }
@@ -1538,6 +1554,20 @@ impl ModelsRegistry {
             ];
             if entry.effective_kind() == "embedding" {
                 args.push("--embeddings".to_string());
+                // Add batch size flags for embedding models if not already configured.
+                // This prevents "input exceeds physical batch size" errors with large inputs.
+                if !crate::batch::has_batch_flags(&args) {
+                    let (batch_size, ubatch_size) =
+                        if let (Some(b), Some(ub)) = (entry.batch_size, entry.ubatch_size) {
+                            (b, ub)
+                        } else {
+                            crate::batch::embedding_batch_defaults()
+                        };
+                    args.push("-b".to_string());
+                    args.push(batch_size.to_string());
+                    args.push("-ub".to_string());
+                    args.push(ubatch_size.to_string());
+                }
             }
             args.extend(extra);
 
@@ -2270,10 +2300,42 @@ mod tests {
             "Embedding model must have --embeddings flag"
         );
 
+        // Verify batch size flags are added for embedding models
+        assert!(
+            embed_cfg.args.contains(&"-b".to_string()),
+            "Embedding model must have -b (batch size) flag"
+        );
+        assert!(
+            embed_cfg.args.contains(&"-ub".to_string()),
+            "Embedding model must have -ub (micro-batch size) flag"
+        );
+        // Verify default batch sizes are 2048
+        let b_idx = embed_cfg.args.iter().position(|a| a == "-b").unwrap();
+        assert_eq!(
+            embed_cfg.args[b_idx + 1],
+            "2048",
+            "Default batch size should be 2048"
+        );
+        let ub_idx = embed_cfg.args.iter().position(|a| a == "-ub").unwrap();
+        assert_eq!(
+            embed_cfg.args[ub_idx + 1],
+            "2048",
+            "Default ubatch size should be 2048"
+        );
+
         let chat_cfg = models.get("chat-model").unwrap();
         assert!(
             !chat_cfg.args.contains(&"--embeddings".to_string()),
             "Chat model must NOT have --embeddings flag"
+        );
+        // Chat models should NOT have batch size flags
+        assert!(
+            !chat_cfg.args.contains(&"-b".to_string()),
+            "Chat model must NOT have -b flag"
+        );
+        assert!(
+            !chat_cfg.args.contains(&"-ub".to_string()),
+            "Chat model must NOT have -ub flag"
         );
 
         std::fs::remove_dir_all(&dir).ok();

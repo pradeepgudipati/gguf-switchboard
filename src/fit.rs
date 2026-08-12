@@ -168,6 +168,9 @@ pub struct ModelSummary {
     pub model_fingerprint: String,
     pub ngl_pinned: bool,
     pub pinned_ngl: Option<u32>,
+    /// Model kind: "chat", "embedding", "coder", "vision", etc.
+    /// Used to apply kind-specific optimizations (e.g., batch sizes for embedding models).
+    pub kind: Option<String>,
 }
 
 impl ModelSummary {
@@ -200,7 +203,14 @@ impl ModelSummary {
             model_fingerprint,
             ngl_pinned,
             pinned_ngl,
+            kind: None,
         }
+    }
+
+    /// Set the model kind for kind-specific optimizations.
+    pub fn with_kind(mut self, kind: &str) -> Self {
+        self.kind = Some(kind.to_string());
+        self
     }
 }
 
@@ -217,19 +227,25 @@ pub struct FitPlan {
     pub cache_type_v: Option<String>,
     pub reason: String,
     pub attempt: u32,
+    /// Batch size for embedding models (`-b`). None for non-embedding models.
+    pub batch_size: Option<u32>,
+    /// Micro-batch size for embedding models (`-ub`). None for non-embedding models.
+    pub ubatch_size: Option<u32>,
 }
 
 impl fmt::Display for FitPlan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "ctx={} ngl={} kv={}/{} split={:?} ts={:?} [attempt {} — {}]",
+            "ctx={} ngl={} kv={}/{} split={:?} ts={:?} batch={}/{} [attempt {} — {}]",
             self.context_size,
             self.ngl,
             self.cache_type_k.as_deref().unwrap_or("f16"),
             self.cache_type_v.as_deref().unwrap_or("f16"),
             self.split_mode,
             self.tensor_split,
+            self.batch_size.unwrap_or(0),
+            self.ubatch_size.unwrap_or(0),
             self.attempt,
             self.reason,
         )
@@ -323,7 +339,7 @@ impl FitPlanner {
     /// Apply the current plan to a base set of llama-server args.
     ///
     /// This rewrites `-c`, `-ngl`, `--split-mode`, `--tensor-split`,
-    /// `--cache-type-k`, and `--cache-type-v` as needed.
+    /// `--cache-type-k`, `--cache-type-v`, `-b`, and `-ub` as needed.
     pub fn apply_plan_to_args(base_args: &[String], plan: &FitPlan) -> Vec<String> {
         let mut args = base_args.to_vec();
 
@@ -357,6 +373,16 @@ impl FitPlanner {
         // KV cache type (v)
         if let Some(ref ct) = plan.cache_type_v {
             args = with_flag(&args, "--cache-type-v", ct);
+        }
+
+        // Batch size (for embedding models)
+        if let Some(batch) = plan.batch_size {
+            args = crate::batch::with_batch_size(&args, batch);
+        }
+
+        // Micro-batch size (for embedding models)
+        if let Some(ubatch) = plan.ubatch_size {
+            args = crate::batch::with_ubatch_size(&args, ubatch);
         }
 
         args
@@ -403,6 +429,10 @@ fn build_fallback_ladder(
     // Multi-GPU tensor split
     let (default_split_mode, default_tensor_split) =
         compute_gpu_split(hardware, config, default_ngl);
+
+    // Compute batch sizes for embedding models based on hardware.
+    let (default_batch, default_ubatch, batch_steps) =
+        compute_embedding_batch_sizes(hardware, model);
 
     // Build context steps (unique, descending, clamped to minimum)
     let mut ctx_steps: Vec<u32> = config
@@ -462,8 +492,27 @@ fn build_fallback_ladder(
                     )
                 };
 
-            let reason =
-                format_reason(ctx, requested_ctx, &cache_type_k, ngl, default_ngl, attempt);
+            // Compute batch size for this attempt (embedding models only).
+            let (batch_size, ubatch_size) = if default_batch.is_some() {
+                let step_idx = plans.len().min(batch_steps.len().saturating_sub(1));
+                let batch = batch_steps.get(step_idx).copied().unwrap_or(512);
+                (Some(batch), Some(batch))
+            } else {
+                (None, None)
+            };
+
+            let batch_info = batch_size
+                .zip(default_batch)
+                .map(|(current, default)| BatchInfo { current, default });
+            let reason = format_reason(
+                ctx,
+                requested_ctx,
+                &cache_type_k,
+                ngl,
+                default_ngl,
+                attempt,
+                batch_info,
+            );
 
             plans.push(FitPlan {
                 context_size: ctx,
@@ -474,6 +523,8 @@ fn build_fallback_ladder(
                 cache_type_v,
                 reason,
                 attempt,
+                batch_size,
+                ubatch_size,
             });
         }
     }
@@ -489,10 +540,80 @@ fn build_fallback_ladder(
             cache_type_v: None,
             reason: "default (no fallbacks configured)".to_string(),
             attempt: 1,
+            batch_size: default_batch,
+            ubatch_size: default_ubatch,
         });
     }
 
     plans
+}
+
+/// Compute batch and micro-batch sizes for embedding models based on available VRAM.
+///
+/// Returns `(default_batch, default_ubatch, fallback_steps)` where:
+/// - `default_batch` / `default_ubatch` are `None` for non-embedding models
+/// - `fallback_steps` is a descending list of batch sizes to try on OOM
+///
+/// VRAM-based batch size tiers:
+/// - <4 GB VRAM:  512
+/// - 4-8 GB VRAM: 1024
+/// - 8-16 GB VRAM: 2048 (Nomic recommended)
+/// - >16 GB VRAM: 4096
+fn compute_embedding_batch_sizes(
+    hardware: &HardwareSummary,
+    model: &ModelSummary,
+) -> (Option<u32>, Option<u32>, Vec<u32>) {
+    let is_embedding = model
+        .kind
+        .as_deref()
+        .map(|k| k == "embedding")
+        .unwrap_or(false);
+
+    if !is_embedding {
+        return (None, None, Vec::new());
+    }
+
+    let usable_mb = hardware.usable_vram_mb(0); // no reserve for batch calc
+    let usable_gb = usable_mb / 1024;
+
+    // Determine base batch size from VRAM tier.
+    let base_batch = if usable_gb >= 16 {
+        4096
+    } else if usable_gb >= 8 {
+        2048
+    } else if usable_gb >= 4 {
+        1024
+    } else {
+        512
+    };
+
+    // Build fallback steps: base, 75%, 50%, 25% (clamped to 256 minimum).
+    let steps = vec![
+        base_batch,
+        (base_batch * 3) / 4,
+        base_batch / 2,
+        base_batch / 4,
+    ];
+    let steps: Vec<u32> = steps
+        .into_iter()
+        .map(|s| s.max(256))
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let mut steps = steps;
+    steps.sort_unstable();
+    steps.dedup();
+    steps.reverse();
+
+    debug!(
+        usable_vram_mb = usable_mb,
+        base_batch,
+        fallback_steps = ?steps,
+        "Computed embedding model batch sizes"
+    );
+
+    (Some(base_batch), Some(base_batch), steps)
 }
 
 fn compute_gpu_split(
@@ -531,6 +652,12 @@ fn compute_gpu_split(
     (split_mode, tensor_split)
 }
 
+/// Batch size info for format_reason (current and default, to show reductions).
+struct BatchInfo {
+    current: u32,
+    default: u32,
+}
+
 fn format_reason(
     ctx: u32,
     requested_ctx: u32,
@@ -538,6 +665,7 @@ fn format_reason(
     ngl: u32,
     default_ngl: u32,
     attempt: u32,
+    batch: Option<BatchInfo>,
 ) -> String {
     let mut parts = Vec::new();
     if ctx < requested_ctx {
@@ -553,6 +681,12 @@ fn format_reason(
     }
     if ngl < default_ngl {
         parts.push(format!("ngl {default_ngl}→{ngl}"));
+    }
+    // Show batch size reduction for embedding models.
+    if let Some(BatchInfo { current, default }) = batch
+        && current < default
+    {
+        parts.push(format!("batch {default}→{current}"));
     }
     if parts.is_empty() {
         format!("attempt {attempt}: requested parameters")
@@ -617,6 +751,7 @@ mod tests {
             model_fingerprint: "small.gguf:4000".to_string(),
             ngl_pinned: false,
             pinned_ngl: None,
+            kind: Some("chat".to_string()),
         }
     }
 
@@ -631,6 +766,22 @@ mod tests {
             model_fingerprint: "large.gguf:42000".to_string(),
             ngl_pinned: false,
             pinned_ngl: None,
+            kind: Some("chat".to_string()),
+        }
+    }
+
+    fn embedding_model() -> ModelSummary {
+        ModelSummary {
+            file_path: "/models/nomic-embed.gguf".to_string(),
+            file_size_mb: 500,
+            block_count: Some(12),
+            architecture: Some("nomic-bert".to_string()),
+            max_context_from_gguf: Some(8192),
+            requested_context: 8192,
+            model_fingerprint: "nomic-embed.gguf:500".to_string(),
+            ngl_pinned: false,
+            pinned_ngl: None,
+            kind: Some("embedding".to_string()),
         }
     }
 
@@ -754,6 +905,8 @@ mod tests {
             cache_type_v: Some("q8_0".to_string()),
             reason: "test".to_string(),
             attempt: 2,
+            batch_size: None,
+            ubatch_size: None,
         };
         let args = FitPlanner::apply_plan_to_args(&base, &plan);
         let args_str = args.join(" ");
@@ -790,5 +943,166 @@ mod tests {
         ];
         let fp = compute_hardware_fingerprint(&gpus, 49128);
         assert_eq!(fp, "2x4090-49128");
+    }
+
+    #[test]
+    fn embedding_model_gets_batch_sizes() {
+        let hw = single_gpu_hardware(); // 24564 MB VRAM
+        let model = embedding_model();
+        let config = FitConfig::default();
+        let planner = FitPlanner::new(hw, model, config);
+
+        let plan = planner.current_plan();
+        // With 24 GB VRAM, should get 4096 batch size
+        assert_eq!(plan.batch_size, Some(4096));
+        assert_eq!(plan.ubatch_size, Some(4096));
+    }
+
+    #[test]
+    fn chat_model_has_no_batch_sizes() {
+        let hw = single_gpu_hardware();
+        let model = small_model();
+        let config = FitConfig::default();
+        let planner = FitPlanner::new(hw, model, config);
+
+        let plan = planner.current_plan();
+        assert_eq!(plan.batch_size, None);
+        assert_eq!(plan.ubatch_size, None);
+    }
+
+    #[test]
+    fn embedding_batch_scales_with_vram() {
+        // Small VRAM (4 GB) -> 1024 batch
+        let hw_small = HardwareSummary {
+            gpus: vec![fake_gpu("GTX 1650", 4096, 4096)],
+            total_vram_mb: 4096,
+            free_vram_mb: 4096,
+            system_ram_mb: 16000,
+            hardware_fingerprint: "1x1650-4096".to_string(),
+        };
+        let model = embedding_model();
+        let config = FitConfig::default();
+        let planner = FitPlanner::new(hw_small, model.clone(), config.clone());
+        let plan = planner.current_plan();
+        assert_eq!(plan.batch_size, Some(1024));
+
+        // Medium VRAM (8 GB) -> 2048 batch
+        let hw_medium = HardwareSummary {
+            gpus: vec![fake_gpu("RTX 3060", 8192, 8192)],
+            total_vram_mb: 8192,
+            free_vram_mb: 8192,
+            system_ram_mb: 32000,
+            hardware_fingerprint: "1x3060-8192".to_string(),
+        };
+        let planner = FitPlanner::new(hw_medium, model.clone(), config.clone());
+        let plan = planner.current_plan();
+        assert_eq!(plan.batch_size, Some(2048));
+
+        // Large VRAM (24 GB) -> 4096 batch
+        let hw_large = single_gpu_hardware();
+        let planner = FitPlanner::new(hw_large, model, config);
+        let plan = planner.current_plan();
+        assert_eq!(plan.batch_size, Some(4096));
+    }
+
+    #[test]
+    fn embedding_batch_fallback_ladder_descends() {
+        let hw = single_gpu_hardware(); // 24 GB -> base 4096
+        let model = embedding_model();
+        let config = FitConfig {
+            max_attempts: 4,
+            ..FitConfig::default()
+        };
+        let planner = FitPlanner::new(hw, model, config);
+
+        let plans = planner.all_plans();
+        // First plan should have highest batch size
+        let first_batch = plans[0].batch_size.unwrap();
+        assert_eq!(first_batch, 4096);
+
+        // Later plans should have smaller batch sizes
+        for plan in &plans[1..] {
+            let batch = plan.batch_size.unwrap();
+            assert!(
+                batch <= first_batch,
+                "batch {} > first {}",
+                batch,
+                first_batch
+            );
+        }
+    }
+
+    #[test]
+    fn embedding_batch_minimum_is_256() {
+        // Very small VRAM (1 GB) -> 512 base, 25% = 128 clamped to 256
+        let hw_tiny = HardwareSummary {
+            gpus: vec![fake_gpu("GT 730", 1024, 800)],
+            total_vram_mb: 1024,
+            free_vram_mb: 800,
+            system_ram_mb: 8000,
+            hardware_fingerprint: "1x730-1024".to_string(),
+        };
+        let model = embedding_model();
+        let config = FitConfig::default();
+        let planner = FitPlanner::new(hw_tiny, model, config);
+
+        for plan in planner.all_plans() {
+            let batch = plan.batch_size.unwrap();
+            assert!(batch >= 256, "batch {} < 256 minimum", batch);
+        }
+    }
+
+    #[test]
+    fn apply_plan_writes_batch_flags() {
+        let base = vec![
+            "-m".to_string(),
+            "model.gguf".to_string(),
+            "-c".to_string(),
+            "8192".to_string(),
+            "-ngl".to_string(),
+            "999".to_string(),
+        ];
+        let plan = FitPlan {
+            context_size: 8192,
+            ngl: 999,
+            split_mode: None,
+            tensor_split: None,
+            cache_type_k: None,
+            cache_type_v: None,
+            reason: "test".to_string(),
+            attempt: 1,
+            batch_size: Some(2048),
+            ubatch_size: Some(2048),
+        };
+        let args = FitPlanner::apply_plan_to_args(&base, &plan);
+        let args_str = args.join(" ");
+        assert!(args_str.contains("-b 2048"), "args: {args_str}");
+        assert!(args_str.contains("-ub 2048"), "args: {args_str}");
+    }
+
+    #[test]
+    fn apply_plan_omits_batch_for_chat() {
+        let base = vec![
+            "-m".to_string(),
+            "model.gguf".to_string(),
+            "-c".to_string(),
+            "32768".to_string(),
+        ];
+        let plan = FitPlan {
+            context_size: 32768,
+            ngl: 999,
+            split_mode: None,
+            tensor_split: None,
+            cache_type_k: None,
+            cache_type_v: None,
+            reason: "test".to_string(),
+            attempt: 1,
+            batch_size: None,
+            ubatch_size: None,
+        };
+        let args = FitPlanner::apply_plan_to_args(&base, &plan);
+        let args_str = args.join(" ");
+        assert!(!args_str.contains("-b "), "args: {args_str}");
+        assert!(!args_str.contains("-ub "), "args: {args_str}");
     }
 }

@@ -113,6 +113,8 @@ mod tests {
             cache_type_v: Some("q8_0".to_string()),
             reason: "test".to_string(),
             attempt: 2,
+            batch_size: None,
+            ubatch_size: None,
         }
     }
 

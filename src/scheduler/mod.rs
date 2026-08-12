@@ -754,7 +754,8 @@ impl SchedulerInner {
             requested_ctx,
             model_cfg.ngl_pinned,
             crate::ngl::get_ngl(&base_args),
-        );
+        )
+        .with_kind(&model_cfg.kind);
 
         // Check profile cache first.
         let mut profile_store = if self.config.fit.cache_profiles {
@@ -1079,7 +1080,7 @@ fn model_config_with_args(base: &ModelConfig, args: Vec<String>) -> ModelConfig 
 }
 
 /// Extract only the fit-related extra args (`--split-mode`, `--tensor-split`,
-/// `--cache-type-k`, `--cache-type-v`) from a [`FitPlan`] as flag/value pairs.
+/// `--cache-type-k`, `--cache-type-v`, `-b`, `-ub`) from a [`FitPlan`] as flag/value pairs.
 fn build_fit_extra_args(plan: &crate::fit::FitPlan) -> Vec<String> {
     let mut args = Vec::new();
     if let Some(ref mode) = plan.split_mode {
@@ -1102,6 +1103,15 @@ fn build_fit_extra_args(plan: &crate::fit::FitPlan) -> Vec<String> {
     if let Some(ref ct) = plan.cache_type_v {
         args.push("--cache-type-v".to_string());
         args.push(ct.clone());
+    }
+    // Batch sizes for embedding models
+    if let Some(batch) = plan.batch_size {
+        args.push("-b".to_string());
+        args.push(batch.to_string());
+    }
+    if let Some(ubatch) = plan.ubatch_size {
+        args.push("-ub".to_string());
+        args.push(ubatch.to_string());
     }
     args
 }

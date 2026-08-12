@@ -1,5 +1,6 @@
 pub mod api;
 pub mod backend;
+pub mod batch;
 pub mod config;
 pub mod context;
 pub mod db;

@@ -53,5 +53,9 @@ auto_discover = true
 # extra_args = ["--chat-template", "llama3"]  # Llama 3.1 plain-text chat (auto for llama-3.1)
 # extra_args = ["--jinja"]                    # use GGUF tool-calling template instead
 #
+# Embedding model batch size overrides (for large input handling):
+# batch_size = 2048          # logical batch size (-b); default for embedding models
+# ubatch_size = 2048         # physical micro-batch size (-ub); must be <= batch_size
+#
 # Enrich empty metadata fields from Hugging Face (does not overwrite explicit pins):
 #   ./gguf-switchboard sync-hf-metadata models.toml
