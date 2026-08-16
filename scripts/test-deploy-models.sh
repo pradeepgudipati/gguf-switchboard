@@ -161,6 +161,10 @@ llama_help="$(
 grep -q './scripts/update-llama-cpp.sh' <<<"$llama_help"
 grep -q '/usr/local/bin/llama-server' <<<"$llama_help"
 
+# llama.cpp bootstrap is shallow, while existing checkouts still fast-forward update.
+grep -Eq 'git clone .*--depth 1 .*--single-branch .*llama\.cpp\.git' scripts/update-llama-cpp.sh
+grep -q 'git pull --ff-only' scripts/update-llama-cpp.sh
+
 # Ordering: stop → build → install binary → enable --now
 stop_line="$(grep -n 'systemctl stop gguf-switchboard' deploy.sh | head -1 | cut -d: -f1)"
 build_line="$(grep -n '^cargo build --release$' deploy.sh | cut -d: -f1)"

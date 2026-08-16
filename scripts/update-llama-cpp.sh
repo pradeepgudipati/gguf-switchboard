@@ -51,7 +51,7 @@ nvidia-smi
 echo "==> Updating llama.cpp at ${LLAMA_DIR}"
 if [[ ! -d "${LLAMA_DIR}/.git" ]]; then
   mkdir -p "$(dirname "$LLAMA_DIR")"
-  git clone https://github.com/ggerganov/llama.cpp.git "$LLAMA_DIR"
+  git clone --depth 1 --single-branch https://github.com/ggml-org/llama.cpp.git "$LLAMA_DIR"
 fi
 cd "$LLAMA_DIR"
 if [[ "${SKIP_PULL:-0}" != "1" ]]; then
