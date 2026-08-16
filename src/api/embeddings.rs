@@ -26,19 +26,10 @@ fn estimate_tokens(text: &str) -> u32 {
 /// This is a conservative default; actual limits depend on the model's -b/-ub settings.
 const MAX_TOKENS_PER_BATCH: u32 = 2048;
 
-/// Split a large embedding input into smaller batches that fit within the server's batch size.
+/// Batch distinct embedding inputs without changing one-input/one-output cardinality.
 fn chunk_embedding_input(input: &EmbeddingInput) -> Vec<EmbeddingInput> {
     match input {
-        EmbeddingInput::Single(text) => {
-            let tokens = estimate_tokens(text);
-            if tokens <= MAX_TOKENS_PER_BATCH {
-                vec![input.clone()]
-            } else {
-                // Split large text into chunks by sentences or paragraphs
-                let chunks = split_text_into_chunks(text, MAX_TOKENS_PER_BATCH);
-                chunks.into_iter().map(EmbeddingInput::Single).collect()
-            }
-        }
+        EmbeddingInput::Single(_) => vec![input.clone()],
         EmbeddingInput::Multiple(texts) => {
             let mut batches = Vec::new();
             let mut current_batch = Vec::new();
@@ -66,56 +57,6 @@ fn chunk_embedding_input(input: &EmbeddingInput) -> Vec<EmbeddingInput> {
             }
         }
     }
-}
-
-/// Split text into chunks that fit within the token limit.
-/// Tries to split on sentence boundaries, then falls back to word boundaries.
-fn split_text_into_chunks(text: &str, max_tokens: u32) -> Vec<String> {
-    let max_chars = (max_tokens * 4) as usize; // Rough estimate: 4 chars per token
-    let mut chunks = Vec::new();
-    let mut remaining = text;
-
-    while !remaining.is_empty() {
-        if remaining.len() <= max_chars {
-            chunks.push(remaining.to_string());
-            break;
-        }
-
-        // Find a good split point (sentence boundary, then word boundary)
-        let split_pos = find_split_position(remaining, max_chars);
-        let (chunk, rest) = remaining.split_at(split_pos);
-        chunks.push(chunk.to_string());
-        remaining = rest.trim_start();
-    }
-
-    chunks
-}
-
-/// Find a good position to split text, preferring sentence boundaries.
-fn find_split_position(text: &str, max_chars: usize) -> usize {
-    if max_chars >= text.len() {
-        return text.len();
-    }
-
-    // Try to find sentence boundary
-    let search_range = &text[..max_chars];
-    if let Some(pos) = search_range.rfind(". ") {
-        return pos + 2;
-    }
-    if let Some(pos) = search_range.rfind(".\n") {
-        return pos + 2;
-    }
-    if let Some(pos) = search_range.rfind("\n\n") {
-        return pos + 2;
-    }
-
-    // Fall back to word boundary
-    if let Some(pos) = search_range.rfind(' ') {
-        return pos + 1;
-    }
-
-    // Last resort: split at max_chars
-    max_chars
 }
 
 /// Generate embeddings for input text.
@@ -250,17 +191,17 @@ mod tests {
     }
 
     #[test]
-    fn chunk_single_long_input() {
+    fn chunk_single_long_input_preserves_openai_cardinality() {
         // Create a text that exceeds MAX_TOKENS_PER_BATCH (2048 tokens = ~8192 chars)
         let long_text = "word ".repeat(2000); // ~10000 chars, ~2500 tokens
         let input = EmbeddingInput::Single(long_text);
         let batches = chunk_embedding_input(&input);
-        // Should be split into multiple batches
-        assert!(
-            batches.len() > 1,
-            "Expected multiple batches, got {}",
-            batches.len()
+        assert_eq!(
+            batches.len(),
+            1,
+            "one input must remain one embedding input"
         );
+        assert!(matches!(batches[0], EmbeddingInput::Single(_)));
     }
 
     #[test]
@@ -290,54 +231,5 @@ mod tests {
             "Expected multiple batches, got {}",
             batches.len()
         );
-    }
-
-    #[test]
-    fn split_text_into_chunks_sentence_boundary() {
-        let text = "First sentence. Second sentence. Third sentence.";
-        let chunks = split_text_into_chunks(text, 100); // Large enough to fit all
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0], text);
-    }
-
-    #[test]
-    fn split_text_into_chunks_long_text() {
-        let text =
-            "First sentence. Second sentence. Third sentence. Fourth sentence. Fifth sentence.";
-        let chunks = split_text_into_chunks(text, 3); // 3 tokens ≈ 12 chars, forces splitting
-        assert!(
-            chunks.len() > 1,
-            "Expected multiple chunks, got {}",
-            chunks.len()
-        );
-        // Verify all chunks are non-empty
-        for chunk in &chunks {
-            assert!(!chunk.is_empty());
-        }
-        // Verify original text can be reconstructed from chunks
-        let combined: String = chunks.join("");
-        // Allow for trimmed whitespace between chunks
-        assert!(combined.len() >= text.len() - chunks.len());
-    }
-
-    #[test]
-    fn find_split_position_sentence_boundary() {
-        let text = "Hello world. This is a test.";
-        let pos = find_split_position(text, 20);
-        assert_eq!(pos, 13); // After ". "
-    }
-
-    #[test]
-    fn find_split_position_word_boundary() {
-        let text = "Hello world this is a test";
-        let pos = find_split_position(text, 15);
-        assert_eq!(pos, 12); // After "world "
-    }
-
-    #[test]
-    fn find_split_position_max_chars() {
-        let text = "HelloWorldThisIsATest";
-        let pos = find_split_position(text, 10);
-        assert_eq!(pos, 10); // No good boundary, split at max_chars
     }
 }
