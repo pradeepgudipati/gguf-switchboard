@@ -403,6 +403,8 @@ priority = false
 | `memory_check_interval_secs` | Seconds between RAM pressure checks |
 | `context_fallback_min` | Lowest `-c` value used when auto-reducing context after an OOM-class load failure |
 | `switch_drain_timeout_secs` | Seconds to wait for in-flight requests before switching models (default `120`) |
+| `switch_strategy` | `unload_first` (default): stop the resident model before starting the next so it gets the whole GPU; previous model is re-loaded if the switch fails. `load_first`: start the next model while the previous is still resident — only sensible when VRAM can hold both, otherwise the new model OOMs into the fallback ladder and loads slowly / partly on CPU |
+| `prewarm_recent_models` | After each load, re-read the GGUF files of the N most recently used other models into the OS page cache (background, cancelled when a real load starts). Speeds up switching back when RAM ≫ combined model sizes. Default `0` (off) |
 | `priority_load_cooldown_secs` | Seconds to skip priority-model reload after a failed load (default `300`) |
 
 ### Context size (`-c`)

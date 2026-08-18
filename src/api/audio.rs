@@ -50,6 +50,8 @@ pub async fn transcriptions(
 ) -> Result<impl IntoResponse, RuntimeError> {
     REQUEST_TOTAL.inc();
     ACTIVE_REQUESTS.inc();
+    // Created immediately so early returns (`?`) below cannot leak the gauge.
+    let _guard = ActiveGuard;
 
     let model = request
         .get("model")
@@ -59,7 +61,6 @@ pub async fn transcriptions(
 
     let backend = state.scheduler.ensure_loaded(&model).await?;
     let _request_guard = state.scheduler.track_request(&model);
-    let _guard = ActiveGuard;
 
     let url = format!("{}/audio/transcriptions", backend.backend_url());
     let client = reqwest::Client::new();
@@ -116,6 +117,8 @@ pub async fn speech(
 ) -> Result<impl IntoResponse, RuntimeError> {
     REQUEST_TOTAL.inc();
     ACTIVE_REQUESTS.inc();
+    // Created immediately so early returns (`?`) below cannot leak the gauge.
+    let _guard = ActiveGuard;
 
     let model = request
         .get("model")
@@ -125,7 +128,6 @@ pub async fn speech(
 
     let backend = state.scheduler.ensure_loaded(&model).await?;
     let _request_guard = state.scheduler.track_request(&model);
-    let _guard = ActiveGuard;
 
     let url = format!("{}/audio/speech", backend.backend_url());
     let client = reqwest::Client::new();

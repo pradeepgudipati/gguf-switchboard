@@ -81,8 +81,9 @@ pub async fn embeddings(
 ) -> Result<impl IntoResponse, RuntimeError> {
     REQUEST_TOTAL.inc();
     ACTIVE_REQUESTS.inc();
+    // Created immediately so early returns (`?`) below cannot leak the gauge.
+    let _guard = ActiveGuard;
 
-    let start = std::time::Instant::now();
     let cfg = state
         .scheduler
         .model_config(&request.model)
@@ -91,7 +92,8 @@ pub async fn embeddings(
     let backend = state.scheduler.ensure_loaded(&request.model).await?;
     let model_id = request.model.clone();
     let _request_guard = state.scheduler.track_request(&model_id);
-    let _guard = ActiveGuard;
+    // Inference-only timer; model load wait is exported separately.
+    let start = std::time::Instant::now();
 
     // Split large inputs into batches to avoid exceeding the server's physical batch size.
     let batches = chunk_embedding_input(&request.input);

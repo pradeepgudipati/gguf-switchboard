@@ -23,7 +23,7 @@ Client Request
 **Scheduler** is the core component:
 1. Request arrives for model `X`
 2. If `X` is loaded → forward immediately
-3. If model `Y` is loaded → unload `Y` → load `X` → wait for health → forward
+3. If model `Y` is loaded → drain `Y` → unload `Y` (frees VRAM) → load `X` → wait for health → forward; if `X` fails, `Y` is re-loaded (`switch_strategy = "load_first"` instead loads `X` next to `Y` and needs VRAM for both)
 4. After `idle_timeout` seconds with no requests, the priority model auto-loads
 
 **Backend** (llama.cpp implementation):

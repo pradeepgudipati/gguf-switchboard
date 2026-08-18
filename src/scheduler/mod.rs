@@ -9,18 +9,46 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 use crate::backend::{Backend, create_backend};
-use crate::config::{Config, ModelConfig};
+use crate::config::{Config, ModelConfig, SwitchStrategy};
 use crate::context::{get_context_size, next_lower_context, with_context_size};
 use crate::errors::RuntimeError;
 use crate::load_failure::{LoadFailureKind, classify_load_failure};
 use crate::memory;
-use crate::metrics::{BACKEND_HEALTH, LOADED_MODEL, MEMORY_USAGE_PERCENT, MODEL_LOAD_LATENCY};
+use crate::metrics::{
+    self, BACKEND_HEALTH, LOADED_MODEL, MEMORY_USAGE_PERCENT, MODEL_UNLOADS_TOTAL,
+    REQUEST_MODEL_HIT_TOTAL, REQUEST_MODEL_WAIT_SECONDS,
+};
 use crate::ngl::{compute_auto_ngl, with_ngl};
 
 #[derive(Debug, Clone, Copy)]
 enum LoadOrigin {
     UserRequest,
     PriorityWatcher,
+}
+
+impl LoadOrigin {
+    fn label(self) -> &'static str {
+        match self {
+            LoadOrigin::UserRequest => "request",
+            LoadOrigin::PriorityWatcher => "priority",
+        }
+    }
+}
+
+/// Snapshot of the most recent switch, exposed on `/status` for quick debugging
+/// without a Prometheus scrape.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LastSwitchReport {
+    pub from: Option<String>,
+    pub to: String,
+    pub trigger: &'static str,
+    pub ok: bool,
+    pub total_ms: u64,
+    pub drain_ms: u64,
+    pub unload_previous_ms: u64,
+    pub load_ms: u64,
+    pub rollback_ms: u64,
+    pub finished_at: String,
 }
 
 struct SchedulerInner {
@@ -35,7 +63,11 @@ struct SchedulerInner {
     active_requests: Mutex<HashMap<String, u32>>,
     last_user_switch_at: RwLock<Option<Instant>>,
     last_priority_load_failed_at: RwLock<Option<Instant>>,
-    max_loaded: usize,
+    /// Number of ids kept in `recent_models` (resident model + prewarm candidates).
+    recent_history: usize,
+    /// Cancellation token for the in-flight page-cache prewarm task, if any.
+    prewarm: Mutex<Option<CancellationToken>>,
+    last_switch: RwLock<Option<LastSwitchReport>>,
 }
 
 /// Holds background watcher tasks; cancel and join on shutdown.
@@ -80,6 +112,14 @@ pub struct Scheduler {
 impl Scheduler {
     pub async fn new(config: Config) -> Result<Self, RuntimeError> {
         let models = parking_lot::RwLock::new(config.models.clone());
+        let prewarm = config.prewarm_recent_models;
+        if config.switch_strategy == SwitchStrategy::LoadFirst {
+            warn!(
+                strategy = "load_first",
+                "Next model starts while the previous one still holds the GPU; \
+                 use unload_first unless VRAM can hold two models at once"
+            );
+        }
         let inner = SchedulerInner {
             config,
             models,
@@ -92,7 +132,9 @@ impl Scheduler {
             active_requests: Mutex::new(HashMap::new()),
             last_user_switch_at: RwLock::new(None),
             last_priority_load_failed_at: RwLock::new(None),
-            max_loaded: 1,
+            recent_history: 1 + prewarm,
+            prewarm: Mutex::new(None),
+            last_switch: RwLock::new(None),
         };
         Ok(Self {
             inner: Arc::new(inner),
@@ -132,9 +174,35 @@ impl Scheduler {
             .unwrap_or(0)
     }
 
-    /// Ensure the given model is loaded and ready. Uses load-then-unload with rollback.
+    /// Ensure the given model is loaded and ready.
+    ///
+    /// Fast path: the model is resident and healthy → returned immediately.
+    /// Slow path: drain the resident model, swap according to
+    /// [`Config::switch_strategy`], and roll back to the previous model on failure.
     pub async fn ensure_loaded(&self, model_id: &str) -> Result<Arc<dyn Backend>, RuntimeError> {
-        self.load_model_id(model_id, LoadOrigin::UserRequest).await
+        // Reject unknown ids before they become Prometheus label values.
+        if !self.inner.models.read().contains_key(model_id) {
+            return Err(RuntimeError::ModelNotFound(model_id.to_string()));
+        }
+
+        if let Some(backend) = self.live_loaded_backend(model_id).await? {
+            self.touch(model_id).await;
+            REQUEST_MODEL_HIT_TOTAL
+                .with_label_values(&[model_id, "hit"])
+                .inc();
+            return Ok(backend);
+        }
+
+        REQUEST_MODEL_HIT_TOTAL
+            .with_label_values(&[model_id, "miss"])
+            .inc();
+        let waited = Instant::now();
+        let result = self.load_model_id(model_id, LoadOrigin::UserRequest).await;
+        // Includes time spent queued behind another request's in-progress load.
+        REQUEST_MODEL_WAIT_SECONDS
+            .with_label_values(&[model_id])
+            .observe(waited.elapsed().as_secs_f64());
+        result
     }
 
     async fn load_model_id(
@@ -154,60 +222,163 @@ impl Scheduler {
             return Ok(backend);
         }
 
-        // Stale "loaded" slot (process died / health lost) — clear and reload.
-        if self.inner.loaded.read().await.as_deref() == Some(model_id) {
-            warn!(
-                model = %model_id,
-                "Loaded model is no longer healthy; reloading"
-            );
-            let _ = self.unload_model_no_drain(model_id).await;
-            *self.inner.loaded.write().await = None;
-            LOADED_MODEL.set(0);
-            BACKEND_HEALTH.set(0);
-        }
-
         if !self.inner.models.read().contains_key(model_id) {
             return Err(RuntimeError::ModelNotFound(model_id.to_string()));
         }
 
-        let previous = self.inner.loaded.read().await.clone();
-        if let Some(ref prev_id) = previous
-            && prev_id != model_id
-        {
-            self.drain_model(prev_id).await?;
+        // A load is about to hit the disk; make sure a background prewarm is not
+        // competing with it for I/O bandwidth.
+        self.inner.cancel_prewarm();
+
+        let switch_started = Instant::now();
+        let mut report = LastSwitchReport {
+            from: self.inner.loaded.read().await.clone(),
+            to: model_id.to_string(),
+            trigger: origin.label(),
+            ok: false,
+            total_ms: 0,
+            drain_ms: 0,
+            unload_previous_ms: 0,
+            load_ms: 0,
+            rollback_ms: 0,
+            finished_at: String::new(),
+        };
+
+        // Stale "loaded" slot (process died / health lost) — clear and reload.
+        if self.inner.loaded.read().await.as_deref() == Some(model_id) {
+            warn!(model = %model_id, "Loaded model is no longer healthy; reloading");
+            let _ = self.unload_model_no_drain(model_id).await;
+            MODEL_UNLOADS_TOTAL
+                .with_label_values(&[model_id, "unhealthy"])
+                .inc();
+            self.clear_loaded_slot().await;
+            report.from = None;
         }
 
-        match self.inner.load_model_with_context_fallback(model_id).await {
-            Ok(backend) => {
-                if let Some(ref prev_id) = previous
-                    && prev_id != model_id
-                    && let Err(e) = self.unload_model(prev_id).await
-                {
-                    warn!(model = %prev_id, error = %e, "Failed to unload previous model after switch");
-                }
-                *self.inner.loaded.write().await = Some(model_id.to_string());
-                self.touch(model_id).await;
-                record_recent_model(&self.inner.recent_models, model_id, self.inner.max_loaded)
+        let previous = self.inner.loaded.read().await.clone();
+        let switching_from = previous
+            .as_deref()
+            .filter(|prev| *prev != model_id)
+            .map(str::to_string);
+        let from_label = switching_from.as_deref().unwrap_or("none").to_string();
+        let unload_reason = match origin {
+            LoadOrigin::UserRequest => "switch",
+            LoadOrigin::PriorityWatcher => "idle_priority",
+        };
+
+        // Phase 1: drain in-flight requests on the resident model.
+        let mut previous_unloaded = false;
+        if let Some(ref prev_id) = switching_from {
+            let t = Instant::now();
+            let drained = self.drain_model(prev_id).await;
+            report.drain_ms = millis(t.elapsed());
+            metrics::record_phase(model_id, metrics::phase::DRAIN, t.elapsed().as_secs_f64());
+            if let Err(e) = drained {
+                self.finish_switch(report, switch_started, &from_label, metrics::result::ERROR)
                     .await;
+                return Err(e);
+            }
+
+            // Phase 2 (unload_first): free the GPU before the new model starts, so
+            // auto_ngl / the fit planner see the full VRAM and llama-server does not
+            // OOM → retry → partially offload to CPU.
+            if self.inner.config.switch_strategy == SwitchStrategy::UnloadFirst {
+                let t = Instant::now();
+                if let Err(e) = self.unload_model_no_drain(prev_id).await {
+                    warn!(
+                        model = %prev_id,
+                        error = %e,
+                        "Failed to unload previous model before switch"
+                    );
+                }
+                MODEL_UNLOADS_TOTAL
+                    .with_label_values(&[prev_id.as_str(), unload_reason])
+                    .inc();
+                self.clear_loaded_slot().await;
+                previous_unloaded = true;
+                report.unload_previous_ms = millis(t.elapsed());
+                metrics::record_phase(
+                    model_id,
+                    metrics::phase::UNLOAD_PREVIOUS,
+                    t.elapsed().as_secs_f64(),
+                );
+                info!(
+                    from = %prev_id,
+                    to = %model_id,
+                    unload_ms = report.unload_previous_ms,
+                    "Previous model unloaded; starting target model"
+                );
+            }
+        }
+
+        // Phase 3: load the target (planning + one or more spawn attempts).
+        let t = Instant::now();
+        let loaded = self.inner.load_model_with_context_fallback(model_id).await;
+        report.load_ms = millis(t.elapsed());
+
+        match loaded {
+            Ok(backend) => {
+                // Phase 2 (load_first): previous model is still resident; drop it now.
+                if let Some(ref prev_id) = switching_from
+                    && !previous_unloaded
+                {
+                    let t = Instant::now();
+                    if let Err(e) = self.unload_model(prev_id).await {
+                        warn!(
+                            model = %prev_id,
+                            error = %e,
+                            "Failed to unload previous model after switch"
+                        );
+                    }
+                    MODEL_UNLOADS_TOTAL
+                        .with_label_values(&[prev_id.as_str(), unload_reason])
+                        .inc();
+                    report.unload_previous_ms = millis(t.elapsed());
+                    metrics::record_phase(
+                        model_id,
+                        metrics::phase::UNLOAD_PREVIOUS,
+                        t.elapsed().as_secs_f64(),
+                    );
+                }
+                self.mark_loaded(model_id).await;
+                self.touch(model_id).await;
+                record_recent_model(
+                    &self.inner.recent_models,
+                    model_id,
+                    self.inner.recent_history,
+                )
+                .await;
                 if matches!(origin, LoadOrigin::UserRequest) {
                     *self.inner.last_user_switch_at.write().await = Some(Instant::now());
                 }
+                report.ok = true;
+                self.finish_switch(report, switch_started, &from_label, metrics::result::OK)
+                    .await;
+                self.spawn_prewarm(model_id).await;
                 Ok(backend)
             }
             Err(e) => {
                 warn!(
                     model = %model_id,
                     error = %e,
-                    previous = ?previous,
-                    "Model switch failed; keeping previous model loaded"
+                    previous = ?switching_from,
+                    strategy = ?self.inner.config.switch_strategy,
+                    "Model switch failed"
                 );
-                if let Some(ref prev_id) = previous
-                    && self.inner.loaded.read().await.as_deref() != Some(prev_id.as_str())
+                // Rollback: with unload_first the previous model is gone and must be
+                // re-loaded; with load_first it never stopped serving.
+                if let Some(ref prev_id) = switching_from
+                    && previous_unloaded
                 {
+                    let t = Instant::now();
                     match self.inner.load_model_with_context_fallback(prev_id).await {
                         Ok(_) => {
-                            *self.inner.loaded.write().await = Some(prev_id.clone());
-                            info!(model = %prev_id, "Restored previous model after failed switch");
+                            self.mark_loaded(prev_id).await;
+                            info!(
+                                model = %prev_id,
+                                rollback_ms = t.elapsed().as_millis(),
+                                "Restored previous model after failed switch"
+                            );
                         }
                         Err(restore_err) => {
                             error!(
@@ -215,13 +386,142 @@ impl Scheduler {
                                 error = %restore_err,
                                 "Failed to restore previous model after failed switch"
                             );
-                            *self.inner.loaded.write().await = None;
+                            self.clear_loaded_slot().await;
                         }
                     }
+                    report.rollback_ms = millis(t.elapsed());
+                    metrics::record_phase(
+                        model_id,
+                        metrics::phase::ROLLBACK,
+                        t.elapsed().as_secs_f64(),
+                    );
+                } else if switching_from.is_some() {
+                    info!(previous = ?switching_from, "Previous model kept loaded (load_first)");
                 }
+                self.finish_switch(report, switch_started, &from_label, metrics::result::ERROR)
+                    .await;
                 Err(e)
             }
         }
+    }
+
+    async fn mark_loaded(&self, model_id: &str) {
+        *self.inner.loaded.write().await = Some(model_id.to_string());
+        LOADED_MODEL.set(1);
+        BACKEND_HEALTH.set(1);
+        metrics::set_loaded_model_info(Some(model_id));
+    }
+
+    async fn clear_loaded_slot(&self) {
+        *self.inner.loaded.write().await = None;
+        LOADED_MODEL.set(0);
+        BACKEND_HEALTH.set(0);
+        metrics::set_loaded_model_info(None);
+    }
+
+    async fn finish_switch(
+        &self,
+        mut report: LastSwitchReport,
+        started: Instant,
+        from_label: &str,
+        outcome: &str,
+    ) {
+        let elapsed = started.elapsed();
+        report.total_ms = millis(elapsed);
+        report.finished_at = chrono::Utc::now().to_rfc3339();
+        metrics::MODEL_SWITCH_SECONDS
+            .with_label_values(&[report.to.as_str(), outcome])
+            .observe(elapsed.as_secs_f64());
+        metrics::MODEL_SWITCHES_TOTAL
+            .with_label_values(&[from_label, report.to.as_str(), report.trigger, outcome])
+            .inc();
+        info!(
+            from = %from_label,
+            to = %report.to,
+            trigger = report.trigger,
+            result = outcome,
+            total_ms = report.total_ms,
+            drain_ms = report.drain_ms,
+            unload_previous_ms = report.unload_previous_ms,
+            load_ms = report.load_ms,
+            rollback_ms = report.rollback_ms,
+            "Model switch finished"
+        );
+        *self.inner.last_switch.write().await = Some(report);
+    }
+
+    /// Most recent switch timing breakdown (also exported to Prometheus).
+    pub async fn last_switch(&self) -> Option<LastSwitchReport> {
+        self.inner.last_switch.read().await.clone()
+    }
+
+    /// Re-read recently used (non-resident) GGUF files into the page cache in the
+    /// background so the next switch back to them is served from RAM. Opt-in via
+    /// `prewarm_recent_models`; cancelled as soon as another load starts.
+    async fn spawn_prewarm(&self, resident: &str) {
+        if self.inner.config.prewarm_recent_models == 0 {
+            return;
+        }
+        let candidates: Vec<String> = self
+            .inner
+            .recent_models
+            .read()
+            .await
+            .iter()
+            .filter(|id| id.as_str() != resident)
+            .cloned()
+            .collect();
+        let mut paths = Vec::new();
+        {
+            let models = self.inner.models.read();
+            for id in candidates {
+                if let Some(path) = models
+                    .get(&id)
+                    .and_then(|cfg| crate::ngl::model_path_from_args(&cfg.args))
+                {
+                    paths.push((id, path.to_string()));
+                }
+            }
+        }
+        if paths.is_empty() {
+            return;
+        }
+
+        self.inner.cancel_prewarm();
+        let token = CancellationToken::new();
+        *self.inner.prewarm.lock() = Some(token.clone());
+
+        tokio::task::spawn_blocking(move || {
+            use std::io::Read;
+            let mut buf = vec![0u8; 8 * 1024 * 1024];
+            for (id, path) in paths {
+                let started = Instant::now();
+                let Ok(mut file) = std::fs::File::open(&path) else {
+                    continue;
+                };
+                let mut bytes: u64 = 0;
+                loop {
+                    if token.is_cancelled() {
+                        debug!(model = %id, "Page-cache prewarm cancelled");
+                        return;
+                    }
+                    match file.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => bytes += n as u64,
+                        Err(e) => {
+                            debug!(model = %id, error = %e, "Page-cache prewarm read error");
+                            break;
+                        }
+                    }
+                }
+                info!(
+                    model = %id,
+                    mb = bytes / (1024 * 1024),
+                    elapsed_ms = started.elapsed().as_millis(),
+                    "Page-cache prewarm complete"
+                );
+            }
+        });
     }
 
     pub async fn get_backend(&self, model_id: &str) -> Result<Arc<dyn Backend>, RuntimeError> {
@@ -290,9 +590,10 @@ impl Scheduler {
         {
             info!(model = %id, "Unloading model removed by registry refresh");
             let _ = self.unload_model_no_drain(id).await;
-            *self.inner.loaded.write().await = None;
-            LOADED_MODEL.set(0);
-            BACKEND_HEALTH.set(0);
+            MODEL_UNLOADS_TOTAL
+                .with_label_values(&[id.as_str(), "registry_refresh"])
+                .inc();
+            self.clear_loaded_slot().await;
         }
 
         {
@@ -327,15 +628,21 @@ impl Scheduler {
 
     pub async fn shutdown(&self) -> Result<(), RuntimeError> {
         info!("Shutting down scheduler");
+        self.inner.cancel_prewarm();
+        let loaded = self.inner.loaded.read().await.clone();
         let backs = self.inner.backends.read().await;
         for (id, backend) in backs.iter() {
             if let Err(e) = backend.unload().await {
                 error!(model = %id, error = %e, "Error during shutdown unload");
             }
         }
-        *self.inner.loaded.write().await = None;
-        LOADED_MODEL.set(0);
-        BACKEND_HEALTH.set(0);
+        drop(backs);
+        if let Some(id) = loaded {
+            MODEL_UNLOADS_TOTAL
+                .with_label_values(&[id.as_str(), "shutdown"])
+                .inc();
+        }
+        self.clear_loaded_slot().await;
         Ok(())
     }
 
@@ -370,8 +677,14 @@ impl Scheduler {
         self.drain_model(model_id).await?;
         let backs = self.inner.backends.read().await;
         if let Some(backend) = backs.get(model_id) {
+            let started = Instant::now();
             info!(model = %model_id, "Unloading model");
             backend.unload().await?;
+            info!(
+                model = %model_id,
+                elapsed_ms = started.elapsed().as_millis(),
+                "Model unloaded"
+            );
             BACKEND_HEALTH.set(0);
             LOADED_MODEL.set(0);
         }
@@ -512,7 +825,10 @@ impl Scheduler {
                         if let Err(e) = scheduler.unload_model(model_id).await {
                             error!(model = %model_id, error = %e, "Failed to unload model under memory pressure");
                         } else {
-                            *inner.loaded.write().await = None;
+                            MODEL_UNLOADS_TOTAL
+                                .with_label_values(&[model_id.as_str(), "memory_pressure"])
+                                .inc();
+                            scheduler.clear_loaded_slot().await;
                             info!(model = %model_id, "Model unloaded due to critical memory pressure");
                         }
                     }
@@ -536,6 +852,12 @@ impl Scheduler {
 }
 
 impl SchedulerInner {
+    fn cancel_prewarm(&self) {
+        if let Some(token) = self.prewarm.lock().take() {
+            token.cancel();
+        }
+    }
+
     fn has_active_requests(&self) -> bool {
         self.active_requests.lock().values().any(|&count| count > 0)
     }
@@ -645,7 +967,13 @@ impl SchedulerInner {
         }
 
         // Legacy path: auto_ngl + context halving.
+        let plan_started = Instant::now();
         self.apply_auto_ngl(model_id).await?;
+        metrics::record_phase(
+            model_id,
+            metrics::phase::PLAN,
+            plan_started.elapsed().as_secs_f64(),
+        );
 
         loop {
             let backend = self.get_or_create_backend(model_id).await?;
@@ -666,6 +994,11 @@ impl SchedulerInner {
                     .should_reduce_context(model_id, &message, &stderr, current_ctx)
                     .await?
                 {
+                    metrics::record_load_attempt(
+                        model_id,
+                        metrics::result::OOM_RETRY,
+                        start.elapsed().as_secs_f64(),
+                    );
                     let next_ctx = get_context_size(&self.effective_args(model_id).await?);
                     warn!(
                         model = %model_id,
@@ -676,6 +1009,11 @@ impl SchedulerInner {
                     continue;
                 }
 
+                metrics::record_load_attempt(
+                    model_id,
+                    metrics::result::ERROR,
+                    start.elapsed().as_secs_f64(),
+                );
                 self.backends.write().await.remove(model_id);
                 return Err(RuntimeError::ModelLoadingFailed(format!(
                     "Failed to start model '{model_id}': {message}"
@@ -685,7 +1023,11 @@ impl SchedulerInner {
             match self.wait_until_healthy(model_id, &backend).await {
                 Ok(()) => {
                     let elapsed = start.elapsed();
-                    MODEL_LOAD_LATENCY.observe(elapsed.as_secs_f64());
+                    metrics::record_load_attempt(
+                        model_id,
+                        metrics::result::OK,
+                        elapsed.as_secs_f64(),
+                    );
                     LOADED_MODEL.set(1);
                     BACKEND_HEALTH.set(1);
                     info!(
@@ -706,6 +1048,11 @@ impl SchedulerInner {
                         .should_reduce_context(model_id, &message, &stderr, current_ctx)
                         .await?
                     {
+                        metrics::record_load_attempt(
+                            model_id,
+                            metrics::result::OOM_RETRY,
+                            start.elapsed().as_secs_f64(),
+                        );
                         let next_ctx = get_context_size(&self.effective_args(model_id).await?);
                         warn!(
                             model = %model_id,
@@ -716,6 +1063,11 @@ impl SchedulerInner {
                         continue;
                     }
 
+                    metrics::record_load_attempt(
+                        model_id,
+                        load_error_label(&e),
+                        start.elapsed().as_secs_f64(),
+                    );
                     self.backends.write().await.remove(model_id);
                     return Err(e);
                 }
@@ -745,7 +1097,15 @@ impl SchedulerInner {
         let requested_ctx =
             get_context_size(&base_args).unwrap_or(self.config.fit.context_minimum());
 
-        let hardware = HardwareSummary::probe(self.config.vram_gb);
+        // nvidia-smi + file stat + profile-store read are blocking syscalls/process
+        // spawns; keep them off the async workers and account for them as "plan" time.
+        let plan_started = Instant::now();
+        let vram_gb = self.config.vram_gb;
+        let hardware = tokio::task::spawn_blocking(move || HardwareSummary::probe(vram_gb))
+            .await
+            .map_err(|e| {
+                RuntimeError::ModelLoadingFailed(format!("Hardware probe task failed: {e}"))
+            })?;
         let model = ModelSummary::from_file(
             &model_path,
             model_cfg.block_count,
@@ -763,6 +1123,18 @@ impl SchedulerInner {
         } else {
             None
         };
+        metrics::record_phase(
+            model_id,
+            metrics::phase::PLAN,
+            plan_started.elapsed().as_secs_f64(),
+        );
+        debug!(
+            model = %model_id,
+            free_vram_mb = hardware.free_vram_mb,
+            total_vram_mb = hardware.total_vram_mb,
+            plan_ms = plan_started.elapsed().as_millis(),
+            "FitPlanner: hardware probed"
+        );
 
         if let Some(store) = &profile_store
             && let Some(cached) =
@@ -787,7 +1159,11 @@ impl SchedulerInner {
                 Ok(()) => match self.wait_until_healthy(model_id, &backend).await {
                     Ok(()) => {
                         let elapsed = start.elapsed();
-                        MODEL_LOAD_LATENCY.observe(elapsed.as_secs_f64());
+                        metrics::record_load_attempt(
+                            model_id,
+                            metrics::result::OK,
+                            elapsed.as_secs_f64(),
+                        );
                         LOADED_MODEL.set(1);
                         BACKEND_HEALTH.set(1);
                         self.store_runtime_profile(model_id, &cached.plan, "cached")
@@ -800,6 +1176,11 @@ impl SchedulerInner {
                         return Ok(backend);
                     }
                     Err(e) => {
+                        metrics::record_load_attempt(
+                            model_id,
+                            load_error_label(&e),
+                            start.elapsed().as_secs_f64(),
+                        );
                         warn!(
                             model = %model_id,
                             error = %e,
@@ -810,6 +1191,11 @@ impl SchedulerInner {
                     }
                 },
                 Err(e) => {
+                    metrics::record_load_attempt(
+                        model_id,
+                        metrics::result::ERROR,
+                        start.elapsed().as_secs_f64(),
+                    );
                     warn!(
                         model = %model_id,
                         error = %e,
@@ -868,6 +1254,11 @@ impl SchedulerInner {
                 if kind.is_oom()
                     && let Some(next) = planner.advance(&message)
                 {
+                    metrics::record_load_attempt(
+                        model_id,
+                        metrics::result::OOM_RETRY,
+                        start.elapsed().as_secs_f64(),
+                    );
                     warn!(
                         model = %model_id,
                         next_attempt = next.attempt,
@@ -878,6 +1269,11 @@ impl SchedulerInner {
                 }
 
                 // Non-OOM or planner exhausted.
+                metrics::record_load_attempt(
+                    model_id,
+                    metrics::result::ERROR,
+                    start.elapsed().as_secs_f64(),
+                );
                 self.backends.write().await.remove(model_id);
                 return Err(RuntimeError::ModelLoadingFailed(format!(
                     "Failed to start model '{model_id}' after {attempt} attempt(s): {message}"
@@ -887,7 +1283,11 @@ impl SchedulerInner {
             match self.wait_until_healthy(model_id, &backend).await {
                 Ok(()) => {
                     let elapsed = start.elapsed();
-                    MODEL_LOAD_LATENCY.observe(elapsed.as_secs_f64());
+                    metrics::record_load_attempt(
+                        model_id,
+                        metrics::result::OK,
+                        elapsed.as_secs_f64(),
+                    );
                     LOADED_MODEL.set(1);
                     BACKEND_HEALTH.set(1);
                     self.store_runtime_profile(model_id, plan, "auto-fit").await;
@@ -942,6 +1342,11 @@ impl SchedulerInner {
                     if kind.is_oom()
                         && let Some(next) = planner.advance(&message)
                     {
+                        metrics::record_load_attempt(
+                            model_id,
+                            metrics::result::OOM_RETRY,
+                            start.elapsed().as_secs_f64(),
+                        );
                         warn!(
                             model = %model_id,
                             next_attempt = next.attempt,
@@ -951,6 +1356,11 @@ impl SchedulerInner {
                         continue;
                     }
 
+                    metrics::record_load_attempt(
+                        model_id,
+                        load_error_label(&e),
+                        start.elapsed().as_secs_f64(),
+                    );
                     self.backends.write().await.remove(model_id);
                     return Err(e);
                 }
@@ -1058,6 +1468,18 @@ impl SchedulerInner {
             .await
             .insert(model_id.to_string(), reduced_args);
         Ok(Some(next))
+    }
+}
+
+fn millis(d: Duration) -> u64 {
+    u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn load_error_label(e: &RuntimeError) -> &'static str {
+    if matches!(e, RuntimeError::ModelLoadingTimeout(_)) {
+        metrics::result::TIMEOUT
+    } else {
+        metrics::result::ERROR
     }
 }
 

@@ -9,7 +9,7 @@ use tracing::instrument;
 
 use crate::errors::RuntimeError;
 use crate::kind_guard::{CHAT_KINDS, require_kind};
-use crate::metrics::{ACTIVE_REQUESTS, INFERENCE_LATENCY, REQUEST_TOTAL, STREAMING_REQUESTS};
+use crate::metrics::{ACTIVE_REQUESTS, InferenceTimer, REQUEST_TOTAL, STREAMING_REQUESTS};
 use crate::proxy::GuardedStream;
 use crate::state::AppState;
 use crate::types::anthropic::{
@@ -57,8 +57,9 @@ pub async fn messages(
 ) -> Result<impl IntoResponse, RuntimeError> {
     REQUEST_TOTAL.inc();
     ACTIVE_REQUESTS.inc();
+    // Created immediately so early returns (`?`) below cannot leak the gauge.
+    let active_guard = ActiveGuard;
 
-    let start = std::time::Instant::now();
     let model_id = request.model.clone();
     let stream = request.stream == Some(true);
 
@@ -71,6 +72,9 @@ pub async fn messages(
 
     let backend = state.scheduler.ensure_loaded(&model_id).await?;
     let request_guard = state.scheduler.track_request(&model_id);
+    // Inference timer starts once the model is resident; load/switch time is
+    // reported separately via gguf_switchboard_request_model_wait_seconds.
+    let inference_timer = InferenceTimer::start();
 
     // Convert Anthropic request → OpenAI request
     let mut openai_req = to_openai_request(&request);
@@ -78,6 +82,7 @@ pub async fn messages(
 
     if stream {
         STREAMING_REQUESTS.inc();
+        let streaming_guard = StreamingGuard;
 
         let openai_stream = backend.chat_stream(openai_req).await?;
 
@@ -116,8 +121,9 @@ pub async fn messages(
             full_stream,
             vec![
                 Box::new(request_guard),
-                Box::new(ActiveGuard),
-                Box::new(StreamingGuard),
+                Box::new(active_guard),
+                Box::new(streaming_guard),
+                Box::new(inference_timer),
             ],
         );
 
@@ -125,8 +131,6 @@ pub async fn messages(
             s.map(bytes::Bytes::from)
                 .map_err(|e| std::io::Error::other(e.to_string()))
         }));
-
-        INFERENCE_LATENCY.observe(start.elapsed().as_secs_f64());
 
         Ok(Response::builder()
             .status(StatusCode::OK)
@@ -137,8 +141,9 @@ pub async fn messages(
             .body(body)
             .unwrap())
     } else {
-        let _guard = ActiveGuard;
+        let _guard = active_guard;
         let _request_guard = request_guard;
+        let _inference_timer = inference_timer;
 
         let openai_response = backend.chat(openai_req).await?;
         let anthropic_response = to_anthropic_response(&model_id, &openai_response);
@@ -153,7 +158,6 @@ pub async fn messages(
             None,
         );
 
-        INFERENCE_LATENCY.observe(start.elapsed().as_secs_f64());
         Ok(Json(anthropic_response).into_response())
     }
 }

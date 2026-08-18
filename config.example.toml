@@ -24,6 +24,20 @@ auto_ngl = false
 # Seconds to wait for in-flight requests before switching models
 switch_drain_timeout_secs = 120
 
+# How a model switch is ordered.
+#   "unload_first" (default) — drain → stop the resident llama-server → start the new one.
+#                  The new model gets the whole GPU; if it fails, the previous model is re-loaded.
+#   "load_first"   — drain → start the new one → stop the old one. Instant rollback, but the new
+#                  model only sees the VRAM left over by the old one, so on a single GPU it OOMs,
+#                  walks the context/-ngl fallback ladder and loads slowly / partially on CPU.
+switch_strategy = "unload_first"
+
+# After each successful load, read the GGUF files of the N most recently used *other*
+# models back into the OS page cache so switching back to them streams from RAM instead
+# of disk. Only worthwhile when system RAM comfortably exceeds the combined file sizes.
+# 0 = disabled.
+prewarm_recent_models = 0
+
 # Seconds to skip priority-model reload after a failed load
 priority_load_cooldown_secs = 300
 

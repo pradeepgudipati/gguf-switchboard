@@ -303,15 +303,52 @@ In `~/.continue/config.json`:
 
 ### Prometheus Metrics
 
-| Metric | Type | Description |
-|--------|------|-------------|
-| `gguf_switchboard_requests_total` | Counter | Total HTTP requests |
-| `gguf_switchboard_inference_latency_seconds` | Histogram | End-to-end inference latency |
-| `gguf_switchboard_model_load_latency_seconds` | Histogram | Model cold-start time |
-| `gguf_switchboard_active_requests` | Gauge | Current in-flight requests |
-| `gguf_switchboard_loaded_model` | Gauge | Whether a model is loaded (0/1) |
-| `gguf_switchboard_backend_healthy` | Gauge | Backend health status (0/1) |
-| `gguf_switchboard_streaming_requests` | Gauge | Active streaming connections |
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `gguf_switchboard_requests_total` | Counter | — | Total HTTP requests |
+| `gguf_switchboard_inference_latency_seconds` | Histogram | — | Inference time once the model is resident (streams are observed when they finish). Model load/switch wait is **not** included — see below |
+| `gguf_switchboard_request_model_wait_seconds` | Histogram | `model` | Time a request waited for its model to become resident. Only observed on a miss, so `_count` = number of requests that paid a load, `_sum` = total seconds users spent waiting on loads |
+| `gguf_switchboard_request_model_hit_total` | Counter | `model`, `result=hit\|miss` | Whether the requested model was already resident |
+| `gguf_switchboard_model_switch_seconds` | Histogram | `model` (target), `result` | Whole switch: drain + unload previous + plan + every load attempt (+ rollback) |
+| `gguf_switchboard_model_switch_phase_seconds` | Histogram | `model`, `phase=drain\|unload_previous\|plan\|spawn_to_healthy\|rollback` | Where the switch time goes |
+| `gguf_switchboard_model_load_seconds` | Histogram | `model`, `result=ok\|oom_retry\|timeout\|error` | One `llama-server` spawn → `/health` attempt. `oom_retry` samples mean the fallback ladder is running |
+| `gguf_switchboard_model_load_attempts_total` | Counter | `model`, `result` | Load attempts; `rate(...{result!="ok"})` is a good alert |
+| `gguf_switchboard_model_last_load_seconds` | Gauge | `model` | Most recent successful spawn→healthy time per model |
+| `gguf_switchboard_model_load_latency_seconds` | Histogram | — | Successful spawn→healthy time across all models (kept for existing dashboards) |
+| `gguf_switchboard_model_switches_total` | Counter | `from`, `to`, `trigger=request\|priority`, `result` | Residency changes — shows ping-pong between models and how often the idle priority reload evicts a model |
+| `gguf_switchboard_model_unloads_total` | Counter | `model`, `reason=switch\|idle_priority\|memory_pressure\|unhealthy\|registry_refresh\|shutdown` | Why models were unloaded |
+| `gguf_switchboard_loaded_model` | Gauge | — | Whether a model is loaded (0/1) |
+| `gguf_switchboard_loaded_model_info` | Gauge | `model` | `1` on the series of the resident model |
+| `gguf_switchboard_active_requests` | Gauge | — | Current in-flight requests |
+| `gguf_switchboard_streaming_requests` | Gauge | — | Active streaming connections |
+| `gguf_switchboard_backend_healthy` | Gauge | — | Backend health status (0/1) |
+| `gguf_switchboard_memory_usage_percent` | Gauge | — | System RAM usage |
+
+Histogram buckets for the load/switch family go from 250 ms to 10 min; the inference family from 50 ms to 10 min.
+
+Useful queries:
+
+```promql
+# p50 cold-switch cost per target model over the last hour
+histogram_quantile(0.5, sum by (le, model) (rate(gguf_switchboard_model_switch_seconds_bucket{result="ok"}[1h])))
+
+# Which phase dominates a switch?
+sum by (phase) (rate(gguf_switchboard_model_switch_phase_seconds_sum[1h]))
+  / sum by (phase) (rate(gguf_switchboard_model_switch_phase_seconds_count[1h]))
+
+# OOM fallback ladder firing (should be ~0 with switch_strategy = "unload_first")
+increase(gguf_switchboard_model_load_attempts_total{result="oom_retry"}[1d])
+
+# Seconds users spent waiting on model loads, per model
+increase(gguf_switchboard_request_model_wait_seconds_sum[1d])
+
+# Idle priority reloads evicting the model people actually use
+increase(gguf_switchboard_model_unloads_total{reason="idle_priority"}[1d])
+```
+
+`GET /status` also returns `last_switch` — a millisecond breakdown (`drain_ms`, `unload_previous_ms`,
+`load_ms`, `rollback_ms`, `total_ms`) of the most recent switch — and every switch logs a
+`Model switch finished` line with the same fields.
 
 ### Structured Logging
 

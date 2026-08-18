@@ -9,7 +9,7 @@ use tracing::instrument;
 
 use crate::errors::RuntimeError;
 use crate::kind_guard::{CHAT_KINDS, require_kind};
-use crate::metrics::{ACTIVE_REQUESTS, INFERENCE_LATENCY, REQUEST_TOTAL, STREAMING_REQUESTS};
+use crate::metrics::{ACTIVE_REQUESTS, InferenceTimer, REQUEST_TOTAL, STREAMING_REQUESTS};
 use crate::proxy::GuardedStream;
 use crate::state::AppState;
 use crate::types::completions::{CompletionRequest, CompletionResponse};
@@ -55,8 +55,9 @@ pub async fn completions(
 ) -> Result<impl IntoResponse, RuntimeError> {
     REQUEST_TOTAL.inc();
     ACTIVE_REQUESTS.inc();
+    // Created immediately so early returns (`?`) below cannot leak the gauge.
+    let active_guard = ActiveGuard;
 
-    let start = std::time::Instant::now();
     let cfg = state
         .scheduler
         .model_config(&request.model)
@@ -65,9 +66,13 @@ pub async fn completions(
     let backend = state.scheduler.ensure_loaded(&request.model).await?;
     let model_id = request.model.clone();
     let request_guard = state.scheduler.track_request(&model_id);
+    // Inference timer starts once the model is resident; load/switch time is
+    // reported separately via gguf_switchboard_request_model_wait_seconds.
+    let inference_timer = InferenceTimer::start();
 
     if request.stream == Some(true) {
         STREAMING_REQUESTS.inc();
+        let streaming_guard = StreamingGuard;
 
         let stream = backend.completions_stream(request).await?;
 
@@ -99,8 +104,11 @@ pub async fn completions(
             full_stream,
             vec![
                 Box::new(request_guard),
-                Box::new(ActiveGuard),
-                Box::new(StreamingGuard),
+                Box::new(active_guard),
+                Box::new(streaming_guard),
+                // Observes the inference latency histogram when the stream
+                // completes (or the client disconnects), not when headers are sent.
+                Box::new(inference_timer),
             ],
         );
 
@@ -108,8 +116,6 @@ pub async fn completions(
             s.map(bytes::Bytes::from)
                 .map_err(|e| std::io::Error::other(e.to_string()))
         }));
-
-        INFERENCE_LATENCY.observe(start.elapsed().as_secs_f64());
 
         Ok(Response::builder()
             .status(StatusCode::OK)
@@ -120,8 +126,9 @@ pub async fn completions(
             .body(body)
             .unwrap())
     } else {
-        let _guard = ActiveGuard;
+        let _guard = active_guard;
         let _request_guard = request_guard;
+        let _inference_timer = inference_timer;
         let mut response = backend.completions(request).await?;
         response.model = model_id.clone();
 
@@ -135,7 +142,6 @@ pub async fn completions(
             None,
         );
 
-        INFERENCE_LATENCY.observe(start.elapsed().as_secs_f64());
         Ok(Json(response).into_response())
     }
 }

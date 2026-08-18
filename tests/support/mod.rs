@@ -184,6 +184,16 @@ impl Drop for FakeLlamaServer {
 }
 
 pub fn write_scheduler_config(fake_a: &FakeLlamaServer, fake_b: &FakeLlamaServer) -> NamedTempFile {
+    write_scheduler_config_with(fake_a, fake_b, "")
+}
+
+/// Like [`write_scheduler_config`] but appends `extra_toml` to the top-level section
+/// (e.g. `switch_strategy = "load_first"`).
+pub fn write_scheduler_config_with(
+    fake_a: &FakeLlamaServer,
+    fake_b: &FakeLlamaServer,
+    extra_toml: &str,
+) -> NamedTempFile {
     let mut file = NamedTempFile::new().expect("temp config");
     write!(
         file,
@@ -194,6 +204,7 @@ idle_timeout = 600
 default_backend = "llama.cpp"
 switch_drain_timeout_secs = 2
 priority_load_cooldown_secs = 60
+{extra_toml}
 
 [models.model-a]
 backend = "llama.cpp"
@@ -211,6 +222,7 @@ args = []
 backend_url = "{b_backend}"
 health_url = "{b_health}"
 "#,
+        extra_toml = extra_toml,
         a_backend = fake_a.backend_url,
         a_health = fake_a.health_url,
         b_backend = fake_b.backend_url,

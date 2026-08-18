@@ -1,6 +1,7 @@
+use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -136,9 +137,12 @@ impl Backend for LlamaCppBackend {
 
         info!(model = %self.model_id, command = %self.command_display(), "Starting backend process");
 
+        // stdout was previously piped but never read: once llama-server wrote >64 KiB to
+        // it the pipe filled and the server blocked mid-load. Nothing consumes stdout
+        // (startup diagnostics come from stderr), so discard it.
         let mut cmd = Command::new(&self.config.command);
         cmd.args(&self.config.args)
-            .stdout(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
 
@@ -167,7 +171,10 @@ impl Backend for LlamaCppBackend {
 
         *self.process.lock().await = Some(child);
         self.running.store(true, Ordering::SeqCst);
-        self.detect_server_version().await;
+        // Resolve `llama-server --version` off the load path: the scheduler starts
+        // polling /health as soon as load() returns, and a CUDA build's `--version`
+        // initialises the driver, which used to run serially in front of that.
+        self.detect_server_version_background();
         Ok(())
     }
 
@@ -332,32 +339,53 @@ impl Backend for LlamaCppBackend {
     }
 }
 
+/// `llama-server --version` output keyed by binary path. A backend instance is
+/// recreated on every load (fit planner / context fallback rewrite the args), so
+/// caching per instance meant re-running the binary on every model switch.
+static SERVER_VERSION_CACHE: LazyLock<StdMutex<HashMap<String, String>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
 impl LlamaCppBackend {
-    async fn detect_server_version(&self) {
-        if self.server_version.lock().await.is_some() {
+    fn detect_server_version_background(&self) {
+        if let Some(cached) = SERVER_VERSION_CACHE
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&self.config.command).cloned())
+        {
+            if let Ok(mut slot) = self.server_version.try_lock() {
+                *slot = Some(cached);
+            } else {
+                let slot = Arc::clone(&self.server_version);
+                tokio::spawn(async move {
+                    *slot.lock().await = Some(cached);
+                });
+            }
             return;
         }
 
-        let output = Command::new(&self.config.command)
-            .arg("--version")
-            .output()
-            .await;
-
-        let version = match output {
-            Ok(out) if out.status.success() => {
-                let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                if stdout.is_empty() {
-                    String::from_utf8_lossy(&out.stderr).trim().to_string()
-                } else {
-                    stdout
+        let command = self.config.command.clone();
+        let slot = Arc::clone(&self.server_version);
+        tokio::spawn(async move {
+            let output = Command::new(&command).arg("--version").output().await;
+            let version = match output {
+                Ok(out) if out.status.success() => {
+                    let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if stdout.is_empty() {
+                        String::from_utf8_lossy(&out.stderr).trim().to_string()
+                    } else {
+                        stdout
+                    }
                 }
+                _ => String::new(),
+            };
+            if version.is_empty() {
+                return;
             }
-            _ => String::new(),
-        };
-
-        if !version.is_empty() {
-            *self.server_version.lock().await = Some(version);
-        }
+            if let Ok(mut cache) = SERVER_VERSION_CACHE.lock() {
+                cache.insert(command, version.clone());
+            }
+            *slot.lock().await = Some(version);
+        });
     }
 
     fn command_display(&self) -> String {

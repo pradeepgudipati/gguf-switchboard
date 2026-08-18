@@ -71,6 +71,31 @@ pub struct Config {
     /// ModelFitPlanner configuration for hardware-aware load planning.
     #[serde(default)]
     pub fit: FitConfig,
+    /// How the scheduler swaps models. `unload_first` (default) stops the resident
+    /// `llama-server` before starting the next one so the new model gets the whole GPU.
+    /// `load_first` keeps the old model resident until the new one is healthy (instant
+    /// rollback, but needs VRAM for both models at once — otherwise the new model OOMs,
+    /// walks the context/ngl fallback ladder and ends up partially on the CPU).
+    #[serde(default)]
+    pub switch_strategy: SwitchStrategy,
+    /// Number of recently used models (in addition to the resident one) whose GGUF
+    /// files are read back into the OS page cache after every successful load, so the
+    /// next switch streams weights from RAM instead of disk. `0` (default) disables.
+    /// Only useful when system RAM comfortably exceeds the combined GGUF sizes.
+    #[serde(default)]
+    pub prewarm_recent_models: usize,
+}
+
+/// Ordering of unload/load during a model switch. See [`Config::switch_strategy`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchStrategy {
+    /// Drain → unload previous → load target. Rolls back by re-loading the previous
+    /// model if the target fails. Correct default for a single GPU.
+    #[default]
+    UnloadFirst,
+    /// Drain → load target → unload previous. Requires VRAM for both models.
+    LoadFirst,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -296,4 +321,43 @@ fn resolve_relative_to_config(config_path: &str, models_path: &str) -> String {
         .join(path)
         .to_string_lossy()
         .into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn switch_strategy_defaults_to_unload_first() {
+        let cfg: Config = toml::from_str(r#"bind = "127.0.0.1:0""#).expect("parse");
+        assert_eq!(cfg.switch_strategy, SwitchStrategy::UnloadFirst);
+        assert_eq!(cfg.prewarm_recent_models, 0);
+    }
+
+    #[test]
+    fn switch_strategy_parses_snake_case() {
+        let cfg: Config = toml::from_str(
+            r#"
+bind = "127.0.0.1:0"
+switch_strategy = "load_first"
+prewarm_recent_models = 2
+"#,
+        )
+        .expect("parse");
+        assert_eq!(cfg.switch_strategy, SwitchStrategy::LoadFirst);
+        assert_eq!(cfg.prewarm_recent_models, 2);
+    }
+
+    #[test]
+    fn switch_strategy_rejects_unknown_value() {
+        let err = toml::from_str::<Config>(
+            r#"
+bind = "127.0.0.1:0"
+switch_strategy = "yolo"
+"#,
+        )
+        .unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("yolo"), "{msg}");
+    }
 }

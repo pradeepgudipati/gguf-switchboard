@@ -14,7 +14,7 @@ use uuid::Uuid;
 
 use crate::errors::RuntimeError;
 use crate::kind_guard::{CHAT_KINDS, require_kind};
-use crate::metrics::{ACTIVE_REQUESTS, INFERENCE_LATENCY, REQUEST_TOTAL};
+use crate::metrics::{ACTIVE_REQUESTS, InferenceTimer, REQUEST_TOTAL};
 use crate::proxy::GuardedStream;
 use crate::state::AppState;
 use crate::types::chat::{
@@ -572,7 +572,6 @@ pub async fn responses(
     let Json(request) = request.map_err(|error| RuntimeError::InvalidRequest(error.body_text()))?;
     REQUEST_TOTAL.inc();
 
-    let start = std::time::Instant::now();
     let chat_request = to_chat_request(&request)?;
     ACTIVE_REQUESTS.inc();
     let active_guard = ActiveGuard;
@@ -584,6 +583,9 @@ pub async fn responses(
     let backend = state.scheduler.ensure_loaded(&request.model).await?;
     let model_id = request.model.clone();
     let request_guard = state.scheduler.track_request(&model_id);
+    // Inference timer starts once the model is resident; load/switch time is
+    // reported separately via gguf_switchboard_request_model_wait_seconds.
+    let inference_timer = InferenceTimer::start();
 
     if request.stream == Some(true) {
         let mut stream = backend.chat_stream(chat_request).await?;
@@ -662,15 +664,17 @@ pub async fn responses(
 
         let guarded = GuardedStream::new(
             ReceiverStream::new(receiver),
-            vec![Box::new(request_guard), Box::new(active_guard)],
+            vec![
+                Box::new(request_guard),
+                Box::new(active_guard),
+                Box::new(inference_timer),
+            ],
         );
 
         let body = Body::from_stream(guarded.map(|s: Result<String, _>| {
             s.map(bytes::Bytes::from)
                 .map_err(|e| std::io::Error::other(e.to_string()))
         }));
-
-        INFERENCE_LATENCY.observe(start.elapsed().as_secs_f64());
 
         Ok(Response::builder()
             .status(StatusCode::OK)
@@ -683,6 +687,7 @@ pub async fn responses(
     } else {
         let _active_guard = active_guard;
         let _request_guard = request_guard;
+        let _inference_timer = inference_timer;
         let chat_response = backend.chat(chat_request).await?;
         let response_id = format!("resp_{}", Uuid::new_v4().simple());
 
@@ -707,7 +712,6 @@ pub async fn responses(
             status: "completed".to_string(),
         };
 
-        INFERENCE_LATENCY.observe(start.elapsed().as_secs_f64());
         Ok(Json(result).into_response())
     }
 }
