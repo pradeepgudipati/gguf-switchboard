@@ -285,12 +285,21 @@ impl Scheduler {
             if self.inner.config.switch_strategy == SwitchStrategy::UnloadFirst {
                 let t = Instant::now();
                 if let Err(e) = self.unload_model_no_drain(prev_id).await {
-                    warn!(
+                    error!(
                         model = %prev_id,
                         error = %e,
-                        "Failed to unload previous model before switch"
+                        "Failed to unload previous model before switch — aborting switch"
                     );
+                    self.finish_switch(report, switch_started, &from_label, metrics::result::ERROR)
+                        .await;
+                    return Err(e);
                 }
+
+                // Verify the old backend process is actually dead before loading
+                // the new model.  A stale process still holds VRAM and the CUDA
+                // driver may not have reclaimed it yet.
+                self.wait_for_backend_drain(prev_id).await;
+
                 MODEL_UNLOADS_TOTAL
                     .with_label_values(&[prev_id.as_str(), unload_reason])
                     .inc();
@@ -549,8 +558,8 @@ impl Scheduler {
 
     /// Unload without waiting for in-flight drains (used when the process is already dead).
     async fn unload_model_no_drain(&self, model_id: &str) -> Result<(), RuntimeError> {
-        let backs = self.inner.backends.read().await;
-        if let Some(backend) = backs.get(model_id) {
+        let mut backs = self.inner.backends.write().await;
+        if let Some(backend) = backs.remove(model_id) {
             backend.unload().await?;
         }
         Ok(())
@@ -671,6 +680,45 @@ impl Scheduler {
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
+    }
+
+    /// After unloading a backend, wait for the process to fully exit and for the
+    /// CUDA driver to release VRAM.  This prevents the next model from seeing
+    /// stale "used" VRAM and OOMing.
+    async fn wait_for_backend_drain(&self, model_id: &str) {
+        let max_wait = Duration::from_secs(10);
+        let poll_interval = Duration::from_millis(200);
+        let deadline = Instant::now() + max_wait;
+
+        // Poll until the backend reports the process is dead.
+        loop {
+            let backs = self.inner.backends.read().await;
+            let alive = match backs.get(model_id) {
+                Some(backend) => backend.process_running().await,
+                None => false,
+            };
+            drop(backs);
+
+            if !alive {
+                break;
+            }
+
+            if Instant::now() >= deadline {
+                warn!(
+                    model = %model_id,
+                    "Backend process still alive after {}s drain wait; proceeding anyway",
+                    max_wait.as_secs()
+                );
+                break;
+            }
+
+            tokio::time::sleep(poll_interval).await;
+        }
+
+        // Give the CUDA driver a moment to reclaim VRAM after the process exits.
+        // On multi-GPU setups with large models this can take a noticeable amount
+        // of time; a short sleep is cheap insurance against false OOM.
+        tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
     async fn unload_model(&self, model_id: &str) -> Result<(), RuntimeError> {

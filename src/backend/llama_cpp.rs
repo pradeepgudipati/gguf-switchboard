@@ -182,25 +182,63 @@ impl Backend for LlamaCppBackend {
         info!(model = %self.model_id, "Stopping backend process");
         let mut guard = self.process.lock().await;
         if let Some(mut child) = guard.take() {
+            let pid = child.id();
+            info!(model = %self.model_id, ?pid, "Sending SIGTERM to backend");
+
             // Send SIGTERM on unix, then wait briefly for graceful exit
             #[cfg(unix)]
             {
-                if let Some(id) = child.id() {
+                if let Some(id) = pid {
                     use nix::sys::signal::{self, Signal};
                     use nix::unistd::Pid;
-                    let _ = signal::kill(Pid::from_raw(id as i32), Signal::SIGTERM);
+                    if let Err(e) = signal::kill(Pid::from_raw(id as i32), Signal::SIGTERM) {
+                        warn!(model = %self.model_id, pid = id, error = %e, "SIGTERM failed");
+                    }
                 }
             }
             match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
                 Ok(Ok(status)) => {
-                    info!(model = %self.model_id, %status, "Backend exited");
+                    info!(model = %self.model_id, %status, "Backend exited after SIGTERM");
                 }
                 Ok(Err(e)) => {
-                    warn!(model = %self.model_id, error = %e, "Error waiting for backend");
+                    warn!(model = %self.model_id, error = %e, "Error waiting for backend after SIGTERM, sending SIGKILL");
+                    let _ = child.kill().await;
                 }
                 Err(_) => {
-                    warn!(model = %self.model_id, "Backend did not exit in time, killing");
-                    let _ = child.kill().await;
+                    warn!(model = %self.model_id, "Backend did not exit within 5s, sending SIGKILL");
+                    match child.kill().await {
+                        Ok(()) => {
+                            info!(model = %self.model_id, "SIGKILL sent, waiting for process to exit");
+                            // Wait a bit more after SIGKILL to ensure the process is
+                            // fully dead and the CUDA driver releases VRAM.
+                            match tokio::time::timeout(Duration::from_secs(5), child.wait()).await {
+                                Ok(Ok(status)) => {
+                                    info!(model = %self.model_id, %status, "Backend exited after SIGKILL");
+                                }
+                                Ok(Err(e)) => {
+                                    warn!(model = %self.model_id, error = %e, "Error waiting for backend after SIGKILL");
+                                }
+                                Err(_) => {
+                                    // Even SIGKILL didn't work — the process is likely a
+                                    // zombie or stuck in an uninterruptible state.  Report
+                                    // the failure so the scheduler can decide whether to
+                                    // proceed.
+                                    self.running.store(false, Ordering::SeqCst);
+                                    return Err(RuntimeError::BackendError(format!(
+                                        "Backend process (pid {:?}) did not exit after SIGTERM and SIGKILL; \
+                                         VRAM may still be in use",
+                                        pid
+                                    )));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            self.running.store(false, Ordering::SeqCst);
+                            return Err(RuntimeError::BackendError(format!(
+                                "Failed to send SIGKILL to backend process: {e}"
+                            )));
+                        }
+                    }
                 }
             }
         }
