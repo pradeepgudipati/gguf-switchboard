@@ -55,6 +55,11 @@ pub struct ModelInfo {
     /// The effective runtime profile after the last successful load.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_profile: Option<RuntimeProfileInfo>,
+    /// Load-time tool-call probe verdict: `Some(true)` verified, `Some(false)`
+    /// failed, `None` if the model never claimed `tools` capability or has
+    /// never been loaded/probed yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tools_verified: Option<bool>,
 }
 
 /// Runtime profile exposed via the API.
@@ -91,6 +96,7 @@ impl ModelInfo {
             capabilities: Vec::new(),
             hf_repo: None,
             runtime_profile: None,
+            tools_verified: None,
         }
     }
 
@@ -123,6 +129,7 @@ impl ModelInfo {
             capabilities: config.capabilities.clone(),
             hf_repo: config.hf_repo.clone(),
             runtime_profile,
+            tools_verified: None,
         }
     }
 }
@@ -169,4 +176,30 @@ pub struct ToolCall {
     pub id: String,
     pub r#type: String,
     pub function: FunctionCall,
+}
+
+#[cfg(test)]
+mod tool_verified_tests {
+    use super::*;
+
+    #[test]
+    fn tools_verified_defaults_to_none() {
+        let info = ModelInfo::new("m");
+        assert_eq!(info.tools_verified, None);
+    }
+
+    #[test]
+    fn tools_verified_omitted_from_json_when_none() {
+        let info = ModelInfo::new("m");
+        let json = serde_json::to_value(&info).unwrap();
+        assert!(json.get("tools_verified").is_none());
+    }
+
+    #[test]
+    fn tools_verified_present_when_set() {
+        let mut info = ModelInfo::new("m");
+        info.tools_verified = Some(true);
+        let json = serde_json::to_value(&info).unwrap();
+        assert_eq!(json["tools_verified"], serde_json::json!(true));
+    }
 }

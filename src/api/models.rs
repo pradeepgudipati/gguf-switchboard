@@ -25,19 +25,31 @@ use crate::types::{ListModelsResponse, ModelInfo, RuntimeProfileInfo};
 pub async fn list_models(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ListModelsResponse>, RuntimeError> {
-    let models = state
-        .scheduler
-        .model_ids()
-        .into_iter()
-        .filter_map(|id| {
-            state
-                .scheduler
-                .model_config(&id)
-                .map(|cfg| ModelInfo::from_config(id, &cfg))
-        })
-        .collect();
+    let mut models = Vec::new();
+    for id in state.scheduler.model_ids() {
+        let Some(cfg) = state.scheduler.model_config(&id) else {
+            continue;
+        };
+        let mut info = ModelInfo::from_config(id.clone(), &cfg);
+        info.tools_verified = tools_verified_bool(state.scheduler.tool_capability(&id).await);
+        models.push(info);
+    }
 
     Ok(Json(ListModelsResponse::new(models)))
+}
+
+/// Convert a `ToolCapability` verdict into the API's tri-state boolean:
+/// `Verified` -> `Some(true)`, `Failed` -> `Some(false)`, `Skipped` or
+/// never-probed -> `None` (field omitted from the response).
+fn tools_verified_bool(
+    verdict: Option<crate::backend::tool_probe::ToolCapability>,
+) -> Option<bool> {
+    use crate::backend::tool_probe::ToolCapability;
+    match verdict {
+        Some(ToolCapability::Verified) => Some(true),
+        Some(ToolCapability::Failed(_)) => Some(false),
+        Some(ToolCapability::Skipped) | None => None,
+    }
 }
 
 /// Retrieve a single model by ID.
@@ -60,7 +72,9 @@ pub async fn get_model(
     let Some(cfg) = state.scheduler.model_config(&model_id) else {
         return Err(RuntimeError::ModelNotFound(model_id));
     };
-    Ok(Json(ModelInfo::from_config(model_id, &cfg)))
+    let mut info = ModelInfo::from_config(model_id.clone(), &cfg);
+    info.tools_verified = tools_verified_bool(state.scheduler.tool_capability(&model_id).await);
+    Ok(Json(info))
 }
 
 /// Retrieve the runtime profile for a model.
