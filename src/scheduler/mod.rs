@@ -68,6 +68,9 @@ struct SchedulerInner {
     /// Cancellation token for the in-flight page-cache prewarm task, if any.
     prewarm: Mutex<Option<CancellationToken>>,
     last_switch: RwLock<Option<LastSwitchReport>>,
+    /// Load-time tool-call probe verdict per model id. In-memory only —
+    /// recomputed on every load, never persisted to `models.toml`.
+    tool_capability: RwLock<HashMap<String, crate::backend::tool_probe::ToolCapability>>,
 }
 
 /// Holds background watcher tasks; cancel and join on shutdown.
@@ -135,6 +138,7 @@ impl Scheduler {
             recent_history: 1 + prewarm,
             prewarm: Mutex::new(None),
             last_switch: RwLock::new(None),
+            tool_capability: RwLock::new(HashMap::new()),
         };
         Ok(Self {
             inner: Arc::new(inner),
@@ -582,6 +586,22 @@ impl Scheduler {
         self.inner.models.read().get(model_id).cloned()
     }
 
+    /// The most recent tool-call probe verdict for `model_id`, if the model
+    /// has ever been loaded and probed. `None` means the model has never
+    /// been loaded (not the same as `Skipped`, which means it loaded but
+    /// never claimed `tools` capability).
+    pub async fn tool_capability(
+        &self,
+        model_id: &str,
+    ) -> Option<crate::backend::tool_probe::ToolCapability> {
+        self.inner
+            .tool_capability
+            .read()
+            .await
+            .get(model_id)
+            .copied()
+    }
+
     pub fn model_ids(&self) -> Vec<String> {
         self.inner.models.read().keys().cloned().collect()
     }
@@ -993,7 +1013,10 @@ impl SchedulerInner {
             }
 
             match backend.health().await {
-                Ok(true) => return Ok(()),
+                Ok(true) => {
+                    self.run_tool_probe(model_id, backend).await;
+                    return Ok(());
+                }
                 Ok(false) => {
                     tokio::time::sleep(Duration::from_millis(200)).await;
                 }
@@ -1003,6 +1026,49 @@ impl SchedulerInner {
                 }
             }
         }
+    }
+
+    /// Run the tool-call probe for `model_id` if its static capabilities
+    /// claim `tools`, and store the verdict. Runs once per successful
+    /// health check (i.e. once per load) — cheap enough not to need
+    /// caching beyond the `tool_capability` map itself, since this method
+    /// is only called from `wait_until_healthy`'s single success path.
+    async fn run_tool_probe(&self, model_id: &str, backend: &Arc<dyn Backend>) {
+        use crate::backend::tool_probe::{
+            ToolCapability, normalize_tool_call_arguments, probe_request, validate_probe_response,
+        };
+
+        let claims_tools = self
+            .models
+            .read()
+            .get(model_id)
+            .is_some_and(|cfg| cfg.capabilities.iter().any(|c| c == "tools"));
+
+        let verdict = if !claims_tools {
+            ToolCapability::Skipped
+        } else {
+            match backend.chat(probe_request(model_id)).await {
+                Ok(response) => {
+                    let mut value =
+                        serde_json::to_value(&response).unwrap_or(serde_json::Value::Null);
+                    normalize_tool_call_arguments(&mut value);
+                    match validate_probe_response(&value) {
+                        Ok(()) => ToolCapability::Verified,
+                        Err(reason) => ToolCapability::Failed(reason),
+                    }
+                }
+                Err(e) => {
+                    warn!(model = %model_id, error = %e, "Tool-call probe request failed");
+                    ToolCapability::Failed("backend_error")
+                }
+            }
+        };
+
+        info!(model = %model_id, verdict = ?verdict, "Tool-call capability probe complete");
+        self.tool_capability
+            .write()
+            .await
+            .insert(model_id.to_string(), verdict);
     }
 
     async fn load_model_with_context_fallback(
@@ -1584,4 +1650,30 @@ fn build_fit_extra_args(plan: &crate::fit::FitPlan) -> Vec<String> {
         args.push(ubatch.to_string());
     }
     args
+}
+
+#[cfg(test)]
+mod tool_capability_tests {
+    use crate::backend::tool_probe::ToolCapability;
+
+    #[test]
+    fn skipped_when_capabilities_do_not_claim_tools() {
+        let capabilities: Vec<String> = vec!["vision".to_string()];
+        let should_probe = capabilities.iter().any(|c| c == "tools");
+        assert!(!should_probe);
+    }
+
+    #[test]
+    fn probes_when_capabilities_claim_tools() {
+        let capabilities: Vec<String> = vec!["tools".to_string()];
+        let should_probe = capabilities.iter().any(|c| c == "tools");
+        assert!(should_probe);
+    }
+
+    #[test]
+    fn verdict_serializes_with_reason_for_failed() {
+        let verdict = ToolCapability::Failed("no_tool_calls");
+        let json = serde_json::to_value(verdict).unwrap();
+        assert_eq!(json, serde_json::json!({"failed": "no_tool_calls"}));
+    }
 }
