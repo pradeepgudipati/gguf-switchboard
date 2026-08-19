@@ -1,10 +1,12 @@
-# Quant scoring: FIT, SPEED, PRECISION
+# Quant scoring: FIT, SPEED, BALANCED, PRECISION
 
 `gguf-switchboard models search` and `models files` score every discovered GGUF
 quant against your detected hardware instead of reporting a flat
 `Supported: Yes/No`. This doc explains what each number means, exactly how
 it's computed, where the constants come from, and how to check them against
-your own machine. Implementation: [`src/quant_profile.rs`](../src/quant_profile.rs).
+your own machine. Implementation: [`src/quant_profile.rs`](../src/quant_profile.rs)
+(FIT/SPEED/PRECISION) and [`src/config/models_cmd.rs`](../src/config/models_cmd.rs)
+(`balanced_quant`, BALANCED).
 
 ## FIT (0–100)
 
@@ -114,6 +116,37 @@ is a single function (`quant_profile::quant_quality`), so plugging in a
 measured-data source is a small, contained change if/when one becomes
 reliably available per-model.
 
+## BALANCED (a single middle-ground quant)
+
+FIT/SPEED/PRECISION each answer "what's the *best* option for this one
+dimension" — which, taken alone, always points at one of the two extremes
+(the fastest/smallest quant, or the slowest/largest one). BALANCED answers a
+different question: "if I don't want to go to either extreme, what's the one
+quant that gives up the least on both?"
+
+Within a repository's set of quants that fit your hardware, file size is
+almost perfectly anti-correlated between speed and precision: a smaller
+quant is both faster (less to stream per token, see SPEED above) *and*
+lossier (more aggressively quantized, see PRECISION above), and a larger one
+is both slower and more precise. That means the size range from the smallest
+to the largest fitting quant already traces the speed/precision trade-off
+curve — so BALANCED is simply **the quant whose file size is closest to the
+midpoint of that range**. Ties (equidistant from two quants) prefer the
+smaller, cheaper-to-run one, then quant name, for determinism.
+
+An earlier version of this instead averaged a 0–100-normalized speed score
+with the quality score. That was rejected: normalizing speed against the
+fastest candidate in the set gives it a much wider spread (often 3-4x from
+worst to best) than quality typically has among realistic quants (usually
+well under 2x from worst to best fitting quant), so an equal-weight average
+is dominated by speed and keeps picking one of the fastest/lossiest
+options — the opposite of "balanced." The size-midpoint approach sidesteps
+having to reconcile two differently-scaled scores at all.
+
+`models search` prints BALANCED as its own table column and, when it differs
+from both the fastest and least-lossy picks, as a third `ggs models pull`
+suggestion line.
+
 ## What this deliberately does not do
 
 - No AMD/Apple GPU bandwidth table — matches this codebase's existing
@@ -122,7 +155,8 @@ reliably available per-model.
 - No multi-GPU tensor-parallel throughput model — SPEED uses the single GPU
   with the most free VRAM as the reference device; multi-GPU split
   throughput is non-linear and isn't modeled.
-- No blended single "composite score" across FIT/SPEED/PRECISION — the ask
-  this was built for was "best quant for speed" and "best quant for least
-  precision loss" as two separate, inspectable recommendations, not one
-  opaque number.
+- No blended numeric score across FIT/SPEED/PRECISION — BALANCED picks a
+  quant, not a score; it never averages SPEED's tokens/sec against
+  PRECISION's quality points into one opaque number (see above for why that
+  was tried and rejected). FIT, SPEED, and PRECISION remain three separate,
+  inspectable recommendations; BALANCED is a fourth, not a merger of them.

@@ -129,7 +129,9 @@ pub async fn cmd_search(args: &[String]) -> Result<(), Box<dyn std::error::Error
          SPEED/PRECISION: the quant that maximizes each — tok/s from a memory-bandwidth model \
          (verify against `llama-bench` on your machine), quality % from published per-quant \
          perplexity measurements (\"~\" = extrapolated, not directly measured for this \
-         architecture). See docs/QUANT_SCORING.md for methodology and sources; override RAM \
+         architecture). BALANCED: the quant with the best average of speed and quality, both \
+         normalized to this model's own quant options — a middle ground when you don't want \
+         either extreme. See docs/QUANT_SCORING.md for methodology and sources; override RAM \
          bandwidth with --ram-bandwidth-gbps if you've measured your own."
     );
     if let Some(command) = sample_pull_command(&hits, &assessments) {
@@ -182,12 +184,22 @@ fn sample_pull_command(hits: &[Value], assessments: &[SearchAssessment]) -> Opti
     hits.iter().zip(assessments).find_map(|(hit, assessment)| {
         let repository = hit.get("id").and_then(Value::as_str)?;
         let fastest = assessment.fastest.as_ref()?;
+        let mut shown_quants = vec![fastest.quant.as_str()];
         let mut lines = vec![format!(
             "Try: ggs models pull {repository} --quant {}   (fastest, ~{:.0} tok/s est.)",
             fastest.quant, fastest.tokens_per_sec
         )];
+        if let Some(balanced) = assessment.balanced.as_ref()
+            && !shown_quants.contains(&balanced.quant.as_str())
+        {
+            shown_quants.push(&balanced.quant);
+            lines.push(format!(
+                "     ggs models pull {repository} --quant {}   (balanced, ~{:.0} tok/s / ~{:.1}% quality est.)",
+                balanced.quant, balanced.tokens_per_sec, balanced.quality_score
+            ));
+        }
         if let Some(precision) = assessment.best_precision.as_ref()
-            && precision.quant != fastest.quant
+            && !shown_quants.contains(&precision.quant.as_str())
         {
             lines.push(format!(
                 "     ggs models pull {repository} --quant {}   (least precision loss, ~{:.1}% quality est.)",
@@ -248,6 +260,15 @@ fn render_search_table(hits: &[Value], assessments: &[SearchAssessment]) -> Stri
                 .and_then(|value| value.fastest.as_ref())
                 .map(|f| format!("{} ~{:.0}tok/s", f.quant, f.tokens_per_sec))
                 .unwrap_or_else(|| "-".to_string());
+            let balanced = assessment
+                .and_then(|value| value.balanced.as_ref())
+                .map(|b| {
+                    format!(
+                        "{} ~{:.0}tok/s/~{:.1}%",
+                        b.quant, b.tokens_per_sec, b.quality_score
+                    )
+                })
+                .unwrap_or_else(|| "-".to_string());
             let precision = assessment
                 .and_then(|value| value.best_precision.as_ref())
                 .map(|p| format!("{} ~{:.1}%", p.quant, p.quality_score))
@@ -264,7 +285,7 @@ fn render_search_table(hits: &[Value], assessments: &[SearchAssessment]) -> Stri
                 })
                 .unwrap_or_else(|| "-".to_string());
             (
-                id, siblings, size_mb, fit, context, arch, speed, precision, quants,
+                id, siblings, size_mb, fit, context, arch, speed, balanced, precision, quants,
             )
         })
         .collect::<Vec<_>>();
@@ -279,7 +300,8 @@ fn render_search_table(hits: &[Value], assessments: &[SearchAssessment]) -> Stri
                 4 => &row.4,
                 5 => &row.5,
                 6 => &row.6,
-                _ => &row.7,
+                7 => &row.7,
+                _ => &row.8,
             };
             width.max(value.len())
         })
@@ -291,19 +313,20 @@ fn render_search_table(hits: &[Value], assessments: &[SearchAssessment]) -> Stri
     let context_width = width("CONTEXT", 4);
     let arch_width = width("ARCH", 5);
     let speed_width = width("SPEED", 6);
-    let precision_width = width("PRECISION", 7);
+    let balanced_width = width("BALANCED", 7);
+    let precision_width = width("PRECISION", 8);
 
     let mut output = String::new();
     writeln!(
         output,
-        "{:<repo_width$} | {:>files_width$} | {:>size_width$} | {:>fit_width$} | {:<context_width$} | {:<arch_width$} | {:<speed_width$} | {:<precision_width$} | QUANT",
-        "REPO", "FILES", "SIZE", "FIT", "CONTEXT", "ARCH", "SPEED", "PRECISION"
+        "{:<repo_width$} | {:>files_width$} | {:>size_width$} | {:>fit_width$} | {:<context_width$} | {:<arch_width$} | {:<speed_width$} | {:<balanced_width$} | {:<precision_width$} | QUANT",
+        "REPO", "FILES", "SIZE", "FIT", "CONTEXT", "ARCH", "SPEED", "BALANCED", "PRECISION"
     )
     .expect("writing to a String cannot fail");
-    for (repo, files, size, fit, context, arch, speed, precision, quants) in rows {
+    for (repo, files, size, fit, context, arch, speed, balanced, precision, quants) in rows {
         writeln!(
             output,
-            "{repo:<repo_width$} | {files:>files_width$} | {size:>size_width$} | {fit:>fit_width$} | {context:<context_width$} | {arch:<arch_width$} | {speed:<speed_width$} | {precision:<precision_width$} | {quants}"
+            "{repo:<repo_width$} | {files:>files_width$} | {size:>size_width$} | {fit:>fit_width$} | {context:<context_width$} | {arch:<arch_width$} | {speed:<speed_width$} | {balanced:<balanced_width$} | {precision:<precision_width$} | {quants}"
         )
         .expect("writing to a String cannot fail");
     }
@@ -1063,6 +1086,64 @@ struct SearchAssessment {
     fastest: Option<QuantRecommendation>,
     /// The supported quant with the highest precision-retention score.
     best_precision: Option<QuantRecommendation>,
+    /// The supported quant that best balances speed and precision — see
+    /// [`balanced_quant`]. `None` only when `quants` is empty.
+    balanced: Option<QuantRecommendation>,
+}
+
+/// Pick the quant that best balances speed against precision loss.
+///
+/// Within a repo's candidate quants, file size is almost perfectly
+/// anti-correlated between the two dimensions — a bigger quant is (almost)
+/// always both slower *and* more precise, because size is the direct input
+/// to both the speed model (smaller = less to stream per token) and the
+/// precision table (smaller = more aggressively quantized). So the size
+/// range from the smallest to the largest fitting quant already traces the
+/// speed/precision trade-off curve, and "balanced" is the quant whose size
+/// sits closest to the midpoint of that range — not too close to either the
+/// smallest (fastest, lossiest) or largest (slowest, most precise) end.
+///
+/// An earlier version of this tried to average a 0–100-normalized speed
+/// score with the quality score, but normalizing speed against the fastest
+/// candidate gives it a much wider spread (often 3–4x across the range) than
+/// quality typically has (usually well under 2x from worst to best fitting
+/// quant), so the average was dominated by speed and kept picking one of the
+/// fastest/lossiest options — the opposite of "balanced." Size-midpoint
+/// avoids needing to reconcile those two different scales at all.
+///
+/// Ties (a size exactly equidistant from two quants) prefer the smaller
+/// (cheaper-to-run) one, then quant name for determinism.
+fn balanced_quant(
+    scored: &[(
+        &ModelOption,
+        quant_profile::SpeedEstimate,
+        quant_profile::QuantQuality,
+    )],
+) -> Option<QuantRecommendation> {
+    let (min_bytes, max_bytes) = scored
+        .iter()
+        .fold((u64::MAX, 0_u64), |(min, max), (o, ..)| {
+            (min.min(o.bytes), max.max(o.bytes))
+        });
+    if min_bytes > max_bytes {
+        return None;
+    }
+    let midpoint = min_bytes / 2 + max_bytes / 2; // avoid overflow on the sum
+
+    scored
+        .iter()
+        .min_by(|a, b| {
+            let distance = |bytes: u64| bytes.abs_diff(midpoint);
+            distance(a.0.bytes)
+                .cmp(&distance(b.0.bytes))
+                .then_with(|| a.0.bytes.cmp(&b.0.bytes))
+                .then_with(|| a.0.quant.cmp(&b.0.quant))
+        })
+        .map(|(option, speed, quality)| QuantRecommendation {
+            quant: option.quant.clone(),
+            tokens_per_sec: speed.tokens_per_sec,
+            quality_score: quality.quality_score,
+        })
 }
 
 fn complete_model_options(entries: &[HfTreeEntry]) -> Vec<ModelOption> {
@@ -1269,6 +1350,7 @@ fn assess_repository(
 
     let mut fastest: Option<QuantRecommendation> = None;
     let mut best_precision: Option<QuantRecommendation> = None;
+    let mut scored = Vec::with_capacity(quants.len());
     for option in &quants {
         let speed = quant_profile::estimate_speed(option.bytes, hw);
         let quality = quant_profile::quant_quality(&option.quant);
@@ -1292,7 +1374,9 @@ fn assess_repository(
                 quality_score: quality.quality_score,
             });
         }
+        scored.push((option, speed, quality));
     }
+    let balanced = balanced_quant(&scored);
 
     SearchAssessment {
         supported: !quants.is_empty(),
@@ -1301,6 +1385,7 @@ fn assess_repository(
         fit_score,
         fastest,
         best_precision,
+        balanced,
     }
 }
 
@@ -1395,12 +1480,13 @@ fn dedupe_alias(alias: &str, used: &HashSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelOption, QuantRecommendation, SearchAssessment, assess_repository,
+        ModelOption, QuantRecommendation, SearchAssessment, assess_repository, balanced_quant,
         chat_url_from_config, complete_model_options, extract_quant, extract_speed_stats,
         format_hardware_summary, is_standalone_model, is_supported, parse_connections,
         refresh_url_from_config, render_search_table, sample_pull_command, select_quant_entry,
     };
     use crate::config::hf_download::HfTreeEntry;
+    use crate::quant_profile;
     use crate::quant_profile::HardwareCtx;
 
     fn tree_entry(path: &str, size: u64) -> HfTreeEntry {
@@ -1721,6 +1807,11 @@ mod tests {
                     tokens_per_sec: 42.0,
                     quality_score: 96.7,
                 }),
+                balanced: Some(QuantRecommendation {
+                    quant: "Q4_K_M".to_string(),
+                    tokens_per_sec: 42.0,
+                    quality_score: 96.7,
+                }),
             },
             SearchAssessment::default(),
         ];
@@ -1729,6 +1820,7 @@ mod tests {
         let header = table.lines().next().unwrap();
         assert!(header.contains("FIT"));
         assert!(header.contains("SPEED"));
+        assert!(header.contains("BALANCED"));
         assert!(header.contains("PRECISION"));
         assert!(!header.contains("SUPPORTED"));
         assert!(table.lines().any(|line| line.contains("org/gemma-small")
@@ -1771,6 +1863,7 @@ mod tests {
                     quality_score: 96.7,
                 }),
                 best_precision: None,
+                balanced: None,
             },
             SearchAssessment::default(),
         ];
@@ -1791,14 +1884,19 @@ mod tests {
     }
 
     #[test]
-    fn search_output_builds_speed_and_precision_pull_commands() {
+    fn search_output_builds_speed_balanced_and_precision_pull_commands() {
         let hits = vec![serde_json::json!({"id": "org/model"})];
-        let both_recommendations = [SearchAssessment {
+        let three_distinct_winners = [SearchAssessment {
             supported: true,
             quants: vec![],
             recommended_quant: Some("Q4_K_M".to_string()),
             fit_score: 90.0,
             fastest: Some(QuantRecommendation {
+                quant: "Q3_K_M".to_string(),
+                tokens_per_sec: 55.0,
+                quality_score: 91.3,
+            }),
+            balanced: Some(QuantRecommendation {
                 quant: "Q4_K_M".to_string(),
                 tokens_per_sec: 42.0,
                 quality_score: 96.7,
@@ -1810,17 +1908,24 @@ mod tests {
             }),
         }];
 
-        let command = sample_pull_command(&hits, &both_recommendations).expect("command");
-        assert!(command.contains("--quant Q4_K_M") && command.contains("fastest"));
+        let command = sample_pull_command(&hits, &three_distinct_winners).expect("command");
+        assert!(command.contains("--quant Q3_K_M") && command.contains("fastest"));
+        assert!(command.contains("--quant Q4_K_M") && command.contains("balanced"));
         assert!(command.contains("--quant Q6_K") && command.contains("least precision loss"));
+        assert_eq!(command.lines().count(), 3);
 
-        // Same quant wins both categories: only one line, no duplication.
+        // Same quant wins all three categories: only one line, no duplication.
         let single_winner = [SearchAssessment {
             supported: true,
             quants: vec![],
             recommended_quant: Some("Q4_K_M".to_string()),
             fit_score: 90.0,
             fastest: Some(QuantRecommendation {
+                quant: "Q4_K_M".to_string(),
+                tokens_per_sec: 42.0,
+                quality_score: 96.7,
+            }),
+            balanced: Some(QuantRecommendation {
                 quant: "Q4_K_M".to_string(),
                 tokens_per_sec: 42.0,
                 quality_score: 96.7,
@@ -1838,6 +1943,68 @@ mod tests {
             sample_pull_command(&hits, &[SearchAssessment::default()]),
             None
         );
+    }
+
+    #[test]
+    fn balanced_quant_favors_normalized_middle_ground_over_extremes() {
+        let fast_low_quality = ModelOption {
+            quant: "Q2_K".to_string(),
+            bytes: 2_000,
+        };
+        let mid = ModelOption {
+            quant: "Q4_K_M".to_string(),
+            bytes: 4_000,
+        };
+        let slow_high_quality = ModelOption {
+            quant: "Q8_0".to_string(),
+            bytes: 8_000,
+        };
+        let scored = vec![
+            (
+                &fast_low_quality,
+                quant_profile::SpeedEstimate {
+                    tokens_per_sec: 100.0,
+                    mode: quant_profile::SpeedMode::FullGpu,
+                    gpu_name: None,
+                    bandwidth_gbps: 0.0,
+                    efficiency_factor: 0.0,
+                    confidence: quant_profile::Confidence::Measured,
+                },
+                quant_profile::quant_quality("Q2_K"),
+            ),
+            (
+                &mid,
+                quant_profile::SpeedEstimate {
+                    tokens_per_sec: 50.0,
+                    mode: quant_profile::SpeedMode::FullGpu,
+                    gpu_name: None,
+                    bandwidth_gbps: 0.0,
+                    efficiency_factor: 0.0,
+                    confidence: quant_profile::Confidence::Measured,
+                },
+                quant_profile::quant_quality("Q4_K_M"),
+            ),
+            (
+                &slow_high_quality,
+                quant_profile::SpeedEstimate {
+                    tokens_per_sec: 25.0,
+                    mode: quant_profile::SpeedMode::FullGpu,
+                    gpu_name: None,
+                    bandwidth_gbps: 0.0,
+                    efficiency_factor: 0.0,
+                    confidence: quant_profile::Confidence::Measured,
+                },
+                quant_profile::quant_quality("Q8_0"),
+            ),
+        ];
+
+        let balanced = balanced_quant(&scored).expect("a balanced pick");
+        assert_eq!(balanced.quant, "Q4_K_M");
+    }
+
+    #[test]
+    fn balanced_quant_empty_input_is_none() {
+        assert!(balanced_quant(&[]).is_none());
     }
 
     #[test]
