@@ -29,6 +29,30 @@ impl Drop for StreamingGuard {
     }
 }
 
+/// Returns `Some(error)` when `request` carries a non-empty `tools` array
+/// and `verdict` is a known `Failed` outcome for this model. `None`
+/// (forward as-is) for chat-only requests, verified models, or models that
+/// have never been probed yet (`None` verdict — don't block on ignorance).
+fn check_tool_capability_gate(
+    request: &ChatCompletionRequest,
+    verdict: Option<crate::backend::tool_probe::ToolCapability>,
+) -> Option<RuntimeError> {
+    use crate::backend::tool_probe::ToolCapability;
+
+    let has_tools = request.tools.as_ref().is_some_and(|t| !t.is_empty());
+    if !has_tools {
+        return None;
+    }
+    match verdict {
+        Some(ToolCapability::Failed(reason)) => Some(RuntimeError::InvalidRequest(format!(
+            "Model '{}' failed tool-call verification at load ({reason}); \
+             remove `tools` from the request or use a model with verified tool support.",
+            request.model
+        ))),
+        _ => None,
+    }
+}
+
 /// Chat completions with optional streaming.
 #[utoipa::path(
     post,
@@ -66,6 +90,12 @@ pub async fn chat_completions(
         .model_config(&request.model)
         .ok_or_else(|| RuntimeError::ModelNotFound(request.model.clone()))?;
     require_kind(&request.model, &cfg, CHAT_KINDS, "/v1/chat/completions")?;
+    if let Some(err) = check_tool_capability_gate(
+        &request,
+        state.scheduler.tool_capability(&request.model).await,
+    ) {
+        return Err(err);
+    }
     let backend = state.scheduler.ensure_loaded(&request.model).await?;
     let model_id = request.model.clone();
     let request_guard = state.scheduler.track_request(&model_id);
@@ -146,5 +176,87 @@ pub async fn chat_completions(
         );
 
         Ok(Json(response).into_response())
+    }
+}
+
+#[cfg(test)]
+mod tool_gate_tests {
+    use super::*;
+    use crate::backend::tool_probe::ToolCapability;
+    use crate::types::chat::{ChatMessage, Content, FunctionDefinition, Role, Tool};
+
+    fn request_with_tools() -> ChatCompletionRequest {
+        ChatCompletionRequest {
+            model: "m".to_string(),
+            messages: vec![ChatMessage {
+                role: Role::User,
+                content: Some(Content::Text("hi".to_string())),
+                name: None,
+                tool_calls: None,
+                tool_call_id: None,
+                reasoning_content: None,
+            }],
+            temperature: None,
+            top_p: None,
+            n: None,
+            stream: None,
+            stop: None,
+            max_tokens: None,
+            presence_penalty: None,
+            frequency_penalty: None,
+            logit_bias: None,
+            user: None,
+            tools: Some(vec![Tool {
+                r#type: "function".to_string(),
+                function: FunctionDefinition {
+                    name: "f".to_string(),
+                    description: None,
+                    parameters: None,
+                    strict: None,
+                },
+            }]),
+            tool_choice: None,
+            seed: None,
+            response_format: None,
+            chat_template_kwargs: None,
+        }
+    }
+
+    fn request_without_tools() -> ChatCompletionRequest {
+        let mut req = request_with_tools();
+        req.tools = None;
+        req
+    }
+
+    #[test]
+    fn rejects_tools_request_when_verdict_is_failed() {
+        let err = check_tool_capability_gate(
+            &request_with_tools(),
+            Some(ToolCapability::Failed("no_tool_calls")),
+        );
+        assert!(err.is_some());
+    }
+
+    #[test]
+    fn allows_tools_request_when_verdict_is_verified() {
+        let err = check_tool_capability_gate(&request_with_tools(), Some(ToolCapability::Verified));
+        assert!(err.is_none());
+    }
+
+    #[test]
+    fn allows_tools_request_when_verdict_is_unknown() {
+        // Model never loaded/probed yet — don't block; the backend request
+        // will trigger a load, which triggers the probe, for next time.
+        let err = check_tool_capability_gate(&request_with_tools(), None);
+        assert!(err.is_none());
+    }
+
+    #[test]
+    fn allows_no_tools_request_even_when_verdict_is_failed() {
+        let err = check_tool_capability_gate(
+            &request_without_tools(),
+            Some(ToolCapability::Failed("no_tool_calls")),
+        );
+        assert!(err.is_none());
     }
 }
