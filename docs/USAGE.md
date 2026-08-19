@@ -37,17 +37,65 @@ Run the same checks manually:
 
 ### Hardware-aware model search
 
-`ggs models search` adds a `SUPPORTED` estimate to each Hugging Face result:
+`ggs models search` scores every discovered quant against your detected hardware:
 
 ```bash
 ggs models search "gemma"
+ggs models search "Qwen3.5 9B" --limit 5
+ggs models search "Qwen3.5 9B" --ram-bandwidth-gbps 50
 ```
 
-Search prints total system RAM, NVIDIA VRAM, and their combined capacity before an aligned table. The `QUANT` column lists every named standalone quantization that fits with 20% runtime headroom, ordered from smallest to largest complete file size. Complete split-file models are counted once. `SUPPORTED` is `Yes` exactly when this list is non-empty.
+Search prints total system RAM, NVIDIA VRAM, and their combined capacity before an aligned table with FIT/SPEED/BALANCED/PRECISION columns:
 
-Auxiliary speculative-decoding drafters require a separate target model, so they show `No` and `QUANT` shows `-` even when they fit memory. CPU-only systems use system RAM alone. This is a discovery estimate: context size, KV cache, GPU offload, and other runtime allocations can still prevent a model from loading.
+```
+Hardware: System RAM 32.0 GiB | NVIDIA VRAM 24.0 GiB | Total 56.0 GiB
+Speed model inputs: GPU bandwidth 1008 GB/s (NVIDIA GeForce RTX 4090) | RAM bandwidth 40 GB/s (assumed) | GPU efficiency 0.55 | CPU efficiency 0.35
 
-After the results, search prints a pull command for the first supported repository. It recommends `Q4_K_M` when available; otherwise it selects the largest fitting quantization.
+REPO                                               | FILES |     SIZE | FIT | CONTEXT    | ARCH  | SPEED            | BALANCED               | PRECISION    | QUANT
+bartowski/Qwen3.5-9B-GGUF                          |    24 |  9421 MB | 100 | 32768 tok  | qwen3 | Q4_K_M ~127tok/s | Q5_K_M ~91tok/s/~98.9% | Q6_K ~99.6%  | Q2_K,Q3_K_M,Q4_K_M,Q5_K_M,Q6_K,Q8_0
+FIT: 0-100 memory-fit score (100 = comfortable headroom; 0 = does not fit RAM+VRAM). SPEED/PRECISION: the quant that maximizes each — tok/s from a memory-bandwidth model (verify against `llama-bench` on your machine), quality % from published per-quant perplexity measurements ("~" = extrapolated, not directly measured for this architecture). BALANCED: the quant with the best average of speed and quality, both normalized to this model's own quant options — a middle ground when you don't want either extreme. See docs/QUANT_SCORING.md for methodology and sources; override RAM bandwidth with --ram-bandwidth-gbps if you've measured your own.
+Try: ggs models pull bartowski/Qwen3.5-9B-GGUF --quant Q4_K_M   (fastest, ~127 tok/s est.)
+     ggs models pull bartowski/Qwen3.5-9B-GGUF --quant Q5_K_M   (balanced, ~91 tok/s / ~98.9% quality est.)
+     ggs models pull bartowski/Qwen3.5-9B-GGUF --quant Q6_K   (least precision loss, ~99.6% quality est.)
+```
+
+| Column | Description |
+|--------|-------------|
+| `FIT` | 0–100 memory-fit score (100 = comfortable headroom, 0 = doesn't fit) |
+| `SPEED` | Fastest quant with estimated tok/s |
+| `BALANCED` | Quant at the size midpoint of fitting options (speed/precision trade-off) |
+| `PRECISION` | Least-lossy quant with quality score (% of fp16 quality retained) |
+| `QUANT` | All fitting quants ordered from smallest to largest |
+
+The footer legend explains each column. The `"~"` prefix on SPEED and PRECISION values means the estimate is extrapolated, not directly measured for that architecture. The `Try:` lines suggest the fastest, balanced, and least precision loss quants with pull commands.
+
+When a repo has FIT=0 (doesn't fit RAM+VRAM), SPEED/BALANCED/PRECISION show `-` and QUANT is empty — the repo is listed but no recommendations are made.
+
+See [docs/QUANT_SCORING.md](QUANT_SCORING.md) for the exact formulas, sources, and how to override RAM bandwidth (`--ram-bandwidth-gbps`) with a measured value.
+
+### Model management CLI
+
+```bash
+# Search Hugging Face for GGUF models
+ggs models search "Qwen3.5 9B"
+
+# Browse available files in a repo
+ggs models files lmstudio-community/Qwen3.5-9B-GGUF
+
+# Download, validate, and register a model (runs a speed test if the server is up)
+ggs models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --dir /var/lib/gguf-switchboard/models
+
+# Tune parallel aria2 connections (default 8, maximum 16)
+ggs models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --connections 8
+
+# Skip the post-pull speed test
+ggs models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --no-bench
+
+# Dry-run: show what the fit planner would generate
+ggs models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --fit-dry-run
+```
+
+`models pull` performs the complete workflow: fetches the repo tree, resolves `--quant` case-insensitively, streams the download with progress, validates the GGUF header, generates an alias, runs the fit planner to generate context_size/ngl/extra_args, and merges into `models.toml`. A successful pull refreshes a running gguf-switchboard server automatically.
 
 ## Systemd service
 
@@ -150,6 +198,46 @@ curl http://localhost:9090/v1/models
 curl http://localhost:9090/v1/models/registry.json
 ```
 
+### Individual Model Info
+
+```bash
+# Get detailed info for a specific model (includes tools_verified)
+curl http://localhost:9090/v1/models/gemma-4-e4b
+
+# Get runtime profile (effective context_size, ngl, split_mode, kv_cache_type, profile_source)
+curl http://localhost:9090/v1/models/gemma-4-e4b/runtime
+```
+
+The `/v1/models/{model_id}` endpoint returns the model's `tools_verified` field — `true` if a real tool call succeeded at load time, `false` if the probe failed, `null` if not yet probed.
+
+The `/v1/models/{model_id}/runtime` endpoint returns the `RuntimeProfileInfo` with the effective launch parameters:
+
+```json
+{
+    "context_size": 32768,
+    "ngl": 40,
+    "split_mode": "layer",
+    "kv_cache_type": "q8_0",
+    "batch_size": null,
+    "ubatch_size": null,
+    "profile_source": "fit_planner"
+}
+```
+
+`profile_source` indicates where the launch parameters came from: `"fit_planner"`, `"config"`, `"registry"`, or `"fallback"`.
+
+### Hot-reload Model Registry
+
+After adding or removing GGUF files from the models directory, trigger a hot-reload without restarting the service:
+
+```bash
+curl -X POST http://localhost:9090/v1/models/refresh
+```
+
+This re-scans the configured `models_dir`, merges new discoveries with the existing registry, syncs HF metadata, and updates the running model list. Also available in Swagger UI as **Rescan Models**.
+
+A periodic rescan watcher runs every `models_rescan_interval_secs` (default: daily) to pick up new models automatically.
+
 ### Responses API
 
 ```bash
@@ -161,6 +249,97 @@ curl http://localhost:9090/v1/responses \
         "instructions": "Answer concisely."
     }'
 ```
+
+### Anthropic Messages API
+
+gguf-switchboard translates the Anthropic Messages API onto the loaded `llama-server` OpenAI backend. Streaming and tool calling are supported.
+
+```bash
+# Non-streaming
+curl http://localhost:9090/v1/messages \
+    -H "Content-Type: application/json" \
+    -H "x-api-key: not-needed" \
+    -H "anthropic-version: 2023-06-01" \
+    -d '{
+        "model": "gemma-4-e4b",
+        "max_tokens": 1024,
+        "messages": [
+            {"role": "user", "content": "Explain the difference between threads and processes."}
+        ]
+    }'
+
+# Streaming
+curl http://localhost:9090/v1/messages \
+    -H "Content-Type: application/json" \
+    -H "x-api-key: not-needed" \
+    -H "anthropic-version: 2023-06-01" \
+    -d '{
+        "model": "gemma-4-e4b",
+        "max_tokens": 1024,
+        "stream": true,
+        "messages": [
+            {"role": "user", "content": "Write a haiku about Rust programming."}
+        ]
+    }'
+
+# With tool calling
+curl http://localhost:9090/v1/messages \
+    -H "Content-Type: application/json" \
+    -H "x-api-key: not-needed" \
+    -H "anthropic-version: 2023-06-01" \
+    -d '{
+        "model": "gemma-4-e4b",
+        "max_tokens": 1024,
+        "tools": [
+            {
+                "name": "get_weather",
+                "description": "Get the weather for a location",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string", "description": "City name"}
+                    },
+                    "required": ["location"]
+                }
+            }
+        ],
+        "messages": [
+            {"role": "user", "content": "What is the weather in San Francisco?"}
+        ]
+    }'
+```
+
+The request is translated to OpenAI format, forwarded to `llama-server`, and the response is translated back to Anthropic format. Tool definitions, tool calls, and content blocks are mapped bidirectionally.
+
+### Responses API — Function Tools
+
+The Responses API supports function tools with `tool_choice` and streaming:
+
+```bash
+curl http://localhost:9090/v1/responses \
+    -H "Content-Type: application/json" \
+    -d '{
+        "model": "gemma-4-e4b",
+        "input": "What is the weather in Tokyo?",
+        "tools": [
+            {
+                "type": "function",
+                "name": "get_weather",
+                "description": "Get current weather for a location",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "location": {"type": "string"}
+                    },
+                    "required": ["location"]
+                }
+            }
+        ],
+        "tool_choice": "auto"
+    }'
+```
+
+Function tools are translated to/from Chat Completions format. Function calls are returned as top-level output items. Streaming events include `response.output_item.added`, `response.content_part.delta`, and `response.completed`.
 
 ### API Explorer (Swagger UI)
 

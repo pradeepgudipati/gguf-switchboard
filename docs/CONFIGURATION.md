@@ -264,25 +264,88 @@ Search, browse, and download GGUF models from Hugging Face:
 
 ```bash
 # Search HF Hub for GGUF models
-./gguf-switchboard models search "Qwen3.5 9B"
+gguf-switchboard models search "Qwen3.5 9B"
+
+# Limit results
+gguf-switchboard models search "Qwen3.5 9B" --limit 5
+
+# Override RAM bandwidth for speed estimates (GB/s)
+gguf-switchboard models search "Qwen3.5 9B" --ram-bandwidth-gbps 50
 
 # List .gguf files in a repo (with size and quantization)
-./gguf-switchboard models files lmstudio-community/Qwen3.5-9B-GGUF
+gguf-switchboard models files lmstudio-community/Qwen3.5-9B-GGUF
 
 # Download, validate, and register a model in one step
-./gguf-switchboard models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M
+gguf-switchboard models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M
 
 # Specify a destination directory and registry file
-./gguf-switchboard models pull bartowski/Qwen3.5-9B-GGUF --quant Q4_K_M --dir /models --registry models.toml
+gguf-switchboard models pull bartowski/Qwen3.5-9B-GGUF --quant Q4_K_M --dir /models --registry models.toml
+
+# Tune parallel aria2 connections (default 8, maximum 16)
+gguf-switchboard models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --connections 8
+
+# Skip the post-pull speed test
+gguf-switchboard models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --no-bench
+
+# Dry-run: show what the fit planner would generate without downloading
+gguf-switchboard models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --fit-dry-run
 ```
 
-`models pull` performs the complete workflow: fetches the repo tree, resolves `--quant` case-insensitively, streams the download with progress, validates the GGUF header, generates an alias, and merges into `models.toml`. Use an exact label such as `Q4_K_M`, a family such as `Q4` (preference order: `Q4_K_M`, `Q4_K_S`, `Q4_0`, `Q4_1`), `K_M` as a predictable alias for `Q4_K_M`, or `auto` to select the largest standalone quant that fits total system RAM plus NVIDIA VRAM with 20% runtime headroom. The running server picks up the new entry on the next `POST /v1/models/refresh` or restart.
+**`models search` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--limit N` | Maximum number of repositories to return (default `10`) |
+| `--ram-bandwidth-gbps N` | Override auto-detected RAM bandwidth for speed estimates (useful after `mbw`/`likwid-bench` measurement) |
+
+Search prints FIT/SPEED/BALANCED/PRECISION scores for each result — see [docs/QUANT_SCORING.md](QUANT_SCORING.md) for the exact formulas.
+
+**`models pull` flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--quant QUANT` | Quantization to download: exact label (`Q4_K_M`), family (`Q4`), predictable alias (`K_M`), or `auto` (largest fitting quant) |
+| `--dir PATH` | Destination directory for GGUF files (default: `models_dir` from registry) |
+| `--registry PATH` | Registry file to merge into (default: `models.toml` next to config) |
+| `--connections N` | Parallel aria2c connections (1–16, default `8`) |
+| `--no-bench` | Skip the post-pull speed test |
+| `--fit-dry-run` | Show what the fit planner would generate (context_size, ngl, extra_args) without downloading |
+
+`models pull` performs the complete workflow: fetches the repo tree, resolves `--quant` case-insensitively, streams the download with progress, validates the GGUF header, generates an alias, runs the fit planner to generate context_size/ngl/extra_args, and merges into `models.toml`. Use an exact label such as `Q4_K_M`, a family such as `Q4` (preference order: `Q4_K_M`, `Q4_K_S`, `Q4_0`, `Q4_1`), `K_M` as a predictable alias for `Q4_K_M`, or `auto` to select the largest standalone quant that fits total system RAM plus NVIDIA VRAM with 20% runtime headroom. The running server picks up the new entry on the next `POST /v1/models/refresh` or restart.
 
 Set `HF_TOKEN` in the environment for gated models:
 
 ```bash
-HF_TOKEN=hf_... ./gguf-switchboard models pull meta-llama/Llama-3-70B-GGUF --quant Q4_K_M
+HF_TOKEN=hf_... gguf-switchboard models pull meta-llama/Llama-3-70B-GGUF --quant Q4_K_M
 ```
+
+**`models search` output format:**
+
+```
+Hardware: System RAM 32.0 GiB | NVIDIA VRAM 24.0 GiB | Total 56.0 GiB
+Speed model inputs: GPU bandwidth 1008 GB/s (NVIDIA GeForce RTX 4090) | RAM bandwidth 40 GB/s (assumed) | GPU efficiency 0.55 | CPU efficiency 0.35
+
+REPO                                               | FILES |     SIZE | FIT | CONTEXT    | ARCH  | SPEED            | BALANCED               | PRECISION    | QUANT
+bartowski/Qwen3.5-9B-GGUF                          |    24 |  9421 MB | 100 | 32768 tok  | qwen3 | Q4_K_M ~127tok/s | Q5_K_M ~91tok/s/~98.9% | Q6_K ~99.6%  | Q2_K,Q3_K_M,Q4_K_M,Q5_K_M,Q6_K,Q8_0
+unsloth/Muse-Glimmer-30B-GGUF                      |    20 | 27855 MB | 100 | 131072 tok | muse-  | IQ2_XXS ~52tok/s | Q5_K_XL ~25tok/s/~98.6%| Q8_0 ~99.9%  | IQ2_XXS,IQ2_XS,IQ2_M,Q2_K_XL,...
+                                                     glimmer
+FIT: 0-100 memory-fit score (100 = comfortable headroom; 0 = does not fit RAM+VRAM). SPEED/PRECISION: the quant that maximizes each — tok/s from a memory-bandwidth model (verify against `llama-bench` on your machine), quality % from published per-quant perplexity measurements ("~" = extrapolated, not directly measured for this architecture). BALANCED: the quant with the best average of speed and quality, both normalized to this model's own quant options — a middle ground when you don't want either extreme. See docs/QUANT_SCORING.md for methodology and sources; override RAM bandwidth with --ram-bandwidth-gbps if you've measured your own.
+Try: ggs models pull bartowski/Qwen3.5-9B-GGUF --quant Q4_K_M   (fastest, ~127 tok/s est.)
+     ggs models pull bartowski/Qwen3.5-9B-GGUF --quant Q5_K_M   (balanced, ~91 tok/s / ~98.9% quality est.)
+     ggs models pull bartowski/Qwen3.5-9B-GGUF --quant Q6_K   (least precision loss, ~99.6% quality est.)
+```
+
+| Column | Description |
+|--------|-------------|
+| `FIT` | 0–100 memory-fit score (100 = comfortable headroom, 0 = doesn't fit) |
+| `SPEED` | Fastest quant with estimated tok/s |
+| `BALANCED` | Quant at the size midpoint of fitting options (speed/precision trade-off) |
+| `PRECISION` | Least-lossy quant with quality score (% of fp16 quality retained) |
+| `QUANT` | All fitting quants ordered from smallest to largest |
+
+The footer legend explains each column. The `"~"` prefix on SPEED and PRECISION values means the estimate is extrapolated, not directly measured for that architecture. The `Try:` lines at the end suggest the fastest, balanced, and least precision loss quants with pull commands.
+
+When a repo has FIT=0 (doesn't fit RAM+VRAM), SPEED/BALANCED/PRECISION show `-` and QUANT is empty — the repo is listed but no recommendations are made.
 
 #### `discover-models`, `sync-hf-metadata`, and `export-registry` CLI
 
@@ -406,6 +469,7 @@ priority = false
 | `switch_strategy` | `unload_first` (default): stop the resident model before starting the next so it gets the whole GPU; previous model is re-loaded if the switch fails. `load_first`: start the next model while the previous is still resident — only sensible when VRAM can hold both, otherwise the new model OOMs into the fallback ladder and loads slowly / partly on CPU |
 | `prewarm_recent_models` | After each load, re-read the GGUF files of the N most recently used other models into the OS page cache (background, cancelled when a real load starts). Speeds up switching back when RAM ≫ combined model sizes. Default `0` (off) |
 | `priority_load_cooldown_secs` | Seconds to skip priority-model reload after a failed load (default `300`) |
+| `models_rescan_interval_secs` | Seconds between automatic model-directory rescans (default `86400` = daily). `0` disables. |
 
 ### Context size (`-c`)
 
@@ -463,3 +527,69 @@ If the file fits in usable VRAM, all layers go on GPU; otherwise `-ngl` is scale
 auto_ngl = true
 vram_gb = 12   # fallback when nvidia-smi is missing
 ```
+
+### ModelFitPlanner (`[fit]` section)
+
+An opt-in hardware-aware preflight planner that inspects GPU topology, free VRAM, and model metadata before every load to produce a safe launch profile. On OOM, it advances through a bounded fallback ladder instead of blindly retrying.
+
+```toml
+# config.toml
+[fit]
+enabled = false          # opt-in (default: false)
+vram_reserve_mb = 2048   # safety headroom subtracted from free VRAM (MB)
+multi_gpu = "auto"       # "auto" detects GPUs and computes tensor-split from free VRAM
+split_mode = "layer"     # "layer" (recommended), "row", or "none"
+max_attempts = 5         # maximum load attempts before giving up
+cache_profiles = true    # persist successful profiles to model-profiles.json
+```
+
+| Field | Description |
+|-------|-------------|
+| `fit.enabled` | When `true`, the planner runs before every model load to produce safe launch params. Default `false`. |
+| `fit.vram_reserve_mb` | MB of free VRAM reserved for KV cache and overhead. Default `2048`. |
+| `fit.multi_gpu` | Multi-GPU strategy: `"auto"` detects GPUs and computes tensor-split from free VRAM. Default `"auto"`. |
+| `fit.split_mode` | GPU split mode for multi-GPU: `"layer"` (recommended), `"row"`, or `"none"`. Default `"layer"`. |
+| `fit.max_attempts` | Maximum fallback ladder attempts before giving up. Default `5`. |
+| `fit.cache_profiles` | When `true`, successful load profiles are persisted to `/var/lib/gguf-switchboard/model-profiles.json` so subsequent loads skip the fallback ladder entirely. Default `true`. |
+
+When `fit.enabled = true`, the planner produces a `FitPlan` with context size, nGL, split mode, and KV cache type. On OOM, it advances through a bounded degradation sequence:
+
+1. Requested context + default KV + auto-fit GPU
+2. Requested context + Q8 KV + auto-fit GPU
+3. 75% context + Q8 KV + auto-fit GPU
+4. 50% context + Q8 KV + auto-fit GPU
+5. 25% context + Q8 KV + reduced GPU offload
+
+The minimum context is clamped to 4096. Cached profiles (`model-profiles.json`) let subsequent loads skip the ladder entirely when the same model + context combination has been loaded successfully before.
+
+**Overrides:** Per-model `ngl` or `-ngl` in `extra_args` pins GPU layers and disables auto-fitting for that model. `context_size` on a `[[models]]` entry also overrides the planner's context recommendation.
+
+### Per-model advanced fields
+
+These fields on `[[models]]` entries control the fit planner and embedding behavior per model:
+
+```toml
+[[models]]
+alias = "my-model"
+file = "my-model-Q4_K_M.gguf"
+# ... standard fields ...
+
+# Fit planner overrides
+gpu_fit = "auto"           # "auto" or "manual" — override fit planner for this model
+split_mode = "layer"       # per-model split mode override ("layer", "row", "none")
+kv_cache_type = "q8_0"     # per-model KV cache type override ("q8_0", "q4_0")
+
+# Embedding batch overrides
+batch_size = 2048          # logical batch size (-b); important for large embedding inputs
+ubatch_size = 2048         # physical micro-batch size (-ub); must be <= batch_size
+```
+
+| Field | Description |
+|-------|-------------|
+| `[[models]].gpu_fit` | Override the fit planner's GPU strategy for this model: `"auto"` (use planner) or `"manual"` (skip planning). |
+| `[[models]].split_mode` | Per-model GPU split mode override: `"layer"`, `"row"`, or `"none"`. Overrides `fit.split_mode`. |
+| `[[models]].kv_cache_type` | Per-model KV cache type override: `"q8_0"`, `"q4_0"`, etc. Overrides the planner's KV cache recommendation. |
+| `[[models]].batch_size` | Logical batch size (`-b`). Controls maximum tokens processed in a single batch. Important for embedding models with large inputs. Default: llama.cpp built-in. |
+| `[[models]].ubatch_size` | Physical micro-batch size (`-ub`). Must be `<= batch_size`. Critical for embedding models. Default: llama.cpp built-in. |
+
+`batch_size` and `ubatch_size` are primarily useful for embedding models where large input arrays need to be split into manageable batches. When set, they are passed as `-b` and `-ub` flags to `llama-server`.

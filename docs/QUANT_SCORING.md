@@ -147,6 +147,47 @@ having to reconcile two differently-scaled scores at all.
 from both the fastest and least-lossy picks, as a third `ggs models pull`
 suggestion line.
 
+## Output format
+
+`models search` prints a header with hardware detection and speed model
+inputs, then an aligned table with these columns:
+
+| Column | Content |
+|--------|---------|
+| `REPO` | Hugging Face repository id |
+| `FILES` | Number of `.gguf` files in the repo |
+| `SIZE` | Total size of all standalone GGUF files |
+| `FIT` | 0–100 memory-fit score (100 = comfortable headroom; 0 = doesn't fit) |
+| `CONTEXT` | Maximum context window from GGUF metadata |
+| `ARCH` | Model architecture from GGUF metadata |
+| `SPEED` | Fastest quant with estimated tok/s (e.g. `Q4_K_M ~127tok/s`) |
+| `BALANCED` | Middle-ground quant with tok/s and quality % (e.g. `Q5_K_M ~91tok/s/~98.9%`) |
+| `PRECISION` | Least-lossy quant with quality % (e.g. `Q6_K ~99.6%`) |
+| `QUANT` | All fitting quants ordered from smallest to largest |
+
+The footer legend explains each column in plain language:
+
+```
+FIT: 0-100 memory-fit score (100 = comfortable headroom; 0 = does not fit RAM+VRAM). SPEED/PRECISION: the quant that maximizes each — tok/s from a memory-bandwidth model (verify against `llama-bench` on your machine), quality % from published per-quant perplexity measurements ("~" = extrapolated, not directly measured for this architecture). BALANCED: the quant with the best average of speed and quality, both normalized to this model's own quant options — a middle ground when you don't want either extreme. See docs/QUANT_SCORING.md for methodology and sources; override RAM bandwidth with --ram-bandwidth-gbps if you've measured your own.
+```
+
+The `"~"` prefix on SPEED and PRECISION values means the estimate is
+extrapolated, not directly measured for that architecture. The `Try:` lines
+at the end suggest the fastest, balanced, and least precision loss quants
+with pull commands:
+
+```
+Try: ggs models pull bartowski/Qwen3.5-9B-GGUF --quant Q4_K_M   (fastest, ~127 tok/s est.)
+     ggs models pull bartowski/Qwen3.5-9B-GGUF --quant Q5_K_M   (balanced, ~91 tok/s / ~98.9% quality est.)
+     ggs models pull bartowski/Qwen3.5-9B-GGUF --quant Q6_K   (least precision loss, ~99.6% quality est.)
+```
+
+When a repo has FIT=0 (doesn't fit RAM+VRAM), SPEED/BALANCED/PRECISION show
+`-` and QUANT is empty — the repo is listed but no recommendations are made.
+Auxiliary speculative-decoding drafters require a separate target model, so
+they show FIT=0 and all recommendation columns as `-` even when they fit
+memory, because they cannot be loaded standalone.
+
 ## What this deliberately does not do
 
 - No AMD/Apple GPU bandwidth table — matches this codebase's existing
