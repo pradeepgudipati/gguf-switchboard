@@ -40,9 +40,10 @@ pub async fn cmd_search(args: &[String]) -> Result<(), Box<dyn std::error::Error
             }
             "--ram-bandwidth-gbps" => {
                 if let Some(val) = args.get(i + 1) {
-                    ram_bandwidth_override = Some(val.parse().map_err(|_| {
-                        "models search: invalid value for --ram-bandwidth-gbps"
-                    })?);
+                    ram_bandwidth_override = Some(
+                        val.parse()
+                            .map_err(|_| "models search: invalid value for --ram-bandwidth-gbps")?,
+                    );
                     i += 2;
                 } else {
                     return Err("models search: missing value for --ram-bandwidth-gbps".into());
@@ -262,7 +263,9 @@ fn render_search_table(hits: &[Value], assessments: &[SearchAssessment]) -> Stri
                         .join(",")
                 })
                 .unwrap_or_else(|| "-".to_string());
-            (id, siblings, size_mb, fit, context, arch, speed, precision, quants)
+            (
+                id, siblings, size_mb, fit, context, arch, speed, precision, quants,
+            )
         })
         .collect::<Vec<_>>();
 
@@ -1728,17 +1731,15 @@ mod tests {
         assert!(header.contains("SPEED"));
         assert!(header.contains("PRECISION"));
         assert!(!header.contains("SUPPORTED"));
+        assert!(table.lines().any(|line| line.contains("org/gemma-small")
+            && line.contains("95")
+            && line.contains("42tok/s")
+            && line.contains("96.7%")));
         assert!(
             table
                 .lines()
-                .any(|line| line.contains("org/gemma-small")
-                    && line.contains("95")
-                    && line.contains("42tok/s")
-                    && line.contains("96.7%"))
+                .any(|line| { line.contains("org/gemma-large") && line.trim_end().ends_with('-') })
         );
-        assert!(table.lines().any(|line| {
-            line.contains("org/gemma-large") && line.trim_end().ends_with('-')
-        }));
     }
 
     #[test]

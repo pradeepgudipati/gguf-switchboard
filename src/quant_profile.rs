@@ -125,8 +125,9 @@ pub struct QuantQuality {
 pub fn quant_quality(quant: &str) -> QuantQuality {
     let upper = quant.trim().to_ascii_uppercase();
 
-    if let Some(&(_, pct, confidence)) =
-        QUANT_PPL_INCREASE_PCT.iter().find(|(label, _, _)| *label == upper)
+    if let Some(&(_, pct, confidence)) = QUANT_PPL_INCREASE_PCT
+        .iter()
+        .find(|(label, _, _)| *label == upper)
     {
         return build_quality(pct, confidence);
     }
@@ -344,8 +345,8 @@ pub fn estimate_speed(model_bytes: u64, hw: &HardwareCtx) -> SpeedEstimate {
         }
     } else {
         let offload_fraction = ((model_gb - usable_vram_gb) / model_gb).clamp(0.0, 1.0);
-        let effective_bandwidth = (1.0 - offload_fraction) * bandwidth_gbps
-            + offload_fraction * hw.ram_bandwidth_gbps;
+        let effective_bandwidth =
+            (1.0 - offload_fraction) * bandwidth_gbps + offload_fraction * hw.ram_bandwidth_gbps;
         let effective_efficiency = (1.0 - offload_fraction) * GPU_EFFICIENCY_FACTOR
             + offload_fraction * CPU_EFFICIENCY_FACTOR;
         SpeedEstimate {
@@ -488,7 +489,10 @@ mod tests {
         // 5 GB model, plenty of free VRAM.
         let estimate = estimate_speed(5_000_000_000, &hw);
         assert_eq!(estimate.mode, SpeedMode::FullGpu);
-        assert_eq!(estimate.gpu_name.as_deref(), Some("NVIDIA GeForce RTX 4090"));
+        assert_eq!(
+            estimate.gpu_name.as_deref(),
+            Some("NVIDIA GeForce RTX 4090")
+        );
         // (1008 / 5) * 0.55 ≈ 110.9 tok/s
         assert!((estimate.tokens_per_sec - 110.88).abs() < 1.0);
     }
