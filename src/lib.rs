@@ -15,6 +15,7 @@ pub mod metrics;
 pub mod ngl;
 pub mod openapi_models;
 pub mod proxy;
+pub mod quant_profile;
 pub mod sanitize;
 pub mod scheduler;
 pub mod state;

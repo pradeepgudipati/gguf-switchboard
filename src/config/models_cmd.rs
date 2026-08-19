@@ -13,15 +13,17 @@ use super::models_registry::{
     ModelsRegistry, RegistryEntry, alias_from_filename, validate_gguf_model,
 };
 use crate::errors::RuntimeError;
+use crate::quant_profile::{self, HardwareCtx};
 
 const HF_MODELS_API: &str = "https://huggingface.co/api/models";
 
 // ── models search ────────────────────────────────────────────────────────────
 
-/// `gguf-switchboard models search <query> [--limit N]`
+/// `gguf-switchboard models search <query> [--limit N] [--ram-bandwidth-gbps N]`
 pub async fn cmd_search(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut query: Option<String> = None;
     let mut limit: u32 = 10;
+    let mut ram_bandwidth_override: Option<f64> = None;
 
     let mut i = 1; // args[0] is "search"
     while i < args.len() {
@@ -34,6 +36,16 @@ pub async fn cmd_search(args: &[String]) -> Result<(), Box<dyn std::error::Error
                     i += 2;
                 } else {
                     return Err("models search: missing value for --limit".into());
+                }
+            }
+            "--ram-bandwidth-gbps" => {
+                if let Some(val) = args.get(i + 1) {
+                    ram_bandwidth_override = Some(val.parse().map_err(|_| {
+                        "models search: invalid value for --ram-bandwidth-gbps"
+                    })?);
+                    i += 2;
+                } else {
+                    return Err("models search: missing value for --ram-bandwidth-gbps".into());
                 }
             }
             arg if arg.starts_with('-') => {
@@ -63,14 +75,16 @@ pub async fn cmd_search(args: &[String]) -> Result<(), Box<dyn std::error::Error
     let capacity_bytes = total_ram_mb
         .saturating_add(total_vram_mb)
         .saturating_mul(1024 * 1024);
+    let hw = HardwareCtx::detect(ram_bandwidth_override);
 
     let estimates = stream::iter(hits.iter().enumerate().map(|(index, hit)| {
         let client = client.clone();
+        let hw = hw.clone();
         let repo = hit.get("id").and_then(Value::as_str).map(str::to_string);
         async move {
             let assessment = match repo {
                 Some(repo) => match hf_download::fetch_repo_tree(&client, &repo).await {
-                    Ok(entries) => assess_repository(hit, &entries, capacity_bytes),
+                    Ok(entries) => assess_repository(hit, &entries, capacity_bytes, &hw),
                     Err(_) => SearchAssessment::default(),
                 },
                 None => SearchAssessment::default(),
@@ -88,10 +102,34 @@ pub async fn cmd_search(args: &[String]) -> Result<(), Box<dyn std::error::Error
     }
 
     println!("{}", format_hardware_summary(total_ram_mb, total_vram_mb));
+    if let Some(gpu) = hw.gpus.first() {
+        let (bandwidth, confidence) = quant_profile::gpu_bandwidth_gbps(&gpu.name);
+        println!(
+            "Speed model inputs: GPU bandwidth {:.0} GB/s ({}{}) | RAM bandwidth {:.0} GB/s (assumed) | GPU efficiency 0.55 | CPU efficiency 0.35",
+            bandwidth,
+            gpu.name,
+            if confidence == quant_profile::Confidence::Extrapolated {
+                ", unrecognized model — fallback estimate"
+            } else {
+                ""
+            },
+            hw.ram_bandwidth_gbps,
+        );
+    } else {
+        println!(
+            "Speed model inputs: no NVIDIA GPU detected — CPU-only estimate at {:.0} GB/s RAM bandwidth (assumed) | CPU efficiency 0.35",
+            hw.ram_bandwidth_gbps
+        );
+    }
     println!();
     print!("{}", render_search_table(&hits, &assessments));
     println!(
-        "Supported requires a standalone GGUF and is estimated from total RAM + NVIDIA VRAM with 20% runtime headroom."
+        "FIT: 0-100 memory-fit score (100 = comfortable headroom; 0 = does not fit RAM+VRAM). \
+         SPEED/PRECISION: the quant that maximizes each — tok/s from a memory-bandwidth model \
+         (verify against `llama-bench` on your machine), quality % from published per-quant \
+         perplexity measurements (\"~\" = extrapolated, not directly measured for this \
+         architecture). See docs/QUANT_SCORING.md for methodology and sources; override RAM \
+         bandwidth with --ram-bandwidth-gbps if you've measured your own."
     );
     if let Some(command) = sample_pull_command(&hits, &assessments) {
         println!("{command}");
@@ -142,8 +180,20 @@ fn format_hardware_summary(total_ram_mb: u64, total_vram_mb: u64) -> String {
 fn sample_pull_command(hits: &[Value], assessments: &[SearchAssessment]) -> Option<String> {
     hits.iter().zip(assessments).find_map(|(hit, assessment)| {
         let repository = hit.get("id").and_then(Value::as_str)?;
-        let quant = assessment.recommended_quant.as_deref()?;
-        Some(format!("Try: ggs models pull {repository} --quant {quant}"))
+        let fastest = assessment.fastest.as_ref()?;
+        let mut lines = vec![format!(
+            "Try: ggs models pull {repository} --quant {}   (fastest, ~{:.0} tok/s est.)",
+            fastest.quant, fastest.tokens_per_sec
+        )];
+        if let Some(precision) = assessment.best_precision.as_ref()
+            && precision.quant != fastest.quant
+        {
+            lines.push(format!(
+                "     ggs models pull {repository} --quant {}   (least precision loss, ~{:.1}% quality est.)",
+                precision.quant, precision.quality_score
+            ));
+        }
+        Some(lines.join("\n"))
     })
 }
 
@@ -190,11 +240,17 @@ fn render_search_table(hits: &[Value], assessments: &[SearchAssessment]) -> Stri
                 .unwrap_or("")
                 .to_string();
             let assessment = assessments.get(index);
-            let support = if assessment.is_some_and(|value| value.supported) {
-                "Yes".to_string()
-            } else {
-                "No".to_string()
-            };
+            let fit = assessment
+                .map(|value| format!("{:.0}", value.fit_score))
+                .unwrap_or_else(|| "-".to_string());
+            let speed = assessment
+                .and_then(|value| value.fastest.as_ref())
+                .map(|f| format!("{} ~{:.0}tok/s", f.quant, f.tokens_per_sec))
+                .unwrap_or_else(|| "-".to_string());
+            let precision = assessment
+                .and_then(|value| value.best_precision.as_ref())
+                .map(|p| format!("{} ~{:.1}%", p.quant, p.quality_score))
+                .unwrap_or_else(|| "-".to_string());
             let quants = assessment
                 .filter(|value| !value.quants.is_empty())
                 .map(|value| {
@@ -206,7 +262,7 @@ fn render_search_table(hits: &[Value], assessments: &[SearchAssessment]) -> Stri
                         .join(",")
                 })
                 .unwrap_or_else(|| "-".to_string());
-            (id, siblings, size_mb, support, context, arch, quants)
+            (id, siblings, size_mb, fit, context, arch, speed, precision, quants)
         })
         .collect::<Vec<_>>();
 
@@ -218,7 +274,9 @@ fn render_search_table(hits: &[Value], assessments: &[SearchAssessment]) -> Stri
                 2 => &row.2,
                 3 => &row.3,
                 4 => &row.4,
-                _ => &row.5,
+                5 => &row.5,
+                6 => &row.6,
+                _ => &row.7,
             };
             width.max(value.len())
         })
@@ -226,21 +284,23 @@ fn render_search_table(hits: &[Value], assessments: &[SearchAssessment]) -> Stri
     let repo_width = width("REPO", 0);
     let files_width = width("FILES", 1);
     let size_width = width("SIZE", 2);
-    let support_width = width("SUPPORTED", 3);
+    let fit_width = width("FIT", 3);
     let context_width = width("CONTEXT", 4);
     let arch_width = width("ARCH", 5);
+    let speed_width = width("SPEED", 6);
+    let precision_width = width("PRECISION", 7);
 
     let mut output = String::new();
     writeln!(
         output,
-        "{:<repo_width$} | {:>files_width$} | {:>size_width$} | {:<support_width$} | {:<context_width$} | {:<arch_width$} | QUANT",
-        "REPO", "FILES", "SIZE", "SUPPORTED", "CONTEXT", "ARCH"
+        "{:<repo_width$} | {:>files_width$} | {:>size_width$} | {:>fit_width$} | {:<context_width$} | {:<arch_width$} | {:<speed_width$} | {:<precision_width$} | QUANT",
+        "REPO", "FILES", "SIZE", "FIT", "CONTEXT", "ARCH", "SPEED", "PRECISION"
     )
     .expect("writing to a String cannot fail");
-    for (repo, files, size, support, context, arch, quants) in rows {
+    for (repo, files, size, fit, context, arch, speed, precision, quants) in rows {
         writeln!(
             output,
-            "{repo:<repo_width$} | {files:>files_width$} | {size:>size_width$} | {support:<support_width$} | {context:<context_width$} | {arch:<arch_width$} | {quants}"
+            "{repo:<repo_width$} | {files:>files_width$} | {size:>size_width$} | {fit:>fit_width$} | {context:<context_width$} | {arch:<arch_width$} | {speed:<speed_width$} | {precision:<precision_width$} | {quants}"
         )
         .expect("writing to a String cannot fail");
     }
@@ -268,11 +328,24 @@ pub async fn cmd_files(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     let (models, mmproj): (Vec<_>, Vec<_>) = entries.iter().partition(|e| is_model_gguf(&e.path));
 
     if !models.is_empty() {
-        println!("  {:<44} {:<12} QUANT", "FILENAME", "SIZE");
+        let hw = HardwareCtx::detect(None);
+        println!(
+            "  {:<44} {:<12} {:<10} {:<10} QUANT",
+            "FILENAME", "SIZE", "SPEED", "PRECISION"
+        );
         for entry in &models {
             let size = format_bytes(entry.size);
             let quant = extract_quant(&entry.path);
-            println!("  {:<44} {:<12} {}", entry.path, size, quant);
+            let speed = quant_profile::estimate_speed(entry.size, &hw);
+            let quality = quant_profile::quant_quality(&quant);
+            println!(
+                "  {:<44} {:<12} {:<10} {:<10} {}",
+                entry.path,
+                size,
+                format!("~{:.0}tok/s", speed.tokens_per_sec),
+                format!("~{:.1}%", quality.quality_score),
+                quant
+            );
         }
     }
 
@@ -966,11 +1039,27 @@ struct ModelOption {
     bytes: u64,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// A quant recommended for a specific reason (fastest, or least precision loss).
+#[derive(Debug, Clone, PartialEq)]
+struct QuantRecommendation {
+    quant: String,
+    tokens_per_sec: f64,
+    quality_score: f32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq)]
 struct SearchAssessment {
     supported: bool,
     quants: Vec<ModelOption>,
     recommended_quant: Option<String>,
+    /// 0–100 memory-fit score for the best-fitting discovered quant. See
+    /// [`quant_profile::fit_score`] — continuous replacement for the old
+    /// binary "Supported: Yes/No".
+    fit_score: f32,
+    /// The supported quant with the highest estimated tokens/sec.
+    fastest: Option<QuantRecommendation>,
+    /// The supported quant with the highest precision-retention score.
+    best_precision: Option<QuantRecommendation>,
 }
 
 fn complete_model_options(entries: &[HfTreeEntry]) -> Vec<ModelOption> {
@@ -1150,12 +1239,22 @@ fn assess_repository(
     hit: &Value,
     entries: &[HfTreeEntry],
     capacity_bytes: u64,
+    hw: &HardwareCtx,
 ) -> SearchAssessment {
     if !is_standalone_model(hit, entries) {
         return SearchAssessment::default();
     }
 
-    let quants = complete_model_options(entries)
+    let all_options = complete_model_options(entries);
+    // Best-case fit score across every discovered quant (not just the ones
+    // that clear the hard capacity filter below), so a repo that's *close* to
+    // fitting still reports a meaningful score instead of a flat 0.
+    let fit_score = all_options
+        .iter()
+        .map(|option| quant_profile::fit_score(option.bytes, capacity_bytes))
+        .fold(0.0_f32, f32::max);
+
+    let quants = all_options
         .into_iter()
         .filter(|option| is_supported(Some(option.bytes), capacity_bytes))
         .collect::<Vec<_>>();
@@ -1165,10 +1264,40 @@ fn assess_repository(
         .or_else(|| quants.last())
         .map(|option| option.quant.clone());
 
+    let mut fastest: Option<QuantRecommendation> = None;
+    let mut best_precision: Option<QuantRecommendation> = None;
+    for option in &quants {
+        let speed = quant_profile::estimate_speed(option.bytes, hw);
+        let quality = quant_profile::quant_quality(&option.quant);
+        if fastest
+            .as_ref()
+            .is_none_or(|current| speed.tokens_per_sec > current.tokens_per_sec)
+        {
+            fastest = Some(QuantRecommendation {
+                quant: option.quant.clone(),
+                tokens_per_sec: speed.tokens_per_sec,
+                quality_score: quality.quality_score,
+            });
+        }
+        if best_precision
+            .as_ref()
+            .is_none_or(|current| quality.quality_score > current.quality_score)
+        {
+            best_precision = Some(QuantRecommendation {
+                quant: option.quant.clone(),
+                tokens_per_sec: speed.tokens_per_sec,
+                quality_score: quality.quality_score,
+            });
+        }
+    }
+
     SearchAssessment {
         supported: !quants.is_empty(),
         quants,
         recommended_quant,
+        fit_score,
+        fastest,
+        best_precision,
     }
 }
 
@@ -1263,12 +1392,13 @@ fn dedupe_alias(alias: &str, used: &HashSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelOption, SearchAssessment, assess_repository, chat_url_from_config,
-        complete_model_options, extract_quant, extract_speed_stats, format_hardware_summary,
-        is_standalone_model, is_supported, parse_connections, refresh_url_from_config,
-        render_search_table, sample_pull_command, select_quant_entry,
+        ModelOption, QuantRecommendation, SearchAssessment, assess_repository,
+        chat_url_from_config, complete_model_options, extract_quant, extract_speed_stats,
+        format_hardware_summary, is_standalone_model, is_supported, parse_connections,
+        refresh_url_from_config, render_search_table, sample_pull_command, select_quant_entry,
     };
     use crate::config::hf_download::HfTreeEntry;
+    use crate::quant_profile::HardwareCtx;
 
     fn tree_entry(path: &str, size: u64) -> HfTreeEntry {
         HfTreeEntry {
@@ -1506,7 +1636,7 @@ mod tests {
             tree_entry("model-Q8_0.gguf", 8_000),
         ];
 
-        let assessment = assess_repository(&hit, &entries, 4_800);
+        let assessment = assess_repository(&hit, &entries, 4_800, &HardwareCtx::default());
 
         assert!(assessment.supported);
         assert_eq!(
@@ -1529,7 +1659,7 @@ mod tests {
             tree_entry("model-Q6_K.gguf", 6_000),
         ];
 
-        let assessment = assess_repository(&hit, &entries, 7_200);
+        let assessment = assess_repository(&hit, &entries, 7_200, &HardwareCtx::default());
 
         assert_eq!(assessment.recommended_quant.as_deref(), Some("Q6_K"));
     }
@@ -1539,7 +1669,7 @@ mod tests {
         let hit = serde_json::json!({"id": "org/drafter", "tags": ["draft-model"], "gguf": {"architecture": "dflash"}});
         let entries = [tree_entry("model-Q4_K_M.gguf", 4_000)];
 
-        let assessment = assess_repository(&hit, &entries, 4_800);
+        let assessment = assess_repository(&hit, &entries, 4_800, &HardwareCtx::default());
 
         assert!(!assessment.supported);
         assert!(assessment.quants.is_empty());
@@ -1559,7 +1689,7 @@ mod tests {
     }
 
     #[test]
-    fn search_table_renders_supported_header_and_values() {
+    fn search_table_renders_fit_score_speed_and_precision() {
         let hits = vec![
             serde_json::json!({
                 "id": "org/gemma-small",
@@ -1577,22 +1707,38 @@ mod tests {
                     bytes: 4_000,
                 }],
                 recommended_quant: Some("Q4_K_M".to_string()),
+                fit_score: 95.0,
+                fastest: Some(QuantRecommendation {
+                    quant: "Q4_K_M".to_string(),
+                    tokens_per_sec: 42.0,
+                    quality_score: 96.7,
+                }),
+                best_precision: Some(QuantRecommendation {
+                    quant: "Q4_K_M".to_string(),
+                    tokens_per_sec: 42.0,
+                    quality_score: 96.7,
+                }),
             },
             SearchAssessment::default(),
         ];
         let table = render_search_table(&hits, &assessments);
 
-        assert!(table.lines().next().unwrap().contains("SUPPORTED"));
+        let header = table.lines().next().unwrap();
+        assert!(header.contains("FIT"));
+        assert!(header.contains("SPEED"));
+        assert!(header.contains("PRECISION"));
+        assert!(!header.contains("SUPPORTED"));
         assert!(
             table
                 .lines()
-                .any(|line| line.contains("org/gemma-small") && line.contains("Yes"))
+                .any(|line| line.contains("org/gemma-small")
+                    && line.contains("95")
+                    && line.contains("42tok/s")
+                    && line.contains("96.7%"))
         );
-        assert!(
-            table
-                .lines()
-                .any(|line| line.contains("org/gemma-large") && line.contains("No"))
-        );
+        assert!(table.lines().any(|line| {
+            line.contains("org/gemma-large") && line.trim_end().ends_with('-')
+        }));
     }
 
     #[test]
@@ -1617,6 +1763,13 @@ mod tests {
                     bytes: 4_000,
                 }],
                 recommended_quant: Some("Q4_K_M".to_string()),
+                fit_score: 95.0,
+                fastest: Some(QuantRecommendation {
+                    quant: "Q4_K_M".to_string(),
+                    tokens_per_sec: 42.0,
+                    quality_score: 96.7,
+                }),
+                best_precision: None,
             },
             SearchAssessment::default(),
         ];
@@ -1637,18 +1790,49 @@ mod tests {
     }
 
     #[test]
-    fn search_output_builds_q4_pull_command_and_omits_empty_recommendation() {
+    fn search_output_builds_speed_and_precision_pull_commands() {
         let hits = vec![serde_json::json!({"id": "org/model"})];
-        let supported = [SearchAssessment {
+        let both_recommendations = [SearchAssessment {
             supported: true,
             quants: vec![],
             recommended_quant: Some("Q4_K_M".to_string()),
+            fit_score: 90.0,
+            fastest: Some(QuantRecommendation {
+                quant: "Q4_K_M".to_string(),
+                tokens_per_sec: 42.0,
+                quality_score: 96.7,
+            }),
+            best_precision: Some(QuantRecommendation {
+                quant: "Q6_K".to_string(),
+                tokens_per_sec: 28.0,
+                quality_score: 99.6,
+            }),
         }];
 
-        assert_eq!(
-            sample_pull_command(&hits, &supported).as_deref(),
-            Some("Try: ggs models pull org/model --quant Q4_K_M")
-        );
+        let command = sample_pull_command(&hits, &both_recommendations).expect("command");
+        assert!(command.contains("--quant Q4_K_M") && command.contains("fastest"));
+        assert!(command.contains("--quant Q6_K") && command.contains("least precision loss"));
+
+        // Same quant wins both categories: only one line, no duplication.
+        let single_winner = [SearchAssessment {
+            supported: true,
+            quants: vec![],
+            recommended_quant: Some("Q4_K_M".to_string()),
+            fit_score: 90.0,
+            fastest: Some(QuantRecommendation {
+                quant: "Q4_K_M".to_string(),
+                tokens_per_sec: 42.0,
+                quality_score: 96.7,
+            }),
+            best_precision: Some(QuantRecommendation {
+                quant: "Q4_K_M".to_string(),
+                tokens_per_sec: 42.0,
+                quality_score: 96.7,
+            }),
+        }];
+        let command = sample_pull_command(&hits, &single_winner).expect("command");
+        assert_eq!(command.lines().count(), 1);
+
         assert_eq!(
             sample_pull_command(&hits, &[SearchAssessment::default()]),
             None

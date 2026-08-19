@@ -33,6 +33,7 @@ Also included:
 - **Live model rescan** — `POST /v1/models/refresh` plus a configurable daily watcher (`models_rescan_interval_secs`); merges new GGUFs without a full redeploy
 - **HF metadata enrichment** — fills empty `description` / context / VRAM / `capabilities` / `hf_repo` from Hugging Face on launch and rescan (`sync-hf-metadata` CLI also available)
 - **Model management** — `models search`, `models files`, and `models pull` for one-command GGUF discovery, download, validation, and registry from Hugging Face
+- **Quant scoring** — `models search`/`models files` score every discovered quant against your detected hardware: a 0–100 FIT score, an estimated tok/s from a memory-bandwidth model, and a precision-retention % from published per-quant perplexity data, then recommend the fastest and least-lossy quant separately (see [docs/QUANT_SCORING.md](docs/QUANT_SCORING.md))
 - **Kind-aware routing** — chat / completions / messages / responses require chat-like kinds; embeddings require `embedding` (and pass `--embeddings` to `llama-server`)
 - **Single-slot hot-swap** — One resident model; switches drain in-flight requests; failed switches roll back
 - **Memory-pressure eviction** — Unloads when system RAM crosses the critical threshold
@@ -220,6 +221,21 @@ gguf-switchboard models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M -
 # Skip the post-pull speed test
 gguf-switchboard models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --no-bench
 ```
+
+`models search` scores every discovered quant against your detected RAM/VRAM and prints the fastest and least-lossy one separately, instead of a flat "supported: yes/no":
+
+```
+Hardware: System RAM 32.0 GiB | NVIDIA VRAM 24.0 GiB | Total 56.0 GiB
+Speed model inputs: GPU bandwidth 1008 GB/s (NVIDIA GeForce RTX 4090) | RAM bandwidth 40 GB/s (assumed) | GPU efficiency 0.55 | CPU efficiency 0.35
+
+REPO                          | FILES | SIZE    | FIT | CONTEXT   | ARCH  | SPEED           | PRECISION   | QUANT
+bartowski/Qwen3.5-9B-GGUF     |    24 | 9421 MB | 100 | 32768 tok | qwen3 | Q4_K_M ~127tok/s | Q6_K ~99.6% | Q2_K,Q3_K_M,Q4_K_M,Q5_K_M,Q6_K,Q8_0
+...
+Try: ggs models pull bartowski/Qwen3.5-9B-GGUF --quant Q4_K_M   (fastest, ~127 tok/s est.)
+     ggs models pull bartowski/Qwen3.5-9B-GGUF --quant Q6_K   (least precision loss, ~99.6% quality est.)
+```
+
+FIT is a continuous 0–100 memory-fit score (replaces the old binary "Supported: Yes/No"). SPEED/PRECISION show whichever quant maximizes each dimension for your machine — see [docs/QUANT_SCORING.md](docs/QUANT_SCORING.md) for the exact formulas, sources, and how to override RAM bandwidth (`--ram-bandwidth-gbps`) with a measured value.
 
 Public downloads automatically use `aria2c` when available, then verify the expected size, Hugging Face LFS checksum, and GGUF metadata before registration. If Hugging Face rejects parallel range requests, the native downloader resumes the partial file. Authenticated downloads using `HF_TOKEN`, or systems without `aria2c`, use the native downloader directly. A successful pull refreshes a running gguf-switchboard server automatically and (unless `--no-bench`) runs a short chat completion to print prompt and generation tok/s.
 
