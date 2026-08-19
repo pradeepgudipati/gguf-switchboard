@@ -1,4 +1,5 @@
 pub mod llama_cpp;
+pub mod tool_probe;
 
 use std::pin::Pin;
 
