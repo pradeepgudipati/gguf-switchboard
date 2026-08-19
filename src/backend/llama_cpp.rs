@@ -263,7 +263,11 @@ impl Backend for LlamaCppBackend {
     ) -> Result<ChatCompletionResponse, RuntimeError> {
         let body = serde_json::to_value(&request)?;
         let resp = self.forward_json("/chat/completions", body).await?;
-        let response: ChatCompletionResponse = resp.json().await.map_err(|e| {
+        let mut raw: serde_json::Value = resp.json().await.map_err(|e| {
+            RuntimeError::BackendError(format!("Failed to parse backend response: {e}"))
+        })?;
+        super::tool_probe::normalize_tool_call_arguments(&mut raw);
+        let response: ChatCompletionResponse = serde_json::from_value(raw).map_err(|e| {
             RuntimeError::BackendError(format!("Failed to parse backend response: {e}"))
         })?;
         Ok(normalize_chat_response(response))
@@ -462,6 +466,16 @@ impl<T> SseLineParser<T> {
     }
 }
 
+/// Parse one SSE data payload into `T`, normalizing any object-valued
+/// `function.arguments` to a string first (the shape is generic over `T`,
+/// so this is a no-op for response types without `tool_calls`, e.g.
+/// `CompletionChunk`).
+fn parse_sse_json<T: serde::de::DeserializeOwned>(json_str: &str) -> Result<T, serde_json::Error> {
+    let mut value: serde_json::Value = serde_json::from_str(json_str)?;
+    super::tool_probe::normalize_tool_call_arguments(&mut value);
+    serde_json::from_value(value)
+}
+
 impl<T: serde::de::DeserializeOwned + Unpin> futures::Stream for SseLineParser<T> {
     type Item = Result<T, RuntimeError>;
 
@@ -497,7 +511,7 @@ impl<T: serde::de::DeserializeOwned + Unpin> futures::Stream for SseLineParser<T
                     continue;
                 }
 
-                match serde_json::from_str::<T>(json_str) {
+                match parse_sse_json::<T>(json_str) {
                     Ok(chunk) => return std::task::Poll::Ready(Some(Ok(chunk))),
                     Err(e) => {
                         debug!(error = %e, raw = %json_str, "Failed to parse SSE chunk, skipping");
@@ -533,7 +547,7 @@ impl<T: serde::de::DeserializeOwned + Unpin> futures::Stream for SseLineParser<T
                     if json_str == "[DONE]" || json_str.is_empty() {
                         return std::task::Poll::Ready(None);
                     }
-                    match serde_json::from_str::<T>(json_str) {
+                    match parse_sse_json::<T>(json_str) {
                         Ok(chunk) => return std::task::Poll::Ready(Some(Ok(chunk))),
                         Err(_) => return std::task::Poll::Ready(None),
                     }
@@ -541,5 +555,42 @@ impl<T: serde::de::DeserializeOwned + Unpin> futures::Stream for SseLineParser<T
                 std::task::Poll::Pending => return std::task::Poll::Pending,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tool_call_normalization_tests {
+    use serde_json::json;
+
+    // This test exercises the exact call shape `chat()` deserializes into
+    // `ChatCompletionResponse`, proving normalization must run before
+    // `serde_json::from_value::<ChatCompletionResponse>` or deserialization
+    // fails outright (FunctionCall.arguments is typed String).
+    #[test]
+    fn object_arguments_become_a_parseable_string_before_typed_deserialize() {
+        let mut raw = json!({
+            "id": "chatcmpl-1",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "test",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "echo", "arguments": {"message": "hello"}}
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        });
+        crate::backend::tool_probe::normalize_tool_call_arguments(&mut raw);
+        let response: crate::types::chat::ChatCompletionResponse =
+            serde_json::from_value(raw).expect("must deserialize after normalization");
+        let tool_calls = response.choices[0].message.tool_calls.as_ref().unwrap();
+        assert_eq!(tool_calls[0].function.arguments, "{\"message\":\"hello\"}");
     }
 }
