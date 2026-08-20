@@ -9,6 +9,7 @@ use crate::config::{
     Config, ModelConfig, ModelsRegistry, RescanResult, SyncSummary, sync_registry_from_hf,
 };
 use crate::db::TokenDb;
+use crate::embedding_admission::EmbeddingAdmission;
 use crate::errors::RuntimeError;
 use crate::scheduler::Scheduler;
 
@@ -23,6 +24,7 @@ pub struct AppState {
     pub models_rescan_interval_secs: u64,
     pub refresh_lock: AsyncMutex<()>,
     pub started_at: Instant,
+    pub embedding_admission: EmbeddingAdmission,
 }
 
 impl AppState {
@@ -37,6 +39,9 @@ impl AppState {
             scheduler,
             token_db,
             started_at: Instant::now(),
+            embedding_admission: EmbeddingAdmission::new(std::time::Duration::from_secs(
+                config.embedding_fit.queue_timeout_secs,
+            )),
         }
     }
 

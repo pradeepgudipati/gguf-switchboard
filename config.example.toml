@@ -47,6 +47,12 @@ models_rescan_interval_secs = 86400
 # Path to token usage SQLite database (defaults to token_usage.db)
 database_path = "/var/lib/gguf-switchboard/usage.db"
 
+# ─── Models ───────────────────────────────────────────────────────────────────
+# Models are defined in models.toml using short aliases.
+# deploy.sh writes an absolute path so the unit does not depend on cwd.
+# Manual / local: models_file = "models.toml" next to this file also works.
+models_file = "/opt/gguf-switchboard/models.toml"
+
 # ─── ModelFitPlanner ─────────────────────────────────────────────────────────
 # When enabled, the planner inspects GPU topology / free VRAM, model metadata,
 # and requested context before every load, then produces a safe launch profile.
@@ -65,8 +71,11 @@ max_attempts = 5
 # so subsequent loads skip the fallback ladder entirely.
 cache_profiles = true
 
-# ─── Models ───────────────────────────────────────────────────────────────────
-# Models are defined in models.toml using short aliases.
-# deploy.sh writes an absolute path so the unit does not depend on cwd.
-# Manual / local: models_file = "models.toml" next to this file also works.
-models_file = "/opt/gguf-switchboard/models.toml"
+# Embedding models use a balanced VRAM profile even when the general fit planner
+# above is disabled. Live free VRAM is preferred over this file's vram_gb value.
+[embedding_fit]
+enabled = true
+profile = "balanced"
+vram_reserve_percent = 15
+vram_reserve_min_mb = 1536
+queue_timeout_secs = 30

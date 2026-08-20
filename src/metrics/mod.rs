@@ -228,6 +228,40 @@ pub static ACTIVE_REQUESTS: LazyLock<IntGauge> = LazyLock::new(|| {
     .expect("failed to create ACTIVE_REQUESTS metric")
 });
 
+pub static EMBEDDING_QUEUE_DEPTH: LazyLock<IntGaugeVec> = LazyLock::new(|| {
+    IntGaugeVec::new(
+        Opts::new(
+            "gguf_switchboard_embedding_queue_depth",
+            "Embedding requests waiting for a backend permit",
+        ),
+        &["model"],
+    )
+    .expect("failed to create EMBEDDING_QUEUE_DEPTH")
+});
+
+pub static EMBEDDING_QUEUE_REJECTED_TOTAL: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    IntCounterVec::new(
+        Opts::new(
+            "gguf_switchboard_embedding_queue_rejected_total",
+            "Embedding requests rejected after queue timeout",
+        ),
+        &["model"],
+    )
+    .expect("failed to create EMBEDDING_QUEUE_REJECTED_TOTAL")
+});
+
+pub static EMBEDDING_QUEUE_WAIT_SECONDS: LazyLock<HistogramVec> = LazyLock::new(|| {
+    HistogramVec::new(
+        HistogramOpts::new(
+            "gguf_switchboard_embedding_queue_wait_seconds",
+            "Time embedding requests wait for a backend permit",
+        )
+        .buckets(INFERENCE_BUCKETS.to_vec()),
+        &["model"],
+    )
+    .expect("failed to create EMBEDDING_QUEUE_WAIT_SECONDS")
+});
+
 pub static LOADED_MODEL: LazyLock<IntGauge> = LazyLock::new(|| {
     IntGauge::with_opts(Opts::new(
         "gguf_switchboard_loaded_model",
@@ -350,6 +384,12 @@ fn register_all_inner() {
         .expect("register MODEL_UNLOADS_TOTAL");
     r.register(Box::new(ACTIVE_REQUESTS.clone()))
         .expect("register ACTIVE_REQUESTS");
+    r.register(Box::new(EMBEDDING_QUEUE_DEPTH.clone()))
+        .expect("register EMBEDDING_QUEUE_DEPTH");
+    r.register(Box::new(EMBEDDING_QUEUE_REJECTED_TOTAL.clone()))
+        .expect("register EMBEDDING_QUEUE_REJECTED_TOTAL");
+    r.register(Box::new(EMBEDDING_QUEUE_WAIT_SECONDS.clone()))
+        .expect("register EMBEDDING_QUEUE_WAIT_SECONDS");
     r.register(Box::new(LOADED_MODEL.clone()))
         .expect("register LOADED_MODEL");
     r.register(Box::new(LOADED_MODEL_INFO.clone()))

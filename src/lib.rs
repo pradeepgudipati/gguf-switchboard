@@ -4,6 +4,7 @@ pub mod batch;
 pub mod config;
 pub mod context;
 pub mod db;
+pub mod embedding_admission;
 pub mod errors;
 pub mod fit;
 pub mod fit_profile;

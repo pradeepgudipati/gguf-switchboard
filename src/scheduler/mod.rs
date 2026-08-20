@@ -1075,8 +1075,15 @@ impl SchedulerInner {
         &self,
         model_id: &str,
     ) -> Result<Arc<dyn Backend>, RuntimeError> {
-        // Use the ModelFitPlanner when enabled.
-        if self.config.fit.enabled {
+        // Embedding models use the balanced VRAM planner by default. Other model
+        // kinds retain the opt-in global fit behavior.
+        let embedding_fit = self.config.embedding_fit.enabled
+            && self
+                .models
+                .read()
+                .get(model_id)
+                .is_some_and(|cfg| cfg.kind == "embedding");
+        if self.config.fit.enabled || embedding_fit {
             return self.load_model_with_fit_planner(model_id).await;
         }
 
@@ -1220,7 +1227,7 @@ impl SchedulerInner {
             .map_err(|e| {
                 RuntimeError::ModelLoadingFailed(format!("Hardware probe task failed: {e}"))
             })?;
-        let model = ModelSummary::from_file(
+        let mut model = ModelSummary::from_file(
             &model_path,
             model_cfg.block_count,
             None, // architecture — not critical for fit
@@ -1230,6 +1237,12 @@ impl SchedulerInner {
             crate::ngl::get_ngl(&base_args),
         )
         .with_kind(&model_cfg.kind);
+        if model_cfg.kind == "embedding" && self.config.embedding_fit.enabled {
+            model.model_fingerprint = format!(
+                "{}:embedding-{}-v1",
+                model.model_fingerprint, self.config.embedding_fit.profile
+            );
+        }
 
         // Check profile cache first.
         let mut profile_store = if self.config.fit.cache_profiles {
@@ -1322,9 +1335,21 @@ impl SchedulerInner {
         }
 
         // Build and run the fit planner.
+        let embedding_reserve =
+            if model_cfg.kind == "embedding" && self.config.embedding_fit.enabled {
+                let percentage = hardware
+                    .free_vram_mb
+                    .saturating_mul(u64::from(self.config.embedding_fit.vram_reserve_percent))
+                    / 100;
+                u32::try_from(percentage)
+                    .unwrap_or(u32::MAX)
+                    .max(self.config.embedding_fit.vram_reserve_min_mb)
+            } else {
+                self.config.fit.vram_reserve_mb
+            };
         let fit_config = crate::fit::FitConfig {
             enabled: true,
-            vram_reserve_mb: self.config.fit.vram_reserve_mb,
+            vram_reserve_mb: embedding_reserve,
             multi_gpu: self.config.fit.multi_gpu.clone(),
             split_mode: self.config.fit.split_mode.clone(),
             max_attempts: self.config.fit.max_attempts,

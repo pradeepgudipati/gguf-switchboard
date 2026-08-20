@@ -91,6 +91,16 @@ pub async fn embeddings(
     require_kind(&request.model, &cfg, EMBEDDING_KINDS, "/v1/embeddings")?;
     let backend = state.scheduler.ensure_loaded(&request.model).await?;
     let model_id = request.model.clone();
+    let concurrency = state
+        .scheduler
+        .model_config(&model_id)
+        .and_then(|cfg| cfg.runtime_profile)
+        .and_then(|profile| profile.embedding_concurrency)
+        .unwrap_or(1) as usize;
+    let _admission_permit = state
+        .embedding_admission
+        .acquire(&model_id, concurrency)
+        .await?;
     let _request_guard = state.scheduler.track_request(&model_id);
     // Inference-only timer; model load wait is exported separately.
     let start = std::time::Instant::now();

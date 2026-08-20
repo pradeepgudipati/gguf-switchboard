@@ -411,8 +411,20 @@ fn build_fallback_ladder(
     config: &FitConfig,
 ) -> Vec<FitPlan> {
     let max_attempts = config.max_attempts.max(1) as usize;
-    let requested_ctx = model.requested_context;
-    let min_ctx = config.context_minimum().max(512);
+    let embedding_headroom = is_embedding(model).then(|| {
+        hardware
+            .usable_vram_mb(config.vram_reserve_mb)
+            .saturating_sub(model.file_size_mb)
+    });
+    let requested_ctx = embedding_headroom
+        .map(balanced_embedding_context)
+        .map(|cap| model.requested_context.min(cap))
+        .unwrap_or(model.requested_context);
+    let min_ctx = if is_embedding(model) {
+        2048
+    } else {
+        config.context_minimum().max(512)
+    };
 
     // Compute default NGL: full offload unless model is larger than usable VRAM.
     let usable = hardware.usable_vram_mb(config.vram_reserve_mb);
@@ -432,7 +444,7 @@ fn build_fallback_ladder(
 
     // Compute batch sizes for embedding models based on hardware.
     let (default_batch, default_ubatch, batch_steps) =
-        compute_embedding_batch_sizes(hardware, model);
+        compute_embedding_batch_sizes(hardware, model, config.vram_reserve_mb);
 
     // Build context steps (unique, descending, clamped to minimum)
     let mut ctx_steps: Vec<u32> = config
@@ -495,8 +507,11 @@ fn build_fallback_ladder(
             // Compute batch size for this attempt (embedding models only).
             let (batch_size, ubatch_size) = if default_batch.is_some() {
                 let step_idx = plans.len().min(batch_steps.len().saturating_sub(1));
-                let batch = batch_steps.get(step_idx).copied().unwrap_or(512);
-                (Some(batch), Some(batch))
+                let batch = batch_steps.get(step_idx).copied().unwrap_or(256);
+                let ubatch = default_ubatch
+                    .map(|default| default.min((batch / 2).max(128)))
+                    .unwrap_or(128);
+                (Some(batch), Some(ubatch))
             } else {
                 (None, None)
             };
@@ -548,43 +563,37 @@ fn build_fallback_ladder(
     plans
 }
 
-/// Compute batch and micro-batch sizes for embedding models based on available VRAM.
+/// Compute batch and micro-batch sizes from VRAM left after reserve and model weights.
 ///
 /// Returns `(default_batch, default_ubatch, fallback_steps)` where:
 /// - `default_batch` / `default_ubatch` are `None` for non-embedding models
 /// - `fallback_steps` is a descending list of batch sizes to try on OOM
 ///
-/// VRAM-based batch size tiers:
-/// - <4 GB VRAM:  512
-/// - 4-8 GB VRAM: 1024
-/// - 8-16 GB VRAM: 2048 (Nomic recommended)
-/// - >16 GB VRAM: 4096
+/// Balanced headroom tiers keep activation memory bounded on consumer GPUs.
 fn compute_embedding_batch_sizes(
     hardware: &HardwareSummary,
     model: &ModelSummary,
+    reserve_mb: u32,
 ) -> (Option<u32>, Option<u32>, Vec<u32>) {
-    let is_embedding = model
-        .kind
-        .as_deref()
-        .map(|k| k == "embedding")
-        .unwrap_or(false);
-
-    if !is_embedding {
+    if !is_embedding(model) {
         return (None, None, Vec::new());
     }
 
-    let usable_mb = hardware.usable_vram_mb(0); // no reserve for batch calc
-    let usable_gb = usable_mb / 1024;
+    let headroom_mb = hardware
+        .usable_vram_mb(reserve_mb)
+        .saturating_sub(model.file_size_mb);
 
     // Determine base batch size from VRAM tier.
-    let base_batch = if usable_gb >= 16 {
-        4096
-    } else if usable_gb >= 8 {
-        2048
-    } else if usable_gb >= 4 {
-        1024
+    let (base_batch, base_ubatch) = if headroom_mb > 8 * 1024 {
+        (4096, 2048)
+    } else if headroom_mb >= 5 * 1024 {
+        (2048, 1024)
+    } else if headroom_mb >= 3 * 1024 {
+        (1024, 512)
+    } else if headroom_mb >= 1536 {
+        (512, 256)
     } else {
-        512
+        (256, 128)
     };
 
     // Build fallback steps: base, 75%, 50%, 25% (clamped to 256 minimum).
@@ -607,13 +616,31 @@ fn compute_embedding_batch_sizes(
     steps.reverse();
 
     debug!(
-        usable_vram_mb = usable_mb,
+        headroom_mb,
+        reserve_mb,
         base_batch,
+        base_ubatch,
         fallback_steps = ?steps,
         "Computed embedding model batch sizes"
     );
 
-    (Some(base_batch), Some(base_batch), steps)
+    (Some(base_batch), Some(base_ubatch), steps)
+}
+
+fn is_embedding(model: &ModelSummary) -> bool {
+    model.kind.as_deref() == Some("embedding")
+}
+
+fn balanced_embedding_context(headroom_mb: u64) -> u32 {
+    if headroom_mb > 8 * 1024 {
+        16384
+    } else if headroom_mb >= 3 * 1024 {
+        8192
+    } else if headroom_mb >= 1536 {
+        4096
+    } else {
+        2048
+    }
 }
 
 fn compute_gpu_split(
@@ -953,9 +980,9 @@ mod tests {
         let planner = FitPlanner::new(hw, model, config);
 
         let plan = planner.current_plan();
-        // With 24 GB VRAM, should get 4096 batch size
+        // A small embedding model leaves more than 8 GB headroom.
         assert_eq!(plan.batch_size, Some(4096));
-        assert_eq!(plan.ubatch_size, Some(4096));
+        assert_eq!(plan.ubatch_size, Some(2048));
     }
 
     #[test]
@@ -971,8 +998,8 @@ mod tests {
     }
 
     #[test]
-    fn embedding_batch_scales_with_vram() {
-        // Small VRAM (4 GB) -> 1024 batch
+    fn embedding_batch_scales_with_headroom_after_model_residency() {
+        // 4 GB free - 2 GB reserve - 0.5 GB weights leaves about 1.5 GB.
         let hw_small = HardwareSummary {
             gpus: vec![fake_gpu("GTX 1650", 4096, 4096)],
             total_vram_mb: 4096,
@@ -984,9 +1011,10 @@ mod tests {
         let config = FitConfig::default();
         let planner = FitPlanner::new(hw_small, model.clone(), config.clone());
         let plan = planner.current_plan();
-        assert_eq!(plan.batch_size, Some(1024));
+        assert_eq!(plan.batch_size, Some(512));
+        assert_eq!(plan.ubatch_size, Some(256));
 
-        // Medium VRAM (8 GB) -> 2048 batch
+        // 8 GB free - 2 GB reserve - 0.5 GB weights leaves 5.5 GB.
         let hw_medium = HardwareSummary {
             gpus: vec![fake_gpu("RTX 3060", 8192, 8192)],
             total_vram_mb: 8192,
@@ -997,12 +1025,72 @@ mod tests {
         let planner = FitPlanner::new(hw_medium, model.clone(), config.clone());
         let plan = planner.current_plan();
         assert_eq!(plan.batch_size, Some(2048));
+        assert_eq!(plan.ubatch_size, Some(1024));
 
         // Large VRAM (24 GB) -> 4096 batch
         let hw_large = single_gpu_hardware();
         let planner = FitPlanner::new(hw_large, model, config);
         let plan = planner.current_plan();
         assert_eq!(plan.batch_size, Some(4096));
+        assert_eq!(plan.ubatch_size, Some(2048));
+    }
+
+    #[test]
+    fn twelve_gb_gpu_with_six_gb_embedding_uses_balanced_profile() {
+        let hw = HardwareSummary {
+            gpus: vec![fake_gpu("RTX 3060", 12288, 12288)],
+            total_vram_mb: 12288,
+            free_vram_mb: 12288,
+            system_ram_mb: 32000,
+            hardware_fingerprint: "1x3060-12288".to_string(),
+        };
+        let model = ModelSummary {
+            file_size_mb: 6144,
+            requested_context: 8192,
+            ..embedding_model()
+        };
+        let planner = FitPlanner::new(hw, model, FitConfig::default());
+        let plan = planner.current_plan();
+
+        assert_eq!(plan.context_size, 8192);
+        assert_eq!(plan.batch_size, Some(1024));
+        assert_eq!(plan.ubatch_size, Some(512));
+    }
+
+    #[test]
+    fn constrained_embedding_profile_reduces_context_to_2048() {
+        let hw = HardwareSummary {
+            gpus: vec![fake_gpu("RTX", 8192, 8192)],
+            total_vram_mb: 8192,
+            free_vram_mb: 8192,
+            system_ram_mb: 32000,
+            hardware_fingerprint: "1xRTX-8192".to_string(),
+        };
+        let model = ModelSummary {
+            file_size_mb: 5000,
+            requested_context: 8192,
+            ..embedding_model()
+        };
+        let planner = FitPlanner::new(hw, model, FitConfig::default());
+
+        assert_eq!(planner.current_plan().context_size, 2048);
+    }
+
+    #[test]
+    fn dual_4090_embedding_profile_uses_high_headroom_tier() {
+        let hw = dual_gpu_hardware();
+        let model = ModelSummary {
+            file_size_mb: 6144,
+            requested_context: 16384,
+            ..embedding_model()
+        };
+        let planner = FitPlanner::new(hw, model, FitConfig::default());
+        let plan = planner.current_plan();
+
+        assert_eq!(plan.context_size, 16384);
+        assert_eq!(plan.batch_size, Some(4096));
+        assert_eq!(plan.ubatch_size, Some(2048));
+        assert!(plan.tensor_split.is_some());
     }
 
     #[test]

@@ -75,6 +75,12 @@ pub struct RuntimeProfileInfo {
     pub cache_type_k: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_type_v: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub batch_size: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ubatch_size: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub embedding_concurrency: Option<u32>,
     pub reason: String,
     /// How this profile was determined: "auto-fit", "cached", "manual".
     pub profile_source: String,
@@ -112,6 +118,9 @@ impl ModelInfo {
                 tensor_split: rp.tensor_split.clone(),
                 cache_type_k: rp.cache_type_k.clone(),
                 cache_type_v: rp.cache_type_v.clone(),
+                batch_size: rp.batch_size,
+                ubatch_size: rp.ubatch_size,
+                embedding_concurrency: rp.embedding_concurrency,
                 reason: rp.reason.clone(),
                 profile_source: rp.profile_source.clone(),
             });

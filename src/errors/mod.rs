@@ -37,6 +37,9 @@ pub enum RuntimeError {
     #[error("Model busy: {0}")]
     ModelBusy(String),
 
+    #[error("Embedding queue timed out; retry later")]
+    EmbeddingQueueTimeout { retry_after_secs: u64 },
+
     #[error("Authentication required")]
     _Unauthorized,
 
@@ -63,6 +66,12 @@ struct OpenAIError {
 
 impl IntoResponse for RuntimeError {
     fn into_response(self) -> Response {
+        let retry_after = match &self {
+            RuntimeError::EmbeddingQueueTimeout { retry_after_secs } => {
+                Some(retry_after_secs.to_string())
+            }
+            _ => None,
+        };
         let (status, error_type, code) = match &self {
             RuntimeError::ModelNotFound(_) => (
                 StatusCode::NOT_FOUND,
@@ -111,6 +120,11 @@ impl IntoResponse for RuntimeError {
             RuntimeError::ModelBusy(_) => {
                 (StatusCode::CONFLICT, "invalid_request_error", "model_busy")
             }
+            RuntimeError::EmbeddingQueueTimeout { .. } => (
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
+                "embedding_queue_timeout",
+            ),
             RuntimeError::_Unauthorized => (
                 StatusCode::UNAUTHORIZED,
                 "authentication_error",
@@ -137,7 +151,15 @@ impl IntoResponse for RuntimeError {
             },
         };
 
-        (status, axum::Json(body)).into_response()
+        let mut response = (status, axum::Json(body)).into_response();
+        if let Some(value) = retry_after
+            && let Ok(value) = value.parse()
+        {
+            response
+                .headers_mut()
+                .insert(axum::http::header::RETRY_AFTER, value);
+        }
+        response
     }
 }
 

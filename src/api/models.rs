@@ -113,6 +113,9 @@ pub async fn get_model_runtime(
         tensor_split: rp.tensor_split,
         cache_type_k: rp.cache_type_k,
         cache_type_v: rp.cache_type_v,
+        batch_size: rp.batch_size,
+        ubatch_size: rp.ubatch_size,
+        embedding_concurrency: rp.embedding_concurrency,
         reason: rp.reason,
         profile_source: rp.profile_source,
     }))

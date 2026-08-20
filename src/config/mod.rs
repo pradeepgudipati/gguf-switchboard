@@ -71,6 +71,9 @@ pub struct Config {
     /// ModelFitPlanner configuration for hardware-aware load planning.
     #[serde(default)]
     pub fit: FitConfig,
+    /// Embedding-specific VRAM budgeting and admission control.
+    #[serde(default)]
+    pub embedding_fit: EmbeddingFitConfig,
     /// How the scheduler swaps models. `unload_first` (default) stops the resident
     /// `llama-server` before starting the next one so the new model gets the whole GPU.
     /// `load_first` keeps the old model resident until the new one is healthy (instant
@@ -84,6 +87,32 @@ pub struct Config {
     /// Only useful when system RAM comfortably exceeds the combined GGUF sizes.
     #[serde(default)]
     pub prewarm_recent_models: usize,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct EmbeddingFitConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_embedding_profile")]
+    pub profile: String,
+    #[serde(default = "default_embedding_reserve_percent")]
+    pub vram_reserve_percent: u8,
+    #[serde(default = "default_embedding_reserve_min_mb")]
+    pub vram_reserve_min_mb: u32,
+    #[serde(default = "default_embedding_queue_timeout_secs")]
+    pub queue_timeout_secs: u64,
+}
+
+impl Default for EmbeddingFitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            profile: default_embedding_profile(),
+            vram_reserve_percent: default_embedding_reserve_percent(),
+            vram_reserve_min_mb: default_embedding_reserve_min_mb(),
+            queue_timeout_secs: default_embedding_queue_timeout_secs(),
+        }
+    }
 }
 
 /// Ordering of unload/load during a model switch. See [`Config::switch_strategy`].
@@ -154,6 +183,9 @@ pub struct RuntimeProfile {
     pub tensor_split: Option<Vec<f64>>,
     pub cache_type_k: Option<String>,
     pub cache_type_v: Option<String>,
+    pub batch_size: Option<u32>,
+    pub ubatch_size: Option<u32>,
+    pub embedding_concurrency: Option<u32>,
     pub reason: String,
     pub profile_source: String,
 }
@@ -167,6 +199,11 @@ impl RuntimeProfile {
             tensor_split: plan.tensor_split.clone(),
             cache_type_k: plan.cache_type_k.clone(),
             cache_type_v: plan.cache_type_v.clone(),
+            batch_size: plan.batch_size,
+            ubatch_size: plan.ubatch_size,
+            embedding_concurrency: plan
+                .batch_size
+                .map(|batch| crate::embedding_admission::balanced_concurrency(Some(batch)) as u32),
             reason: plan.reason.clone(),
             profile_source: source.to_string(),
         }
@@ -219,6 +256,22 @@ fn default_priority_load_cooldown_secs() -> u64 {
 
 fn default_models_rescan_interval_secs() -> u64 {
     86400
+}
+
+fn default_true() -> bool {
+    true
+}
+fn default_embedding_profile() -> String {
+    "balanced".to_string()
+}
+fn default_embedding_reserve_percent() -> u8 {
+    15
+}
+fn default_embedding_reserve_min_mb() -> u32 {
+    1536
+}
+fn default_embedding_queue_timeout_secs() -> u64 {
+    30
 }
 
 impl Config {
@@ -332,6 +385,11 @@ mod tests {
         let cfg: Config = toml::from_str(r#"bind = "127.0.0.1:0""#).expect("parse");
         assert_eq!(cfg.switch_strategy, SwitchStrategy::UnloadFirst);
         assert_eq!(cfg.prewarm_recent_models, 0);
+        assert!(cfg.embedding_fit.enabled);
+        assert_eq!(cfg.embedding_fit.profile, "balanced");
+        assert_eq!(cfg.embedding_fit.vram_reserve_percent, 15);
+        assert_eq!(cfg.embedding_fit.vram_reserve_min_mb, 1536);
+        assert_eq!(cfg.embedding_fit.queue_timeout_secs, 30);
     }
 
     #[test]
@@ -359,5 +417,16 @@ switch_strategy = "yolo"
         .unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("yolo"), "{msg}");
+    }
+
+    #[test]
+    fn example_config_keeps_models_file_at_root() {
+        let cfg: Config = toml::from_str(include_str!("../../config.example.toml"))
+            .expect("config.example.toml must parse");
+        assert_eq!(
+            cfg.models_file.as_deref(),
+            Some("/opt/gguf-switchboard/models.toml")
+        );
+        assert!(cfg.embedding_fit.enabled);
     }
 }

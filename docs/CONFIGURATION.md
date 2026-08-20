@@ -593,3 +593,26 @@ ubatch_size = 2048         # physical micro-batch size (-ub); must be <= batch_s
 | `[[models]].ubatch_size` | Physical micro-batch size (`-ub`). Must be `<= batch_size`. Critical for embedding models. Default: llama.cpp built-in. |
 
 `batch_size` and `ubatch_size` are primarily useful for embedding models where large input arrays need to be split into manageable batches. When set, they are passed as `-b` and `-ub` flags to `llama-server`.
+
+### Balanced embedding VRAM profiles
+
+Embedding models use a hardware-aware balanced profile by default, independently of the general `[fit]` switch. The planner reads live free VRAM when available, reserves the larger of 15% or 1536 MB, subtracts GGUF weight size, and selects bounded context, batch, and micro-batch values from the remaining headroom.
+
+```toml
+[embedding_fit]
+enabled = true
+profile = "balanced"
+vram_reserve_percent = 15
+vram_reserve_min_mb = 1536
+queue_timeout_secs = 30
+```
+
+| Headroom after reserve and weights | Context ceiling | Batch | Micro-batch | Request concurrency |
+|---:|---:|---:|---:|---:|
+| under 1.5 GB | 2048 | 256 | 128 | 1 |
+| 1.5–3 GB | 4096 | 512 | 256 | 1 |
+| 3–5 GB | 8192 | 1024 | 512 | 1 |
+| 5–8 GB | 8192 | 2048 | 1024 | 2 |
+| over 8 GB | 16384 | 4096 | 2048 | 2 |
+
+Requests beyond the active model's concurrency enter a bounded in-process queue. When `queue_timeout_secs` expires, the API returns `429` with `Retry-After` instead of forwarding more simultaneous work to `llama-server`. The active runtime profile reports `batch_size`, `ubatch_size`, and `embedding_concurrency`; Prometheus exports queue depth, queue wait, and rejected-request metrics.
