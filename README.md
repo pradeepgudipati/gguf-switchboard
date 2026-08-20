@@ -264,10 +264,11 @@ curl -s http://localhost:9090/v1/models | jq '.data[].id'
 ./scripts/nvidia-smi-models.sh --watch 2
 ```
 
-The model-aware NVIDIA view joins `nvidia-smi` process data with each process's
-`-m` or `--model` argument from `/proc`. Run it as the same user as
-`llama-server`, or with sufficient permission to read that process's command
-line. Processes whose command line is inaccessible show `-` for the model.
+The model-aware NVIDIA view prints the standard `nvidia-smi` dashboard, then
+adds a process table that joins GPU usage with each process's `-m` or `--model`
+argument from `/proc`. Run it as the same user as `llama-server`, or with
+sufficient permission to read that process's command line. Processes whose
+command line is inaccessible show `-` for the model.
 
 ### Updating
 

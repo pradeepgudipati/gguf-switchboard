@@ -10,6 +10,12 @@ mkdir -p "$TMP/proc/122744" "$TMP/proc/122745" "$TMP/bin"
 cat >"$TMP/bin/nvidia-smi" <<'EOF'
 #!/usr/bin/env bash
 case "$*" in
+  '')
+    printf '%s\n' \
+      '+-----------------------------------------------------------------------------+' \
+      '| NVIDIA-SMI 580.65.06    Driver Version: 580.65.06    CUDA Version: 13.0     |' \
+      '+-----------------------------------------------------------------------------+'
+    ;;
   *--query-gpu=index,uuid*)
     printf '%s\n' '0, GPU-aaaa' '1, GPU-bbbb'
     ;;
@@ -34,6 +40,10 @@ printf '/usr/bin/python3\0worker.py\0--model\0classifier-v2\0' \
 output="$(NVIDIA_SMI_BIN="$TMP/bin/nvidia-smi" PROC_ROOT="$TMP/proc" \
   "$ROOT/scripts/nvidia-smi-models.sh")"
 
+grep -q 'NVIDIA-SMI 580.65.06' <<<"$output"
+dashboard_line="$(grep -n 'NVIDIA-SMI 580.65.06' <<<"$output" | cut -d: -f1)"
+model_header_line="$(grep -n '^GPU[[:space:]]\+PID' <<<"$output" | cut -d: -f1)"
+test "$dashboard_line" -lt "$model_header_line"
 grep -Eq '^GPU[[:space:]]+PID[[:space:]]+VRAM[[:space:]]+MODEL[[:space:]]+PROCESS$' <<<"$output"
 grep -Eq '^0[[:space:]]+122744[[:space:]]+5982 MiB[[:space:]]+Qwen3\.5-9B-Q4_K_M\.gguf[[:space:]]+/usr/local/bin/llama-server$' <<<"$output"
 grep -Eq '^1[[:space:]]+122745[[:space:]]+512 MiB[[:space:]]+classifier-v2[[:space:]]+/usr/bin/python3$' <<<"$output"

@@ -9,7 +9,8 @@ usage() {
     cat <<'EOF'
 Usage: nvidia-smi-models.sh [--watch [SECONDS]]
 
-Adds the model passed with -m or --model to nvidia-smi compute-process data.
+Shows the standard nvidia-smi dashboard, followed by compute processes with the
+model passed through -m or --model.
 EOF
 }
 
@@ -31,6 +32,12 @@ if [[ $# -ne 0 ]]; then
     usage >&2
     exit 2
 fi
+
+if ! "$NVIDIA_SMI_BIN"; then
+    echo "error: nvidia-smi is unavailable or failed" >&2
+    exit 1
+fi
+printf '\n'
 
 if ! gpu_rows="$("$NVIDIA_SMI_BIN" \
     --query-gpu=index,uuid \
