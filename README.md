@@ -258,7 +258,16 @@ If you downloaded models manually, run `./deploy.sh --refresh-models` so discove
 curl -s http://localhost:9090/health
 curl -s http://localhost:9090/status | jq .
 curl -s http://localhost:9090/v1/models | jq '.data[].id'
+
+# NVIDIA processes with the loaded GGUF model name
+./scripts/nvidia-smi-models.sh
+./scripts/nvidia-smi-models.sh --watch 2
 ```
+
+The model-aware NVIDIA view joins `nvidia-smi` process data with each process's
+`-m` or `--model` argument from `/proc`. Run it as the same user as
+`llama-server`, or with sufficient permission to read that process's command
+line. Processes whose command line is inaccessible show `-` for the model.
 
 ### Updating
 
