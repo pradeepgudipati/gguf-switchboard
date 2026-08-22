@@ -1,0 +1,98 @@
+# Release (Linux legs) — builds x86_64/aarch64 Linux binaries and publishes
+# them to the GitHub Release for the pushed tag. Runs independently of
+# release-macos.yml (separate agents, separate workspaces — no artifact
+# sharing between them), so each pipeline get-or-creates the same GitHub
+# Release by tag and uploads only its own binaries + its own checksum file.
+#
+# Replaces the build-release + release jobs in .github/workflows/ci.yml for
+# the two Linux matrix legs (now workflow_dispatch-only there). The "ci"
+# checks job stays on GitHub Actions — it's cheap (ubuntu-only) and isn't
+# what's burning minutes; the macos-latest release legs are.
+#
+# Required secret: github_token (fine-grained PAT scoped to this repo,
+# Contents: read/write — used to get-or-create the release and upload assets)
+#
+# Agent requirements: trusted repo (not strictly needed here — no docker.sock
+# — but harmless to run on the same trusted Linux agent as context-harbor).
+
+when:
+  - event: tag
+    ref: refs/tags/v*
+  - event: manual
+
+steps:
+  - name: build
+    image: rust:1.85-bookworm
+    environment:
+      CARGO_TERM_COLOR: "always"
+      RUST_BACKTRACE: "1"
+      CARGO_INCREMENTAL: "0"
+    commands:
+      - set -eux
+      - git config --global --add safe.directory '*'
+      - |
+        # Release tags must point to a commit on main (same guard as the
+        # original GH Actions build-release job).
+        git fetch origin main
+        git merge-base --is-ancestor "$(git rev-parse HEAD)" origin/main || {
+          echo "Release tags must point to a commit on main."
+          exit 1
+        }
+      - apt-get update && apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu
+      - rustup target add x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+
+      - cargo build --release --locked --target x86_64-unknown-linux-gnu
+      - strip target/x86_64-unknown-linux-gnu/release/gguf-switchboard || true
+      - cp target/x86_64-unknown-linux-gnu/release/gguf-switchboard gguf-switchboard-linux-amd64
+
+      - |
+        CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+          cargo build --release --locked --target aarch64-unknown-linux-gnu
+      - aarch64-linux-gnu-strip target/aarch64-unknown-linux-gnu/release/gguf-switchboard || true
+      - cp target/aarch64-unknown-linux-gnu/release/gguf-switchboard gguf-switchboard-linux-arm64
+
+      - sha256sum gguf-switchboard-linux-amd64 gguf-switchboard-linux-arm64 > checksums-linux.txt
+
+  - name: publish-release
+    image: alpine:3
+    depends_on: [build]
+    environment:
+      GITHUB_TOKEN:
+        from_secret: github_token
+      GITHUB_REPO: pradeepgudipati/gguf-switchboard
+    commands:
+      - apk add --no-cache curl jq
+      - |
+        set -eux
+        TAG="${CI_COMMIT_TAG:?this pipeline expects a tag event}"
+
+        HTTP_CODE="$(curl -sS -o /tmp/release.json -w '%{http_code}' \
+          -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+          -H "Accept: application/vnd.github+json" \
+          "https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${TAG}")"
+
+        if [ "$HTTP_CODE" = "404" ]; then
+          BODY="$(cat "releases/${TAG}.md" 2>/dev/null || echo "Release ${TAG}")"
+          if ! curl -sS -f -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${GITHUB_REPO}/releases" \
+            -d "$(jq -n --arg tag "$TAG" --arg body "$BODY" '{tag_name:$tag, body:$body}')" \
+            -o /tmp/release.json; then
+            # Lost the create race to release-macos.yml — the release exists now.
+            curl -sS -f -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${TAG}" -o /tmp/release.json
+          fi
+        elif [ "$HTTP_CODE" != "200" ]; then
+          echo "Unexpected response ($HTTP_CODE) checking for existing release"; cat /tmp/release.json; exit 1
+        fi
+
+        UPLOAD_URL="$(jq -r '.upload_url' /tmp/release.json | sed 's/{?name,label}//')"
+        for f in gguf-switchboard-linux-amd64 gguf-switchboard-linux-arm64 checksums-linux.txt; do
+          curl -sS -f -X POST \
+            -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary "@${f}" \
+            "${UPLOAD_URL}?name=${f}"
+        done

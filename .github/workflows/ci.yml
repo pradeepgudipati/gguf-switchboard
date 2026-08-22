@@ -1,3 +1,11 @@
+# The build-release + release jobs below (macOS + Linux release binaries,
+# GitHub Release creation) no longer run automatically — that was the
+# expensive part (macos-latest is billed at 10x). Migrated to Woodpecker:
+#   - Linux release legs:  .woodpecker/release-linux.yml
+#   - macOS release legs:  .woodpecker/release-macos.yml (pending Mac agent)
+# Both jobs are kept here as a workflow_dispatch fallback (pick the tag as
+# the ref when running manually). The "ci" checks job is unchanged — it's
+# ubuntu-only, cheap, and still runs automatically on every push/PR.
 name: CI
 
 concurrency:
@@ -7,9 +15,9 @@ concurrency:
 on:
   push:
     branches: [main, Dev]
-    tags: ["v*"]
   pull_request:
     branches: [main, Dev]
+  workflow_dispatch: {}
 
 permissions:
   contents: read
