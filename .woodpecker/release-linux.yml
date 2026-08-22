@@ -1,8 +1,12 @@
 # Release (Linux legs) — builds x86_64/aarch64 Linux binaries and publishes
-# them to the GitHub Release for the pushed tag. Runs independently of
-# release-macos.yml (separate agents, separate workspaces — no artifact
-# sharing between them), so each pipeline get-or-creates the same GitHub
-# Release by tag and uploads only its own binaries + its own checksum file.
+# them to the GitHub Release for the pushed tag.
+#
+# On-demand only for now: trigger manually from the Woodpecker UI
+# (Repository -> Actions -> Trigger) when a release tag is ready. Not wired
+# to run automatically on tag push — macOS release builds are on hold
+# (no verified Mac agent yet, see git history for release-macos.yml), so
+# releases are cut deliberately rather than auto-publishing Linux-only
+# assets on every tag.
 #
 # Replaces the build-release + release jobs in .github/workflows/ci.yml for
 # the two Linux matrix legs (now workflow_dispatch-only there). The "ci"
@@ -16,8 +20,6 @@
 # — but harmless to run on the same trusted Linux agent as context-harbor).
 
 when:
-  - event: tag
-    ref: refs/tags/v*
   - event: manual
 
 steps:
@@ -79,7 +81,7 @@ steps:
             "https://api.github.com/repos/${GITHUB_REPO}/releases" \
             -d "$(jq -n --arg tag "$TAG" --arg body "$BODY" '{tag_name:$tag, body:$body}')" \
             -o /tmp/release.json; then
-            # Lost the create race to release-macos.yml — the release exists now.
+            # Lost the create race to a concurrent trigger — the release exists now.
             curl -sS -f -H "Authorization: Bearer ${GITHUB_TOKEN}" \
               -H "Accept: application/vnd.github+json" \
               "https://api.github.com/repos/${GITHUB_REPO}/releases/tags/${TAG}" -o /tmp/release.json
