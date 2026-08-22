@@ -131,7 +131,10 @@ fn evaluate(case: BatteryCase, response: &ChatCompletionResponse) -> CaseVerdict
             _ => (false, Some(format!("{:?}", classification.location))),
         },
         BatteryCase::ParallelToolCalls => {
-            let calls = classification.structured_tool_calls.as_deref().unwrap_or(&[]);
+            let calls = classification
+                .structured_tool_calls
+                .as_deref()
+                .unwrap_or(&[]);
             if calls.len() < 2 {
                 (
                     false,
@@ -210,9 +213,7 @@ fn parallel_tool_calls_request(model: &str) -> ChatCompletionRequest {
         model: model.to_string(),
         messages: vec![ChatMessage {
             role: Role::User,
-            content: Some(Content::Text(
-                "Call get_weather for both Paris and Tokyo.".to_string(),
-            )),
+            content: Some(Content::Text("Call get_weather for both Paris and Tokyo.".to_string())),
             name: None,
             tool_calls: None,
             tool_call_id: None,
@@ -303,9 +304,7 @@ fn multi_turn_tool_result_request(model: &str) -> ChatCompletionRequest {
         messages: vec![
             ChatMessage {
                 role: Role::User,
-                content: Some(Content::Text(
-                    "What's the weather in Paris?".to_string(),
-                )),
+                content: Some(Content::Text("What's the weather in Paris?".to_string())),
                 name: None,
                 tool_calls: None,
                 tool_call_id: None,

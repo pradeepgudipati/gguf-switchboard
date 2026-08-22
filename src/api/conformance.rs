@@ -299,11 +299,7 @@ pub async fn compare(
     }))
 }
 
-async fn run_one(
-    state: &Arc<AppState>,
-    model_id: &str,
-    request: &CompareRequest,
-) -> CompareResult {
+async fn run_one(state: &Arc<AppState>, model_id: &str, request: &CompareRequest) -> CompareResult {
     if state.scheduler.model_config(model_id).is_none() {
         return CompareResult {
             model: model_id.to_string(),
