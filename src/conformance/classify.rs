@@ -8,6 +8,7 @@
 //!     never routed it into the structured field), or
 //!   - the JSON blob leaks into `reasoning_content` (thinking models that
 //!     reason about the call but never emit it structurally).
+//!
 //! Distinguishing these three outcomes from "no tool call at all" is the
 //! whole point of the conformance console's inspect view — a raw JSON dump
 //! looks identical to a human skimming it, but only one of these outcomes
@@ -168,12 +169,9 @@ fn find_tool_call_shaped_json(text: &str) -> Option<String> {
             return Some(candidate);
         }
     }
-    for candidate in balanced_brace_spans(text) {
-        if is_tool_call_shaped(&candidate) {
-            return Some(candidate);
-        }
-    }
-    None
+    balanced_brace_spans(text)
+        .into_iter()
+        .find(|candidate| is_tool_call_shaped(candidate))
 }
 
 /// Extract inner text from `<tool_call>...</tool_call>` tags and ```json
@@ -214,12 +212,12 @@ fn balanced_brace_spans(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'{' {
-            if let Some(end) = find_matching_brace(bytes, i) {
-                out.push(text[i..=end].to_string());
-                i = end + 1;
-                continue;
-            }
+        if bytes[i] == b'{'
+            && let Some(end) = find_matching_brace(bytes, i)
+        {
+            out.push(text[i..=end].to_string());
+            i = end + 1;
+            continue;
         }
         i += 1;
     }
