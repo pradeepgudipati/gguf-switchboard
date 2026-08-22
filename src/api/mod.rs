@@ -14,7 +14,10 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::Router;
-use axum::extract::State;
+use axum::extract::{Request, State};
+use axum::http::{HeaderValue, header};
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use serde_json::Value;
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
@@ -152,6 +155,23 @@ async fn openapi_json(State(state): State<Arc<AppState>>) -> Json<Value> {
     Json(doc)
 }
 
+/// Swagger UI's static assets (`swagger-initializer.js` and friends) are
+/// served with no explicit cache headers, so browsers fall back to
+/// heuristic caching and can silently keep serving a stale bundle after a
+/// deploy — the exact symptom that made a shipped fix look broken until a
+/// hard refresh. Force revalidation on every load for that path prefix.
+async fn no_cache_swagger_assets(req: Request, next: Next) -> Response {
+    let is_swagger_ui = req.uri().path().starts_with("/swagger-ui")
+        || req.uri().path() == "/api-docs/openapi.json";
+    let mut response = next.run(req).await;
+    if is_swagger_ui {
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
+    }
+    response
+}
+
 /// Build the top-level router with all OpenAI-compatible endpoints.
 pub fn create_router(state: Arc<AppState>) -> Router {
     let cors = CorsLayer::permissive();
@@ -238,6 +258,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/health", axum::routing::get(health::health))
         .route("/status", axum::routing::get(health::status))
         .route("/metrics", axum::routing::get(metrics::metrics))
+        .layer(middleware::from_fn(no_cache_swagger_assets))
         .layer(cors)
         .layer(trace)
         .with_state(state)
