@@ -2505,9 +2505,11 @@ mod tests {
 
         let models = registry.expand("llama.cpp", 0).unwrap();
         let cfg = models.get("meta-llama-3.1-8b").unwrap();
-        assert!(cfg.args.windows(2).any(|w| {
-            w[0] == "--chat-template-file" && w[1] == "/opt/templates/custom.jinja"
-        }));
+        assert!(
+            cfg.args.windows(2).any(|w| {
+                w[0] == "--chat-template-file" && w[1] == "/opt/templates/custom.jinja"
+            })
+        );
         assert!(!cfg.args.iter().any(|a| a == "--chat-template"));
         assert!(
             cfg.args

@@ -1600,7 +1600,10 @@ impl SchedulerInner {
             .read()
             .get(model_id)
             .and_then(|cfg| cfg.ctx_floor);
-        let min = self.config.context_fallback_min.max(per_model_floor.unwrap_or(0));
+        let min = self
+            .config
+            .context_fallback_min
+            .max(per_model_floor.unwrap_or(0));
         let Some(next) = next_lower_context(current, min) else {
             return Ok(None);
         };
