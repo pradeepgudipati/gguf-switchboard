@@ -44,7 +44,14 @@ auto_discover = true
 # enabled = true             # false = hide from /v1/models and scheduling
 # priority = true            # idle auto-load target (only one). discover-models prefers gemma-4-e4b when present.
 # context_size = 16384       # pin for consumer GPUs; omit to use vram_gb heuristic from config.toml
+# ctx = 32768                # context FLOOR — this model is never served below this, even after
+#                             # OOM/VRAM-pressure fallback reduces context. Sub-32k silently breaks
+#                             # agentic tool calling in harnesses like opencode; unlike context_size
+#                             # (an exact pin), ctx only ever raises the effective value.
 # ngl = 40                   # pin GPU layers; also disables auto_ngl for this model
+# chat_template_file = "/opt/gguf-switchboard/templates/glm-tool-call.jinja"
+#                             # override a broken/missing embedded Jinja template (--chat-template-file)
+# reasoning_format = "deepseek"  # llama-server --reasoning-format (e.g. "deepseek", "none")
 # description = "..."        # optional; filled by sync-hf-metadata when empty
 # max_context_length = 131072  # model ceiling from HF/GGUF (distinct from serving context_size)
 # min_vram_gb = 6            # approximate weights floor (GB); filled by sync-hf-metadata

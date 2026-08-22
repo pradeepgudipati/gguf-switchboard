@@ -110,6 +110,24 @@ pub struct RegistryEntry {
     /// for prompt processing. Must be <= batch_size. Critical for embedding models.
     #[serde(default)]
     pub ubatch_size: Option<u32>,
+    /// Path to a Jinja chat template file, passed as `--chat-template-file`.
+    /// Overrides the model's embedded template (and the built-in Llama 3.1
+    /// `llama3` auto-injection) — for models that ship a broken or missing
+    /// embedded template.
+    #[serde(default)]
+    pub chat_template_file: Option<String>,
+    /// llama-server `--reasoning-format` value (e.g. "deepseek", "none").
+    #[serde(default)]
+    pub reasoning_format: Option<String>,
+    /// Minimum context size this model must always be served with, even after
+    /// VRAM-pressure fallback reduces context on other models. Distinct from
+    /// `context_size` (an exact override): `ctx` is a floor applied on top of
+    /// whatever `context_size`/heuristics/fallback logic would otherwise pick.
+    /// Sub-32k context silently breaks agentic tool calling in harnesses like
+    /// opencode — this exists to make that failure mode impossible to hit by
+    /// accident.
+    #[serde(default)]
+    pub ctx: Option<u32>,
 }
 
 impl Default for RegistryEntry {
@@ -135,6 +153,9 @@ impl Default for RegistryEntry {
             kv_cache_type: None,
             batch_size: None,
             ubatch_size: None,
+            chat_template_file: None,
+            reasoning_format: None,
+            ctx: None,
         }
     }
 }
@@ -874,8 +895,20 @@ fn file_size_gb(path: &str) -> Option<f64> {
         .map(|meta| meta.len() as f64 / 1_073_741_824.0)
 }
 
-/// Suggest a context window (`-c`) from available VRAM and model file size.
+/// Suggest a context window (`-c`) from available VRAM and model file size,
+/// then apply `entry.ctx` as a floor so it can only raise the result, never
+/// lower it below whatever the override/heuristics already picked.
 pub fn suggest_context_size(
+    vram_gb: u32,
+    entry: &RegistryEntry,
+    model_path: &str,
+    default_context: u32,
+) -> u32 {
+    suggest_context_size_unfloored(vram_gb, entry, model_path, default_context)
+        .max(entry.ctx.unwrap_or(0))
+}
+
+fn suggest_context_size_unfloored(
     vram_gb: u32,
     entry: &RegistryEntry,
     model_path: &str,
@@ -1084,6 +1117,9 @@ impl ModelsRegistry {
                     kv_cache_type: None,
                     batch_size: None,
                     ubatch_size: None,
+                    chat_template_file: None,
+                    reasoning_format: None,
+                    ctx: None,
                 })
                 .collect(),
         };
@@ -1292,6 +1328,9 @@ impl ModelsRegistry {
                     kv_cache_type: existing.kv_cache_type.clone(),
                     batch_size: existing.batch_size,
                     ubatch_size: existing.ubatch_size,
+                    chat_template_file: existing.chat_template_file.clone(),
+                    reasoning_format: existing.reasoning_format.clone(),
+                    ctx: existing.ctx,
                 });
                 continue;
             }
@@ -1588,6 +1627,7 @@ impl ModelsRegistry {
                 min_vram_gb: entry.min_vram_gb,
                 capabilities: entry.capabilities.clone(),
                 hf_repo: entry.hf_repo.clone(),
+                ctx_floor: entry.ctx,
                 block_count,
                 ngl_pinned,
                 model_fingerprint: Some(model_fingerprint),
@@ -1609,18 +1649,29 @@ fn extra_args_pin_ngl(extra_args: &[String]) -> bool {
 
 /// Llama 3.1 GGUFs often ship a tool-use chat template that makes the model
 /// emit `{"name":...,"parameters":...}` even when the request has no tools.
-/// Force llama.cpp's built-in `llama3` template unless the user already set one.
+/// Force llama.cpp's built-in `llama3` template unless the user already set
+/// one — either via `extra_args` directly, or via the typed `chat_template_file`
+/// field, which takes priority. Also appends `--reasoning-format` when set.
 fn effective_extra_args(entry: &RegistryEntry) -> Vec<String> {
     let mut args = entry.extra_args.clone();
-    if !should_force_llama3_chat_template(entry, &args) {
-        return args;
+
+    if let Some(path) = &entry.chat_template_file {
+        args.push("--chat-template-file".to_string());
+        args.push(path.clone());
+    } else if should_force_llama3_chat_template(entry, &args) {
+        tracing::info!(
+            alias = %entry.alias,
+            "Applying --chat-template llama3 so Llama 3.1 answers in plain text (override via extra_args)"
+        );
+        args.push("--chat-template".to_string());
+        args.push("llama3".to_string());
     }
-    tracing::info!(
-        alias = %entry.alias,
-        "Applying --chat-template llama3 so Llama 3.1 answers in plain text (override via extra_args)"
-    );
-    args.push("--chat-template".to_string());
-    args.push("llama3".to_string());
+
+    if let Some(format) = &entry.reasoning_format {
+        args.push("--reasoning-format".to_string());
+        args.push(format.clone());
+    }
+
     args
 }
 
@@ -2421,6 +2472,53 @@ mod tests {
     }
 
     #[test]
+    fn expand_prefers_chat_template_file_over_llama3_for_llama_3_1() {
+        let dir = std::env::temp_dir().join("gguf-switchboard-llama31-template-file-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let model_path = dir.join("Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf");
+        write_minimal_gguf(&model_path, "llama");
+
+        let registry = ModelsRegistry {
+            version: 1,
+            defaults: RegistryDefaults {
+                models_dir: dir.to_string_lossy().into_owned(),
+                ..RegistryDefaults::default()
+            },
+            auto_discover: false,
+            models: vec![RegistryEntry {
+                alias: "meta-llama-3.1-8b".to_string(),
+                file: "Meta-Llama-3.1-8B-Instruct-Q4_K_M.gguf".to_string(),
+                display_name: None,
+                kind: None,
+                enabled: true,
+                priority: true,
+                port: None,
+                context_size: None,
+                ngl: None,
+                extra_args: Vec::new(),
+                chat_template_file: Some("/opt/templates/custom.jinja".to_string()),
+                reasoning_format: Some("deepseek".to_string()),
+                ..Default::default()
+            }],
+        };
+
+        let models = registry.expand("llama.cpp", 0).unwrap();
+        let cfg = models.get("meta-llama-3.1-8b").unwrap();
+        assert!(cfg.args.windows(2).any(|w| {
+            w[0] == "--chat-template-file" && w[1] == "/opt/templates/custom.jinja"
+        }));
+        assert!(!cfg.args.iter().any(|a| a == "--chat-template"));
+        assert!(
+            cfg.args
+                .windows(2)
+                .any(|w| { w[0] == "--reasoning-format" && w[1] == "deepseek" })
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn discover_skips_mmproj_and_vocab_artifacts() {
         let dir = std::env::temp_dir().join("gguf-switchboard-skip-artifacts-test");
         let _ = std::fs::remove_dir_all(&dir);
@@ -2691,6 +2789,62 @@ mod tests {
             ..Default::default()
         };
 
+        assert_eq!(
+            suggest_context_size(12, &entry, "/tmp/gemma-4-E4B-it-Q4_K_M.gguf", 65536),
+            32768
+        );
+    }
+
+    #[test]
+    fn suggest_context_size_ctx_floor_raises_heuristic_result() {
+        let mut entry = RegistryEntry {
+            alias: "gemma-4-e4b".to_string(),
+            file: "gemma-4-E4B-it-Q4_K_M.gguf".to_string(),
+            display_name: None,
+            kind: Some("chat".to_string()),
+            enabled: true,
+            priority: false,
+            port: None,
+            context_size: None,
+            ngl: None,
+            extra_args: Vec::new(),
+            ..Default::default()
+        };
+
+        // Heuristic alone picks 32768 for this shape (see the test above);
+        // a higher ctx floor must raise the result.
+        entry.ctx = Some(65536);
+        assert_eq!(
+            suggest_context_size(12, &entry, "/tmp/gemma-4-E4B-it-Q4_K_M.gguf", 65536),
+            65536
+        );
+
+        // A floor lower than the heuristic result must not lower it.
+        entry.ctx = Some(4096);
+        assert_eq!(
+            suggest_context_size(12, &entry, "/tmp/gemma-4-E4B-it-Q4_K_M.gguf", 65536),
+            32768
+        );
+    }
+
+    #[test]
+    fn suggest_context_size_ctx_floor_raises_explicit_context_size_override() {
+        let entry = RegistryEntry {
+            alias: "gemma-4-e4b".to_string(),
+            file: "gemma-4-E4B-it-Q4_K_M.gguf".to_string(),
+            display_name: None,
+            kind: Some("chat".to_string()),
+            enabled: true,
+            priority: false,
+            port: None,
+            context_size: Some(8192),
+            ngl: None,
+            extra_args: Vec::new(),
+            ctx: Some(32768),
+            ..Default::default()
+        };
+
+        // ctx is a floor even against an explicit context_size override.
         assert_eq!(
             suggest_context_size(12, &entry, "/tmp/gemma-4-E4B-it-Q4_K_M.gguf", 65536),
             32768

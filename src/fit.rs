@@ -171,6 +171,10 @@ pub struct ModelSummary {
     /// Model kind: "chat", "embedding", "coder", "vision", etc.
     /// Used to apply kind-specific optimizations (e.g., batch sizes for embedding models).
     pub kind: Option<String>,
+    /// Minimum context size this model must always keep, even after VRAM-
+    /// pressure fallback reduces context for other models (`RegistryEntry.ctx`).
+    /// `None` means no per-model floor beyond the existing global minimum.
+    pub context_floor: Option<u32>,
 }
 
 impl ModelSummary {
@@ -204,12 +208,19 @@ impl ModelSummary {
             ngl_pinned,
             pinned_ngl,
             kind: None,
+            context_floor: None,
         }
     }
 
     /// Set the model kind for kind-specific optimizations.
     pub fn with_kind(mut self, kind: &str) -> Self {
         self.kind = Some(kind.to_string());
+        self
+    }
+
+    /// Set the per-model minimum context floor (`RegistryEntry.ctx`).
+    pub fn with_context_floor(mut self, floor: Option<u32>) -> Self {
+        self.context_floor = floor;
         self
     }
 }
@@ -425,6 +436,7 @@ fn build_fallback_ladder(
     } else {
         config.context_minimum().max(512)
     };
+    let min_ctx = min_ctx.max(model.context_floor.unwrap_or(0));
 
     // Compute default NGL: full offload unless model is larger than usable VRAM.
     let usable = hardware.usable_vram_mb(config.vram_reserve_mb);
@@ -779,6 +791,7 @@ mod tests {
             ngl_pinned: false,
             pinned_ngl: None,
             kind: Some("chat".to_string()),
+            context_floor: None,
         }
     }
 
@@ -794,6 +807,7 @@ mod tests {
             ngl_pinned: false,
             pinned_ngl: None,
             kind: Some("chat".to_string()),
+            context_floor: None,
         }
     }
 
@@ -809,6 +823,7 @@ mod tests {
             ngl_pinned: false,
             pinned_ngl: None,
             kind: Some("embedding".to_string()),
+            context_floor: None,
         }
     }
 

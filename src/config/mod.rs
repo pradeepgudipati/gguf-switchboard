@@ -157,6 +157,10 @@ pub struct ModelConfig {
     pub capabilities: Vec<String>,
     #[serde(default)]
     pub hf_repo: Option<String>,
+    /// Minimum context size this model must always be served with, even after
+    /// VRAM-pressure fallback reduces context (sourced from `RegistryEntry.ctx`).
+    #[serde(default)]
+    pub ctx_floor: Option<u32>,
     /// GGUF `block_count` when known (used by auto_ngl).
     #[serde(default, skip_serializing)]
     pub block_count: Option<u32>,

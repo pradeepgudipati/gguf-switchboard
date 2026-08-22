@@ -1236,7 +1236,8 @@ impl SchedulerInner {
             model_cfg.ngl_pinned,
             crate::ngl::get_ngl(&base_args),
         )
-        .with_kind(&model_cfg.kind);
+        .with_kind(&model_cfg.kind)
+        .with_context_floor(model_cfg.ctx_floor);
         if model_cfg.kind == "embedding" && self.config.embedding_fit.enabled {
             model.model_fingerprint = format!(
                 "{}:embedding-{}-v1",
@@ -1594,7 +1595,12 @@ impl SchedulerInner {
             return Ok(None);
         };
 
-        let min = self.config.context_fallback_min;
+        let per_model_floor = self
+            .models
+            .read()
+            .get(model_id)
+            .and_then(|cfg| cfg.ctx_floor);
+        let min = self.config.context_fallback_min.max(per_model_floor.unwrap_or(0));
         let Some(next) = next_lower_context(current, min) else {
             return Ok(None);
         };

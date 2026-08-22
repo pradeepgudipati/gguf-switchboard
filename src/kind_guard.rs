@@ -41,6 +41,7 @@ mod tests {
             min_vram_gb: None,
             capabilities: vec![],
             hf_repo: None,
+            ctx_floor: None,
             block_count: None,
             ngl_pinned: false,
             model_fingerprint: None,
