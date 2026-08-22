@@ -51,6 +51,8 @@ use crate::state::AppState;
         usage::recent_usage,
         conformance::inspect,
         conformance::resolve_template,
+        conformance::run_battery,
+        conformance::compare,
     ),
     components(schemas(
         health::HealthResponse,
@@ -112,8 +114,15 @@ use crate::state::AppState;
         conformance::InspectResponse,
         conformance::ResolveTemplateRequest,
         conformance::ResolveTemplateResponse,
+        conformance::CompareMode,
+        conformance::CompareRequest,
+        conformance::CompareResult,
+        conformance::CompareReport,
         crate::conformance::classify::ToolCallClassification,
         crate::conformance::classify::ToolCallLocation,
+        crate::conformance::battery::BatteryCase,
+        crate::conformance::battery::CaseVerdict,
+        crate::conformance::battery::BatteryReport,
     )),
     tags(
         (name = "health", description = "Health and status endpoints"),
@@ -217,6 +226,14 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/conformance/resolve-template",
             axum::routing::post(conformance::resolve_template),
+        )
+        .route(
+            "/v1/conformance/battery/{model_id}",
+            axum::routing::post(conformance::run_battery),
+        )
+        .route(
+            "/v1/conformance/compare",
+            axum::routing::post(conformance::compare),
         )
         .route("/health", axum::routing::get(health::health))
         .route("/status", axum::routing::get(health::status))

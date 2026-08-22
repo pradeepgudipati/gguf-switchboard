@@ -150,7 +150,11 @@ fn extract_text(content: &Option<Content>) -> Option<String> {
                 })
                 .collect::<Vec<_>>()
                 .join("\n");
-            if joined.is_empty() { None } else { Some(joined) }
+            if joined.is_empty() {
+                None
+            } else {
+                Some(joined)
+            }
         }
     }
 }
@@ -267,8 +271,8 @@ fn is_tool_call_shaped(candidate: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{FunctionCall, ToolCall};
     use crate::types::chat::Role;
+    use crate::types::{FunctionCall, ToolCall};
 
     fn message(
         content: Option<&str>,
@@ -340,7 +344,9 @@ mod tests {
     #[test]
     fn detects_tool_call_tag_in_content() {
         let msg = message(
-            Some("<tool_call>{\"name\": \"echo\", \"arguments\": {\"message\": \"hi\"}}</tool_call>"),
+            Some(
+                "<tool_call>{\"name\": \"echo\", \"arguments\": {\"message\": \"hi\"}}</tool_call>",
+            ),
             None,
             None,
         );
@@ -383,7 +389,11 @@ mod tests {
     fn ordinary_json_object_without_tool_shape_is_not_flagged() {
         // A model returning a plain JSON answer (e.g. "here's the config: {...}")
         // that isn't tool-call-shaped should not be misclassified.
-        let msg = message(Some("Config: {\"port\": 8080, \"host\": \"localhost\"}"), None, None);
+        let msg = message(
+            Some("Config: {\"port\": 8080, \"host\": \"localhost\"}"),
+            None,
+            None,
+        );
         let result = classify_message(&msg);
         assert_eq!(result.location, ToolCallLocation::NoToolCallDetected);
     }

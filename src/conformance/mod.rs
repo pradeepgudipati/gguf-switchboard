@@ -7,4 +7,5 @@
 //! reuses the existing request/response types and the `Backend` trait rather
 //! than inventing a parallel pipeline.
 
+pub mod battery;
 pub mod classify;
