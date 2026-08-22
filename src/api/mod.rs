@@ -161,8 +161,8 @@ async fn openapi_json(State(state): State<Arc<AppState>>) -> Json<Value> {
 /// deploy — the exact symptom that made a shipped fix look broken until a
 /// hard refresh. Force revalidation on every load for that path prefix.
 async fn no_cache_swagger_assets(req: Request, next: Next) -> Response {
-    let is_swagger_ui = req.uri().path().starts_with("/swagger-ui")
-        || req.uri().path() == "/api-docs/openapi.json";
+    let is_swagger_ui =
+        req.uri().path().starts_with("/swagger-ui") || req.uri().path() == "/api-docs/openapi.json";
     let mut response = next.run(req).await;
     if is_swagger_ui {
         response
