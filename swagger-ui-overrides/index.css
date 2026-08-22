@@ -60,3 +60,19 @@
   opacity: 0.7;
   cursor: wait;
 }
+
+.conformance-console-link {
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+  padding: 5px 10px;
+  border-radius: 4px;
+  border: 1px solid rgba(73, 204, 144, 0.4);
+  background: #49cc90;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.conformance-console-link:hover {
+  background: #3aa877;
+}

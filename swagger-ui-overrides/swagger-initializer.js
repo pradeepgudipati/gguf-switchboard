@@ -507,9 +507,20 @@ window.onload = function() {
         });
     });
 
+    const conformanceLink = document.createElement('a');
+    conformanceLink.id = 'conformance-console-link';
+    conformanceLink.href = './conformance.html';
+    conformanceLink.target = '_blank';
+    conformanceLink.rel = 'noopener';
+    conformanceLink.className = 'conformance-console-link';
+    conformanceLink.textContent = 'Conformance Console →';
+    conformanceLink.title =
+      'Open the tool-calling / chat-template conformance console in a new tab';
+
     bar.appendChild(label);
     bar.appendChild(select);
     bar.appendChild(refreshBtn);
+    bar.appendChild(conformanceLink);
     wrapper.appendChild(bar);
 
     if (selectedModel) {

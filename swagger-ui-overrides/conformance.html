@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Conformance Console — GGUF Switchboard</title>
+  <link rel="stylesheet" href="./conformance.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-title">Conformance Console</span>
+        <span class="brand-subtitle">tool-calling &amp; chat-template diagnostics</span>
+      </div>
+      <a class="back-link" href="./index.html">&larr; back to Swagger UI</a>
+    </div>
+  </header>
+
+  <nav class="tabs" id="tabs">
+    <button class="tab-btn active" data-tab="inspect">Inspect</button>
+    <button class="tab-btn" data-tab="template">Resolved Template</button>
+    <button class="tab-btn" data-tab="battery">Battery</button>
+    <button class="tab-btn" data-tab="compare">Compare</button>
+  </nav>
+
+  <main id="app">
+    <!-- Inspect -->
+    <section class="tab-panel active" id="panel-inspect">
+      <p class="panel-help">
+        Run a chat request and see exactly where the tool call ended up: a proper structured
+        <code>tool_calls</code> entry, a JSON blob the model dumped as plain text, JSON that leaked
+        into <code>reasoning_content</code>, or nothing at all. Body shape matches
+        <code>/v1/chat/completions</code> — paste straight from Swagger.
+      </p>
+      <div class="field-row">
+        <label for="inspect-model">Model</label>
+        <select id="inspect-model"></select>
+      </div>
+      <label class="field-label" for="inspect-body">Request body</label>
+      <textarea id="inspect-body" class="code-input" spellcheck="false"></textarea>
+      <div class="actions">
+        <button id="inspect-run" class="run-btn">Run</button>
+        <span id="inspect-status" class="status"></span>
+      </div>
+      <div id="inspect-result" class="result"></div>
+    </section>
+
+    <!-- Resolved Template -->
+    <section class="tab-panel" id="panel-template">
+      <p class="panel-help">
+        Shows the actual prompt string a model's Jinja chat template resolves to for the given
+        messages/tools — the direct way to catch a broken or missing embedded template (GLM/DeepSeek-
+        style models are the recurring offenders) instead of guessing from garbled output.
+      </p>
+      <div class="field-row">
+        <label for="template-model">Model</label>
+        <select id="template-model"></select>
+      </div>
+      <label class="field-label" for="template-body">Messages / tools</label>
+      <textarea id="template-body" class="code-input" spellcheck="false"></textarea>
+      <div class="actions">
+        <button id="template-run" class="run-btn">Resolve</button>
+        <span id="template-status" class="status"></span>
+      </div>
+      <div id="template-result" class="result"></div>
+    </section>
+
+    <!-- Battery -->
+    <section class="tab-panel" id="panel-battery">
+      <p class="panel-help">
+        Runs 4 fixed scenarios against one model — single tool call, parallel tool calls, tool call
+        with reasoning, and a multi-turn tool-result summary — and scores each pass/fail instead of
+        dumping raw JSON.
+      </p>
+      <div class="field-row">
+        <label for="battery-model">Model</label>
+        <select id="battery-model"></select>
+      </div>
+      <div class="actions">
+        <button id="battery-run" class="run-btn">Run battery</button>
+        <span id="battery-status" class="status"></span>
+      </div>
+      <div id="battery-result" class="result"></div>
+    </section>
+
+    <!-- Compare -->
+    <section class="tab-panel" id="panel-compare">
+      <p class="panel-help">
+        Fires the same request (or the same battery case) at two models, one after another. The
+        switchboard holds one model resident at a time, so this is two full model swaps back to
+        back — expect it to take as long as loading each model, not an instant response.
+      </p>
+      <div class="field-row two-col">
+        <div>
+          <label for="compare-model-a">Model A</label>
+          <select id="compare-model-a"></select>
+        </div>
+        <div>
+          <label for="compare-model-b">Model B</label>
+          <select id="compare-model-b"></select>
+        </div>
+      </div>
+      <div class="field-row">
+        <label for="compare-mode">Mode</label>
+        <select id="compare-mode">
+          <option value="battery_case">Battery case</option>
+          <option value="custom_request">Custom request</option>
+        </select>
+      </div>
+      <div id="compare-case-row" class="field-row">
+        <label for="compare-case">Case</label>
+        <select id="compare-case">
+          <option value="single_tool_call">single_tool_call</option>
+          <option value="parallel_tool_calls">parallel_tool_calls</option>
+          <option value="tool_call_with_reasoning">tool_call_with_reasoning</option>
+          <option value="multi_turn_tool_result">multi_turn_tool_result</option>
+        </select>
+      </div>
+      <div id="compare-request-row" style="display:none">
+        <label class="field-label" for="compare-body">Request body</label>
+        <textarea id="compare-body" class="code-input" spellcheck="false"></textarea>
+      </div>
+      <div class="actions">
+        <button id="compare-run" class="run-btn">Compare</button>
+        <span id="compare-status" class="status"></span>
+      </div>
+      <div id="compare-result" class="result compare-grid"></div>
+    </section>
+  </main>
+
+  <script src="./conformance.js"></script>
+</body>
+</html>
