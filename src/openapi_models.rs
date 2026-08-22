@@ -50,6 +50,7 @@ pub fn inject_model_enums(doc: &mut Value, models: &[(String, ModelConfig)]) {
         "CompletionRequest",
         "EmbeddingRequest",
         "ResponseRequest",
+        "ResolveTemplateRequest",
     ];
 
     let Some(schemas) = doc

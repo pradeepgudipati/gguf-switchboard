@@ -2,6 +2,7 @@ pub mod anthropic;
 pub mod audio;
 pub mod chat;
 pub mod completions;
+pub mod conformance;
 pub mod embeddings;
 pub mod health;
 pub mod metrics;
@@ -48,6 +49,8 @@ use crate::state::AppState;
         audio::speech,
         usage::usage,
         usage::recent_usage,
+        conformance::inspect,
+        conformance::resolve_template,
     ),
     components(schemas(
         health::HealthResponse,
@@ -106,6 +109,11 @@ use crate::state::AppState;
         crate::types::anthropic::Usage,
         crate::types::audio::SpeechRequest,
         crate::types::chat::Content,
+        conformance::InspectResponse,
+        conformance::ResolveTemplateRequest,
+        conformance::ResolveTemplateResponse,
+        crate::conformance::classify::ToolCallClassification,
+        crate::conformance::classify::ToolCallLocation,
     )),
     tags(
         (name = "health", description = "Health and status endpoints"),
@@ -118,6 +126,7 @@ use crate::state::AppState;
         (name = "audio", description = "Audio transcription and speech endpoints"),
         (name = "usage", description = "Usage statistics endpoints"),
         (name = "metrics", description = "Prometheus metrics endpoint"),
+        (name = "conformance", description = "Tool-calling and chat-template conformance diagnostics"),
     )
 )]
 pub struct ApiDoc;
@@ -201,6 +210,14 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/v1/audio/speech", axum::routing::post(audio::speech))
         .route("/v1/usage", axum::routing::get(usage::usage))
         .route("/v1/usage/recent", axum::routing::get(usage::recent_usage))
+        .route(
+            "/v1/conformance/inspect",
+            axum::routing::post(conformance::inspect),
+        )
+        .route(
+            "/v1/conformance/resolve-template",
+            axum::routing::post(conformance::resolve_template),
+        )
         .route("/health", axum::routing::get(health::health))
         .route("/status", axum::routing::get(health::status))
         .route("/metrics", axum::routing::get(metrics::metrics))

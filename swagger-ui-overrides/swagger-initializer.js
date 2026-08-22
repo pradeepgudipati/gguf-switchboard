@@ -106,6 +106,53 @@ window.onload = function() {
       }
     }
 
+    if (path === '/v1/conformance/inspect') {
+      if (Array.isArray(body.messages)) {
+        body.messages = body.messages
+          .filter(function(msg) { return msg && msg.role; })
+          .map(function(msg) {
+            var cleaned = { role: msg.role };
+            var content = msg.content;
+            if (content == null || content === 'string') {
+              content = msg.role === 'user'
+                ? 'Call the echo tool with message set to "hello".'
+                : 'Hello!';
+            }
+            cleaned.content = content;
+            return cleaned;
+          });
+      }
+      if (!Array.isArray(body.messages) || body.messages.length === 0) {
+        body.messages = [{ role: 'user', content: 'Call the echo tool with message set to "hello".' }];
+      }
+      if (isSwaggerPlaceholder(body.tool_choice)) delete body.tool_choice;
+      if (body.tools && Array.isArray(body.tools) && body.tools.every(isPlaceholderTool)) {
+        delete body.tools;
+      }
+    }
+
+    if (path === '/v1/conformance/resolve-template') {
+      if (Array.isArray(body.messages)) {
+        body.messages = body.messages
+          .filter(function(msg) { return msg && msg.role; })
+          .map(function(msg) {
+            var cleaned = { role: msg.role };
+            var content = msg.content;
+            if (content == null || content === 'string') {
+              content = 'Say hello in one sentence.';
+            }
+            cleaned.content = content;
+            return cleaned;
+          });
+      }
+      if (!Array.isArray(body.messages) || body.messages.length === 0) {
+        body.messages = [{ role: 'user', content: 'Say hello in one sentence.' }];
+      }
+      if (body.tools && Array.isArray(body.tools) && body.tools.every(isPlaceholderTool)) {
+        delete body.tools;
+      }
+    }
+
     if (path === '/v1/completions') {
       if (isSwaggerPlaceholder(body.prompt)) {
         body.prompt = 'Say hello in one sentence.';
@@ -187,6 +234,31 @@ window.onload = function() {
         max_tokens: 512
       };
     }
+    if (path === '/v1/conformance/inspect') {
+      return {
+        model: resolvedModel,
+        messages: [{ role: 'user', content: 'Call the echo tool with message set to "hello".' }],
+        tools: [{
+          type: 'function',
+          function: {
+            name: 'echo',
+            parameters: {
+              type: 'object',
+              properties: { message: { type: 'string' } },
+              required: ['message']
+            }
+          }
+        }],
+        tool_choice: 'required'
+      };
+    }
+    if (path === '/v1/conformance/resolve-template') {
+      return {
+        model: resolvedModel,
+        messages: [{ role: 'user', content: 'Say hello in one sentence.' }],
+        tools: []
+      };
+    }
     if (path === '/v1/embeddings') {
       return {
         model: resolvedModel,
@@ -221,6 +293,26 @@ window.onload = function() {
     return null;
   }
 
+  // Swagger UI's body/parameter editors are React-controlled inputs. Setting
+  // `.value` directly (as a plain DOM mutation) paints the screen but never
+  // reaches React's internal state or Swagger's Redux store — so the visible
+  // editor can revert on the next re-render, and `requestInterceptor` becomes
+  // the only thing keeping the outgoing request correct. Use the native
+  // value-setter + a real `input` event so React's onChange fires and its
+  // state actually updates.
+  function setReactControlledValue(el, value) {
+    if (!el) return;
+    var proto = el.tagName === 'TEXTAREA' ? window.HTMLTextAreaElement.prototype : window.HTMLInputElement.prototype;
+    var setter = Object.getOwnPropertyDescriptor(proto, 'value') &&
+      Object.getOwnPropertyDescriptor(proto, 'value').set;
+    if (setter) {
+      setter.call(el, value);
+    } else {
+      el.value = value;
+    }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+
   function markBodyEditor(textarea) {
     if (!textarea) return;
     textarea.addEventListener('input', function() {
@@ -242,16 +334,16 @@ window.onload = function() {
         sanitized.model = model;
       }
       if (!userEditedBodies.has(textarea)) {
-        textarea.value = JSON.stringify(sanitized, null, 2);
+        setReactControlledValue(textarea, JSON.stringify(sanitized, null, 2));
       } else if (model && 'model' in json) {
         json.model = model;
-        textarea.value = JSON.stringify(json, null, 2);
+        setReactControlledValue(textarea, JSON.stringify(json, null, 2));
       }
     } catch (e) {
       if (userEditedBodies.has(textarea)) return;
       var fallback = defaultRequestBody(path, model);
       if (fallback) {
-        textarea.value = JSON.stringify(fallback, null, 2);
+        setReactControlledValue(textarea, JSON.stringify(fallback, null, 2));
       }
     }
   }
@@ -264,7 +356,7 @@ window.onload = function() {
         const json = JSON.parse(textarea.value);
         if (!json || typeof json !== 'object' || !('model' in json)) return;
         json.model = model;
-        textarea.value = JSON.stringify(json, null, 2);
+        setReactControlledValue(textarea, JSON.stringify(json, null, 2));
       } catch (e) {
         /* not JSON */
       }
@@ -273,7 +365,7 @@ window.onload = function() {
     document
       .querySelectorAll('input[data-param-name="model"], tr[data-param-name="model"] input')
       .forEach(function(input) {
-        input.value = model;
+        setReactControlledValue(input, model);
       });
 
     document
@@ -281,7 +373,7 @@ window.onload = function() {
         'input[data-param-name="model_id"], tr[data-param-name="model_id"] input'
       )
       .forEach(function(input) {
-        input.value = model;
+        setReactControlledValue(input, model);
       });
   }
 

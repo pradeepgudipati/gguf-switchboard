@@ -2,6 +2,7 @@ pub mod api;
 pub mod backend;
 pub mod batch;
 pub mod config;
+pub mod conformance;
 pub mod context;
 pub mod db;
 pub mod embedding_admission;

@@ -379,6 +379,50 @@ impl Backend for LlamaCppBackend {
     async fn server_version(&self) -> Option<String> {
         self.server_version.lock().await.clone()
     }
+
+    /// Passthrough for llama-server's own diagnostic endpoints (e.g.
+    /// `/props`, which returns the resolved `chat_template` string when the
+    /// server was started with `--jinja`). Used by the conformance console,
+    /// not part of the OpenAI-compatible surface.
+    async fn raw_get(&self, path: &str) -> Result<serde_json::Value, RuntimeError> {
+        let url = format!("{}{path}", self.config.backend_url);
+        let response = self
+            .client
+            .get(&url)
+            .send()
+            .await
+            .map_err(|e| RuntimeError::ProxyError(format!("Request to backend failed: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<unreadable body>".to_string());
+            return Err(RuntimeError::BackendError(format!(
+                "Backend returned {status}: {text}"
+            )));
+        }
+        response
+            .json()
+            .await
+            .map_err(|e| RuntimeError::ProxyError(format!("Invalid JSON from backend: {e}")))
+    }
+
+    /// Passthrough for llama-server's own diagnostic POST endpoints (e.g.
+    /// `/apply-template`, which renders `messages`/`tools` into a prompt
+    /// string without running inference). See `raw_get`.
+    async fn raw_post(
+        &self,
+        path: &str,
+        body: serde_json::Value,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        let response = self.forward_json(path, body).await?;
+        response
+            .json()
+            .await
+            .map_err(|e| RuntimeError::ProxyError(format!("Invalid JSON from backend: {e}")))
+    }
 }
 
 /// `llama-server --version` output keyed by binary path. A backend instance is

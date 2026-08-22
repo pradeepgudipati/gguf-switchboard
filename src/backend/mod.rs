@@ -72,6 +72,26 @@ pub trait Backend: Send + Sync {
     async fn server_version(&self) -> Option<String> {
         None
     }
+    /// Best-effort raw passthrough to a backend-native diagnostic endpoint
+    /// (e.g. llama-server's `/props`). Not part of the OpenAI-compatible
+    /// surface; used by the conformance console. Backends that don't expose
+    /// anything equivalent should leave the default error in place.
+    async fn raw_get(&self, path: &str) -> Result<serde_json::Value, RuntimeError> {
+        Err(RuntimeError::InvalidRequest(format!(
+            "raw_get not supported by this backend for {path}"
+        )))
+    }
+    /// Best-effort raw passthrough for a backend-native POST endpoint (e.g.
+    /// llama-server's `/apply-template`). See `raw_get`.
+    async fn raw_post(
+        &self,
+        path: &str,
+        _body: serde_json::Value,
+    ) -> Result<serde_json::Value, RuntimeError> {
+        Err(RuntimeError::InvalidRequest(format!(
+            "raw_post not supported by this backend for {path}"
+        )))
+    }
 }
 
 /// Create a concrete backend for the given model id and config.
