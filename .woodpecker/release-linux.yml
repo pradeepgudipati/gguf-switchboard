@@ -24,7 +24,7 @@ when:
 
 steps:
   - name: build
-    image: rust:1.85-bookworm
+    image: rust:1.88-bookworm
     environment:
       CARGO_TERM_COLOR: "always"
       RUST_BACKTRACE: "1"
