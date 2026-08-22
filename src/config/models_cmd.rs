@@ -244,7 +244,7 @@ fn render_search_table(hits: &[Value], assessments: &[SearchAssessment]) -> Stri
                 .get("gguf")
                 .and_then(|g| g.get("context_length"))
                 .and_then(|v| v.as_u64())
-                .map(|v| format!("{} tok", v))
+                .map(|v| format!("{v} tok"))
                 .unwrap_or_default();
             let arch = hit
                 .get("gguf")

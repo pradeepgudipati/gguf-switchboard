@@ -124,8 +124,8 @@ impl Backend for LlamaCppBackend {
         if let Some(model_path) = self.find_model_arg() {
             if !std::path::Path::new(model_path).exists() {
                 return Err(RuntimeError::ModelNotFound(format!(
-                    "Model GGUF file not found: '{}'. Ensure the model file exists and the path is correct in config.toml.",
-                    model_path
+                    "Model GGUF file not found: '{model_path}'. Ensure the model file \
+                     exists and the path is correct in config.toml."
                 )));
             }
         } else {
@@ -225,9 +225,8 @@ impl Backend for LlamaCppBackend {
                                     // proceed.
                                     self.running.store(false, Ordering::SeqCst);
                                     return Err(RuntimeError::BackendError(format!(
-                                        "Backend process (pid {:?}) did not exit after SIGTERM and SIGKILL; \
-                                         VRAM may still be in use",
-                                        pid
+                                        "Backend process (pid {pid:?}) did not exit after \
+                                         SIGTERM and SIGKILL; VRAM may still be in use"
                                     )));
                                 }
                             }

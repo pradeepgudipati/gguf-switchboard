@@ -138,7 +138,7 @@ impl HardwareSummary {
 
 fn compute_hardware_fingerprint(gpus: &[GpuDeviceInfo], total_vram_mb: u64) -> String {
     if gpus.is_empty() {
-        return format!("cpu-{}mb", total_vram_mb);
+        return format!("cpu-{total_vram_mb}mb");
     }
     // Group by name → count, then format as "2xRTX4090-24564"
     let mut counts: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
@@ -1126,12 +1126,7 @@ mod tests {
         // Later plans should have smaller batch sizes
         for plan in &plans[1..] {
             let batch = plan.batch_size.unwrap();
-            assert!(
-                batch <= first_batch,
-                "batch {} > first {}",
-                batch,
-                first_batch
-            );
+            assert!(batch <= first_batch, "batch {batch} > first {first_batch}");
         }
     }
 
@@ -1151,7 +1146,7 @@ mod tests {
 
         for plan in planner.all_plans() {
             let batch = plan.batch_size.unwrap();
-            assert!(batch >= 256, "batch {} < 256 minimum", batch);
+            assert!(batch >= 256, "batch {batch} < 256 minimum");
         }
     }
 
