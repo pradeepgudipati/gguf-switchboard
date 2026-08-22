@@ -213,7 +213,9 @@ fn parallel_tool_calls_request(model: &str) -> ChatCompletionRequest {
         model: model.to_string(),
         messages: vec![ChatMessage {
             role: Role::User,
-            content: Some(Content::Text("Call get_weather for both Paris and Tokyo.".to_string())),
+            content: Some(Content::Text(
+                "Call get_weather for both Paris and Tokyo.".to_string(),
+            )),
             name: None,
             tool_calls: None,
             tool_call_id: None,
