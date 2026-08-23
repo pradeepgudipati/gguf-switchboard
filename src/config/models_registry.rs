@@ -1589,32 +1589,32 @@ impl ModelsRegistry {
             // whatever survives.
             let mut candidate = entry.clone();
 
-            if candidate.has_vllm_source() {
-                if let Some(vllm_file) = &candidate.vllm_file {
-                    let path = Path::new(vllm_file);
-                    let path = if path.is_absolute() {
-                        path.to_path_buf()
-                    } else {
-                        models_dirs
-                            .first()
-                            .map(|dir| dir.join(vllm_file))
-                            .unwrap_or_else(|| path.to_path_buf())
-                    };
-                    if path.exists() {
-                        claimed_files.insert(normalize_file_key(&models_dirs, vllm_file));
-                    } else {
-                        tracing::warn!(
-                            alias = %entry.alias,
-                            vllm_file = %vllm_file,
-                            "vLLM source path not found for this entry; dropping it \
-                             (falling back to any GGUF source on the same alias)"
-                        );
-                        candidate.vllm_file = None;
-                    }
+            if candidate.has_vllm_source()
+                && let Some(vllm_file) = &candidate.vllm_file
+            {
+                let path = Path::new(vllm_file);
+                let path = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    models_dirs
+                        .first()
+                        .map(|dir| dir.join(vllm_file))
+                        .unwrap_or_else(|| path.to_path_buf())
+                };
+                if path.exists() {
+                    claimed_files.insert(normalize_file_key(&models_dirs, vllm_file));
+                } else {
+                    tracing::warn!(
+                        alias = %entry.alias,
+                        vllm_file = %vllm_file,
+                        "vLLM source path not found for this entry; dropping it \
+                         (falling back to any GGUF source on the same alias)"
+                    );
+                    candidate.vllm_file = None;
                 }
-                // vllm_hf_repo alone (no local dir) has nothing to validate —
-                // it's resolved by vLLM itself at serve time.
             }
+            // vllm_hf_repo alone (no local dir) has nothing to validate — it's
+            // resolved by vLLM itself at serve time.
 
             if candidate.has_gguf_source() {
                 match resolve_model_path(&models_dirs, &candidate.file) {
@@ -1843,7 +1843,7 @@ impl ModelsRegistry {
                 && (entry.ngl.is_some() || extra_args_pin_ngl(&effective_extra_args(entry)));
 
             let config = ModelConfig {
-                backend: entry_backend,
+                backend: entry_backend.clone(),
                 display_name: entry
                     .display_name
                     .clone()
@@ -1971,12 +1971,17 @@ fn resolve_backend_and_weights(
 /// — the last three mirror the llama.cpp branch's tuple shape but are always
 /// `None` here: vLLM manages its own memory fitting (`--gpu-memory-utilization`)
 /// rather than the GGUF-derived `auto_ngl`/fit-planner heuristics.
+/// `(command, args, block_count, max_context_from_gguf, model_fingerprint)` —
+/// shared by both the llama.cpp and vLLM branches of `expand()`'s per-entry
+/// build step (the last three are always `None` for vLLM).
+type BackendArgsResult = Result<(String, Vec<String>, Option<u32>, Option<u32>, Option<String>), RuntimeError>;
+
 fn build_vllm_args(
     entry: &RegistryEntry,
     defaults: &RegistryDefaults,
     models_dirs: &[PathBuf],
     port: u16,
-) -> Result<(String, Vec<String>, Option<u32>, Option<u32>, Option<String>), RuntimeError> {
+) -> BackendArgsResult {
     // Prefer a local safetensors directory; fall back to serving straight
     // from the HF repo id when no local copy was pulled.
     let model_ref = if let Some(vllm_file) = entry.vllm_file.as_deref().filter(|f| !f.is_empty()) {
