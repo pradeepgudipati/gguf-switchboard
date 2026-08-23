@@ -1,0 +1,20 @@
+# This project targets Linux (systemd service, shell scripts, Woodpecker/GH
+# Actions CI on Linux runners). Force LF line endings for everything text,
+# regardless of a contributor's local core.autocrlf setting — prevents the
+# CRLF-vs-LF churn that broke `cargo fmt --check` on CI after a Windows dev
+# session touched src/config/models_cmd.rs without this in place.
+* text=auto eol=lf
+
+*.rs text eol=lf
+*.toml text eol=lf
+*.sh text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# Binary/generated — never touch line endings.
+*.gguf binary
+*.safetensors binary
+*.png binary
+*.jpg binary
+*.ico binary
