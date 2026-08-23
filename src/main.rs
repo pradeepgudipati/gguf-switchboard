@@ -382,7 +382,7 @@ async fn run_models_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error
         "files" => cmd_files(&sub_args).await,
         "pull" => cmd_pull(&sub_args).await,
         other => Err(format!(
-            "models: unknown subcommand '{other}'\n\nUsage:\n  gguf-switchboard models search <query> [--limit N]\n  gguf-switchboard models search vllm <query> [--limit N]\n  gguf-switchboard models files <repo-id>\n  gguf-switchboard models pull <repo-id> [--quant QUANT] [--dir PATH] [--connections N] [--no-bench]\n  gguf-switchboard models pull vllm <repo-id> [--dir PATH] [--draft <repo>] [--num-speculative-tokens N] [--attention-backend NAME] [--tensor-parallel-size N] [--gpu-memory-utilization F] [--served-model-name NAME]"
+            "models: unknown subcommand '{other}'\n\nUsage:\n  gguf-switchboard models search <query> [--limit N]\n  gguf-switchboard models search vllm <query> [--limit N]\n  gguf-switchboard models files <repo-id>\n  gguf-switchboard models pull <repo-id> [--quant QUANT] [--dir PATH] [--connections N] [--no-bench]\n  gguf-switchboard models pull vllm <repo-id> [--dir PATH] [--draft <repo>] [--num-speculative-tokens N] [--attention-backend NAME] [--tensor-parallel-size N] [--gpu-memory-utilization F] [--served-model-name NAME] [--force]"
         ).into()),
     }
 }

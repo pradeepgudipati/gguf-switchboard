@@ -985,13 +985,15 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 /// `gguf-switchboard models pull vllm <repo-id> [--dir /path] [--registry /path]
 ///     [--draft <repo>] [--num-speculative-tokens N] [--attention-backend NAME]
 ///     [--tensor-parallel-size N] [--gpu-memory-utilization F] [--served-model-name NAME]
-///     [--connections N]`
+///     [--connections N] [--force]`
 ///
 /// Downloads a safetensors repo (weights + config/tokenizer files) into a
 /// `vllm-models` directory sibling to the GGUF models dir, detects
 /// quantization/speculative-decoding metadata from `config.json`, and writes
 /// a `models.toml` entry with `backend = "vllm"` and the exact parameters
-/// vLLM needs to serve it.
+/// vLLM needs to serve it. Short-circuits before touching the network if
+/// this exact repo is already downloaded and registered — pass `--force` to
+/// re-pull anyway (e.g. after a partial/corrupted download).
 async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut repo: Option<String> = None;
     let mut dest_override: Option<String> = None;
@@ -1003,6 +1005,7 @@ async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     let mut tensor_parallel_size: Option<u32> = None;
     let mut gpu_memory_utilization: Option<f32> = None;
     let mut served_model_name: Option<String> = None;
+    let mut force = false;
 
     let mut i = 1; // args[0] is "vllm"
     while i < args.len() {
@@ -1046,6 +1049,10 @@ async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             "--served-model-name" => {
                 served_model_name = Some(require_val(args, &mut i, "--served-model-name")?);
             }
+            "--force" => {
+                force = true;
+                i += 1;
+            }
             arg if arg.starts_with('-') => {
                 return Err(format!("models pull vllm: unknown flag '{arg}'").into());
             }
@@ -1078,7 +1085,58 @@ async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     }
     println!("✓ vLLM environment OK ({vllm_command} run vllm)");
 
-    // 2. Fetch repo tree and validate it's a servable safetensors repo.
+    // 2. Resolve destination + registry, then check whether this exact repo
+    // is already downloaded and registered before touching the network at
+    // all. aria2c/the native downloader already skip re-fetching individual
+    // files that are complete, but that still means a repo-tree fetch, N
+    // per-file redirect round-trips, a second metadata fetch, and a
+    // registry rewrite on every re-run of an already-pulled model — wasted
+    // work `--force` is what should trigger it again, not running the same
+    // command twice.
+    let base_dest = match &dest_override {
+        Some(dir) => PathBuf::from(dir),
+        None => resolve_default_vllm_models_dir()?,
+    };
+    let dest_dir = base_dest.join(sanitize_repo_dirname(&repo));
+    let alias = alias_from_repo(&repo);
+    let registry_path = models_file
+        .clone()
+        .or_else(|| {
+            let candidate = base_dest.join("models.toml");
+            if candidate.is_file() {
+                Some(candidate.to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "models.toml".to_string());
+    let mut registry = if Path::new(&registry_path).is_file() {
+        ModelsRegistry::load(&registry_path)?
+    } else {
+        ModelsRegistry {
+            auto_discover: true,
+            models: Vec::new(),
+            ..Default::default()
+        }
+    };
+
+    if !force
+        && let Some(existing) = registry
+            .models
+            .iter()
+            .find(|e| e.vllm_hf_repo.as_deref() == Some(repo.as_str()))
+        && let Some(existing_dir) = existing.vllm_file.as_deref()
+        && crate::fit::sum_safetensors_mb(Path::new(existing_dir)) > 0
+    {
+        println!(
+            "✓ Already registered as: {} (vLLM source) — {repo} is already downloaded at {existing_dir}.\n  \
+             Use --force to re-pull (e.g. after a partial/corrupted download).",
+            existing.alias
+        );
+        return Ok(());
+    }
+
+    // 3. Fetch repo tree and validate it's a servable safetensors repo.
     let client = hf_download::build_hf_client()?;
     let entries = hf_download::fetch_repo_tree_all(&client, &repo).await?;
     if !super::vllm_meta::is_safetensors_repo(&entries) {
@@ -1094,12 +1152,6 @@ async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         .filter(|e| super::vllm_meta::is_vllm_serving_file(&e.path))
         .collect();
 
-    // 3. Resolve destination: <vllm-models>/<org>__<repo>/.
-    let base_dest = match &dest_override {
-        Some(dir) => PathBuf::from(dir),
-        None => resolve_default_vllm_models_dir()?,
-    };
-    let dest_dir = base_dest.join(sanitize_repo_dirname(&repo));
     println!("Repository: {repo}");
     println!(
         "Files: {} ({} total)",
@@ -1196,30 +1248,7 @@ async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         None
     };
 
-    // 7. Register in models.toml.
-    let alias = alias_from_repo(&repo);
-    let registry_path = models_file
-        .clone()
-        .or_else(|| {
-            let candidate = base_dest.join("models.toml");
-            if candidate.is_file() {
-                Some(candidate.to_string_lossy().into_owned())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "models.toml".to_string());
-
-    let mut registry = if Path::new(&registry_path).is_file() {
-        ModelsRegistry::load(&registry_path)?
-    } else {
-        ModelsRegistry {
-            auto_discover: true,
-            models: Vec::new(),
-            ..Default::default()
-        }
-    };
-
+    // 7. Register in models.toml (alias/registry_path/registry resolved in step 2).
     let kind = infer_kind_from_filename(&format!(
         "{repo} {}",
         meta.architecture.as_deref().unwrap_or("")
