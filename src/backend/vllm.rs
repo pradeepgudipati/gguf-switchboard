@@ -19,6 +19,7 @@ use crate::types::chat::{
 };
 use crate::types::completions::{CompletionChunk, CompletionRequest, CompletionResponse};
 use crate::types::embeddings::{EmbeddingRequest, EmbeddingResponse};
+use crate::types::rerank::{RerankRequest, RerankResponse};
 
 use super::Backend;
 use super::llama_cpp::SseLineParser;
@@ -299,6 +300,17 @@ impl Backend for VllmBackend {
         let body = serde_json::to_value(&request)?;
         let resp = self.forward_json("/embeddings", body).await?;
         let response: EmbeddingResponse = resp.json().await.map_err(|e| {
+            RuntimeError::BackendError(format!("Failed to parse backend response: {e}"))
+        })?;
+        Ok(response)
+    }
+
+    async fn rerank(&self, request: RerankRequest) -> Result<RerankResponse, RuntimeError> {
+        // vLLM's OpenAI-compatible server exposes the same Jina/Cohere-style
+        // `/rerank` endpoint as llama-server for score/reranking models.
+        let body = serde_json::to_value(&request)?;
+        let resp = self.forward_json("/rerank", body).await?;
+        let response: RerankResponse = resp.json().await.map_err(|e| {
             RuntimeError::BackendError(format!("Failed to parse backend response: {e}"))
         })?;
         Ok(response)

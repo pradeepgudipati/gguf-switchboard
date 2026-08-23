@@ -4,6 +4,7 @@ pub mod chat;
 pub mod completions;
 pub mod embeddings;
 pub mod models;
+pub mod rerank;
 pub mod responses;
 
 use chrono::Utc;
@@ -35,7 +36,7 @@ pub struct ModelInfo {
     pub owned_by: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-    /// Model role: `chat`, `coder`, `vision`, or `embedding`.
+    /// Model role: `chat`, `coder`, `vision`, `embedding`, or `reranker`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

@@ -12,6 +12,7 @@ use crate::errors::RuntimeError;
 use crate::types::chat::{ChatCompletionChunk, ChatCompletionRequest, ChatCompletionResponse};
 use crate::types::completions::{CompletionChunk, CompletionRequest, CompletionResponse};
 use crate::types::embeddings::{EmbeddingRequest, EmbeddingResponse};
+use crate::types::rerank::{RerankRequest, RerankResponse};
 
 /// Trait implemented by every inference backend (llama.cpp, vLLM, etc.).
 #[async_trait]
@@ -53,6 +54,8 @@ pub trait Backend: Send + Sync {
         &self,
         request: EmbeddingRequest,
     ) -> Result<EmbeddingResponse, RuntimeError>;
+    /// Rerank (cross-encoder relevance scoring) via llama-server's `--reranking` endpoint.
+    async fn rerank(&self, request: RerankRequest) -> Result<RerankResponse, RuntimeError>;
     /// The model id this backend serves.
     fn _name(&self) -> &str;
     /// The engine type (e.g. "llama.cpp").

@@ -70,7 +70,7 @@ pub struct RegistryEntry {
     /// Human-readable name for `/v1/models`. Defaults to a title-cased alias.
     #[serde(default)]
     pub display_name: Option<String>,
-    /// Model role: `chat`, `coder`, `vision`, or `embedding`. Inferred from alias/file when omitted.
+    /// Model role: `chat`, `coder`, `vision`, `embedding`, or `reranker`. Inferred from alias/file when omitted.
     #[serde(default)]
     pub kind: Option<String>,
     /// When false, the model is omitted from scheduling and `/v1/models`.
@@ -857,12 +857,14 @@ pub fn resolve_models_dirs(configured: &str) -> Result<Vec<PathBuf>, RuntimeErro
 
 fn is_embedding_like_alias(alias: &str) -> bool {
     let lower = alias.to_ascii_lowercase();
-    lower.contains("embed") || lower.contains("granite-embedding")
+    lower.contains("embed") || lower.contains("granite-embedding") || lower.contains("rerank")
 }
 
 fn infer_kind(alias: &str, file: &str) -> String {
     let combined = format!("{alias} {file}").to_ascii_lowercase();
-    if combined.contains("embed") {
+    if combined.contains("rerank") {
+        "reranker".to_string()
+    } else if combined.contains("embed") {
         "embedding".to_string()
     } else if combined.contains("-vl") || combined.contains("vision") || combined.contains("mmproj")
     {
@@ -1033,7 +1035,7 @@ fn suggest_context_size_unfloored(
     }
 
     let kind = entry.effective_kind();
-    if kind == "embedding" {
+    if kind == "embedding" || kind == "reranker" {
         return 8192.min(default_context);
     }
 
@@ -1811,9 +1813,16 @@ impl ModelsRegistry {
                         "-ngl".to_string(),
                         ngl.to_string(),
                     ];
-                    if entry.effective_kind() == "embedding" {
+                    let effective_kind = entry.effective_kind();
+                    if effective_kind == "embedding" || effective_kind == "reranker" {
+                        // Reranker (cross-encoder) models are served through llama-server's
+                        // pooling/rerank path too, so they need the same `--embeddings`
+                        // enablement plus the dedicated `--reranking` flag for `/rerank`.
                         args.push("--embeddings".to_string());
-                        // Add batch size flags for embedding models if not already configured.
+                        if effective_kind == "reranker" {
+                            args.push("--reranking".to_string());
+                        }
+                        // Add batch size flags for pooling models if not already configured.
                         // This prevents "input exceeds physical batch size" errors with large inputs.
                         if !crate::batch::has_batch_flags(&args) {
                             let (batch_size, ubatch_size) = if let (Some(b), Some(ub)) =
@@ -2820,6 +2829,61 @@ mod tests {
         );
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn expand_adds_reranking_flag_for_reranker_models() {
+        let dir = std::env::temp_dir().join("gguf-switchboard-reranking-flag-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let rerank_path = dir.join("bge-reranker-v2-m3.Q4_K_M.gguf");
+        write_minimal_gguf(&rerank_path, "bert");
+
+        let registry = ModelsRegistry {
+            version: 1,
+            defaults: RegistryDefaults {
+                models_dir: dir.to_string_lossy().into_owned(),
+                base_port: 9200,
+                ..RegistryDefaults::default()
+            },
+            auto_discover: false,
+            models: vec![RegistryEntry {
+                alias: "bge-reranker-v2-m3".to_string(),
+                file: "bge-reranker-v2-m3.Q4_K_M.gguf".to_string(),
+                kind: Some("reranker".to_string()),
+                ..Default::default()
+            }],
+        };
+
+        let models = registry.expand("llama.cpp", 12).unwrap();
+        let rerank_cfg = models.get("bge-reranker-v2-m3").unwrap();
+        assert!(
+            rerank_cfg.args.contains(&"--embeddings".to_string()),
+            "Reranker model must have --embeddings flag"
+        );
+        assert!(
+            rerank_cfg.args.contains(&"--reranking".to_string()),
+            "Reranker model must have --reranking flag"
+        );
+        assert!(
+            rerank_cfg.args.contains(&"-b".to_string()),
+            "Reranker model must have -b (batch size) flag"
+        );
+        assert_eq!(rerank_cfg.kind, "reranker");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn infer_kind_detects_reranker_from_alias_or_file() {
+        assert_eq!(
+            infer_kind("bge-reranker-v2-m3", "bge-reranker-v2-m3.gguf"),
+            "reranker"
+        );
+        assert_eq!(
+            infer_kind("some-model", "jina-reranker-v2.gguf"),
+            "reranker"
+        );
     }
 
     #[test]

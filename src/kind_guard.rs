@@ -5,6 +5,7 @@ use crate::errors::RuntimeError;
 
 pub const CHAT_KINDS: &[&str] = &["chat", "coder", "vision"];
 pub const EMBEDDING_KINDS: &[&str] = &["embedding"];
+pub const RERANK_KINDS: &[&str] = &["reranker"];
 
 pub fn require_kind(
     model_id: &str,
@@ -67,5 +68,23 @@ mod tests {
     fn rejects_chat_on_embeddings() {
         let err = require_kind("c", &cfg("chat"), EMBEDDING_KINDS, "/v1/embeddings").unwrap_err();
         assert!(err.to_string().contains("/v1/embeddings"));
+    }
+
+    #[test]
+    fn allows_reranker_on_rerank() {
+        assert!(require_kind("r", &cfg("reranker"), RERANK_KINDS, "/v1/rerank").is_ok());
+    }
+
+    #[test]
+    fn rejects_chat_on_rerank() {
+        let err = require_kind("c", &cfg("chat"), RERANK_KINDS, "/v1/rerank").unwrap_err();
+        assert!(err.to_string().contains("/v1/rerank"));
+    }
+
+    #[test]
+    fn rejects_reranker_on_embeddings() {
+        let err =
+            require_kind("r", &cfg("reranker"), EMBEDDING_KINDS, "/v1/embeddings").unwrap_err();
+        assert!(err.to_string().contains("kind=reranker"));
     }
 }
