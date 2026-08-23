@@ -447,6 +447,26 @@ pub fn vllm_tensor_parallel_size_from_args(args: &[String]) -> Option<u32> {
     flag_value(args, "--tensor-parallel-size").and_then(|v| v.parse().ok())
 }
 
+/// Read `--quantization` from a vLLM args list.
+pub fn vllm_quantization_from_args(args: &[String]) -> Option<String> {
+    flag_value(args, "--quantization").map(str::to_string)
+}
+
+/// Read `--attention-backend` from a vLLM args list.
+pub fn vllm_attention_backend_from_args(args: &[String]) -> Option<String> {
+    flag_value(args, "--attention-backend").map(str::to_string)
+}
+
+/// Read `--speculative-model` (the dspark draft model) from a vLLM args list.
+pub fn vllm_draft_model_from_args(args: &[String]) -> Option<String> {
+    flag_value(args, "--speculative-model").map(str::to_string)
+}
+
+/// Read `--served-model-name` from a vLLM args list.
+pub fn vllm_served_model_name_from_args(args: &[String]) -> Option<String> {
+    flag_value(args, "--served-model-name").map(str::to_string)
+}
+
 /// Sum `*.safetensors` file sizes in a local directory, in MB. Returns 0 when
 /// the directory doesn't exist or can't be read (treated as "unknown size,
 /// don't block on it" by callers).
