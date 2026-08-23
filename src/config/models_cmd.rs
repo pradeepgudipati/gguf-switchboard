@@ -906,6 +906,37 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         return Ok(());
     }
 
+    // Merge into an existing vLLM-only entry with the same derived alias
+    // (e.g. this model was already pulled via `models pull vllm`), rather
+    // than creating a second, disconnected registry entry. `backend` stays
+    // unset either way, so expand() keeps auto-preferring vLLM when it fits
+    // and only uses this GGUF source as the fallback.
+    if let Some(existing) = registry
+        .models
+        .iter_mut()
+        .find(|e| e.alias == alias && e.file.is_empty() && e.has_vllm_source())
+    {
+        existing.file = file_ref;
+        existing.hf_repo = existing.hf_repo.clone().or_else(|| Some(repo.clone()));
+        existing.min_vram_gb = existing
+            .min_vram_gb
+            .or_else(|| Some(((selected.size as f64 / 1_000_000_000.0).ceil() as u32).max(1)));
+        existing.context_size = existing.context_size.or(fit_context_size);
+        existing.ngl = existing.ngl.or(fit_ngl);
+        if existing.extra_args.is_empty() {
+            existing.extra_args = fit_extra_args;
+        }
+        let alias = existing.alias.clone();
+        registry.write(&registry_path)?;
+        println!(
+            "✓ Merged GGUF source into existing alias: {alias} \
+             (this model now has both GGUF and vLLM sources — vLLM is preferred when it fits)"
+        );
+        let refreshed = refresh_after_pull().await;
+        maybe_bench_after_pull(&alias, &kind, no_bench, refreshed).await;
+        return Ok(());
+    }
+
     let used_aliases: HashSet<String> = registry.models.iter().map(|e| e.alias.clone()).collect();
     let alias = dedupe_alias(&alias, &used_aliases);
 
@@ -1167,22 +1198,58 @@ async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         }
     };
 
-    let used_aliases: HashSet<String> = registry.models.iter().map(|e| e.alias.clone()).collect();
-    let alias = dedupe_alias(&alias, &used_aliases);
     let kind = infer_kind_from_filename(&format!(
         "{repo} {}",
         meta.architecture.as_deref().unwrap_or("")
     ));
+    let min_vram_gb = Some(((weights_mb as f64 / 1024.0).ceil() as u32).max(1));
+    let vllm_dest_str = dest_dir.to_string_lossy().into_owned();
+
+    // Merge into an existing entry with the same derived alias when one
+    // exists (e.g. this model was already pulled as GGUF) rather than
+    // creating a second, disconnected registry entry: `backend` is left
+    // unset so expand() auto-prefers vLLM, falling back to the existing
+    // GGUF source only if vLLM's weights don't fit this hardware.
+    if let Some(existing) = registry.models.iter_mut().find(|e| e.alias == alias) {
+        existing.vllm_file = Some(vllm_dest_str);
+        existing.vllm_hf_repo = Some(repo.clone());
+        existing.min_vram_gb = existing.min_vram_gb.or(min_vram_gb);
+        existing.quantization = meta.quantization.clone().or(existing.quantization.clone());
+        existing.attention_backend = attention_backend.or(existing.attention_backend.clone());
+        existing.draft_model = resolved_draft
+            .or(meta.draft_model.clone())
+            .or(existing.draft_model.clone());
+        existing.num_speculative_tokens = num_speculative_tokens
+            .or(meta.num_speculative_tokens)
+            .or(existing.num_speculative_tokens);
+        existing.tensor_parallel_size = tensor_parallel_size.or(existing.tensor_parallel_size);
+        existing.gpu_memory_utilization =
+            gpu_memory_utilization.or(existing.gpu_memory_utilization);
+        existing.served_model_name = served_model_name.or(existing.served_model_name.clone());
+        existing.max_context_length = existing.max_context_length.or(meta.max_position_embeddings);
+        registry.write(&registry_path)?;
+        println!(
+            "✓ Merged vLLM source into existing alias: {alias} \
+             (this model now has both GGUF and vLLM sources — vLLM is preferred when it fits)"
+        );
+        let refreshed = refresh_after_pull().await;
+        if !refreshed {
+            eprintln!("Start or restart gguf-switchboard to load the updated registry.");
+        }
+        return Ok(());
+    }
+
+    let used_aliases: HashSet<String> = registry.models.iter().map(|e| e.alias.clone()).collect();
+    let alias = dedupe_alias(&alias, &used_aliases);
 
     let entry = RegistryEntry {
         alias: alias.clone(),
-        file: dest_dir.to_string_lossy().into_owned(),
         display_name: Some(display_name_from_alias(&alias)),
         kind: Some(kind.clone()),
         enabled: true,
-        backend: Some("vllm".to_string()),
-        hf_repo: Some(repo.clone()),
-        min_vram_gb: Some(((weights_mb as f64 / 1024.0).ceil() as u32).max(1)),
+        vllm_file: Some(vllm_dest_str),
+        vllm_hf_repo: Some(repo.clone()),
+        min_vram_gb,
         quantization: meta.quantization.clone(),
         attention_backend,
         draft_model: resolved_draft.or(meta.draft_model.clone()),
@@ -1195,7 +1262,7 @@ async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     };
     registry.models.push(entry);
     registry.write(&registry_path)?;
-    println!("✓ Registered as: {alias} (backend = vllm)");
+    println!("✓ Registered as: {alias} (vLLM source)");
 
     let refreshed = refresh_after_pull().await;
     if !refreshed {

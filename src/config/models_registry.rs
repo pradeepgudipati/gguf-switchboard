@@ -63,6 +63,9 @@ pub struct RegistryEntry {
     pub alias: String,
     /// GGUF path relative to `models_dir` (single directory), or an absolute path.
     /// With comma-separated `models_dir` values, discovered files are stored as absolute paths.
+    /// This is the llama.cpp/GGUF source only — a vLLM/safetensors source for
+    /// the same alias lives in `vllm_file`/`vllm_hf_repo` below; one alias can
+    /// have both, empty string when there's no GGUF source for this alias.
     pub file: String,
     /// Human-readable name for `/v1/models`. Defaults to a title-cased alias.
     #[serde(default)]
@@ -137,12 +140,26 @@ pub struct RegistryEntry {
     /// accident.
     #[serde(default)]
     pub ctx: Option<u32>,
-    /// Per-model backend override ("llama.cpp" | "vllm"). Falls back to
-    /// `defaults.backend` when unset. This is what decides which engine
-    /// serves the model — GGUF entries stay on llama.cpp, safetensors
-    /// entries pulled via `models pull --backend vllm` get `Some("vllm")`.
+    /// Explicit backend pin ("llama.cpp" | "vllm"). One alias can carry both a
+    /// GGUF source (`file`/`hf_repo`) and a vLLM source (`vllm_file`/
+    /// `vllm_hf_repo`) — e.g. `ggs models pull` and `ggs models pull vllm`
+    /// against the same model both write into the same alias when their
+    /// derived aliases match. When both are present and `backend` is unset,
+    /// `expand()` prefers vLLM and falls back to llama.cpp only if vLLM's
+    /// weights don't fit this hardware. Set this to force one engine and skip
+    /// that auto-decision.
     #[serde(default)]
     pub backend: Option<String>,
+    /// Local safetensors directory for the vLLM source of this model (set by
+    /// `ggs models pull vllm`). Absolute path.
+    #[serde(default)]
+    pub vllm_file: Option<String>,
+    /// HF repo id vLLM serves directly when there's no local `vllm_file`
+    /// (matched Hugging Face repo for the vLLM/safetensors source — distinct
+    /// from `hf_repo`, which is the GGUF source's repo and may differ, e.g.
+    /// `bartowski/Qwen...-GGUF` vs `Qwen/Qwen...`).
+    #[serde(default)]
+    pub vllm_hf_repo: Option<String>,
     /// vLLM `--quantization` value (e.g. `awq`, `gptq`, `fp8`). Detected from
     /// the repo's `config.json` `quantization_config` during `models pull`.
     #[serde(default)]
@@ -196,6 +213,8 @@ impl Default for RegistryEntry {
             reasoning_format: None,
             ctx: None,
             backend: None,
+            vllm_file: None,
+            vllm_hf_repo: None,
             quantization: None,
             attention_backend: None,
             draft_model: None,
@@ -214,12 +233,14 @@ impl RegistryEntry {
             .unwrap_or_else(|| infer_kind(&self.alias, &self.file))
     }
 
-    /// Resolve which engine serves this model: the per-entry `backend`
-    /// override if set, otherwise the registry-wide `defaults.backend`.
-    pub fn effective_backend(&self, defaults_backend: &str) -> String {
-        self.backend
-            .clone()
-            .unwrap_or_else(|| defaults_backend.to_string())
+    /// True when this entry has a vLLM source (local dir or HF repo) to try.
+    pub fn has_vllm_source(&self) -> bool {
+        self.vllm_file.is_some() || self.vllm_hf_repo.is_some()
+    }
+
+    /// True when this entry has a GGUF file to try.
+    pub fn has_gguf_source(&self) -> bool {
+        !self.file.is_empty()
     }
 }
 
@@ -1213,6 +1234,7 @@ impl ModelsRegistry {
                     chat_template_file: None,
                     reasoning_format: None,
                     ctx: None,
+                    ..RegistryEntry::default()
                 })
                 .collect(),
         };
@@ -1424,6 +1446,16 @@ impl ModelsRegistry {
                     chat_template_file: existing.chat_template_file.clone(),
                     reasoning_format: existing.reasoning_format.clone(),
                     ctx: existing.ctx,
+                    backend: existing.backend.clone(),
+                    vllm_file: existing.vllm_file.clone(),
+                    vllm_hf_repo: existing.vllm_hf_repo.clone(),
+                    quantization: existing.quantization.clone(),
+                    attention_backend: existing.attention_backend.clone(),
+                    draft_model: existing.draft_model.clone(),
+                    num_speculative_tokens: existing.num_speculative_tokens,
+                    tensor_parallel_size: existing.tensor_parallel_size,
+                    gpu_memory_utilization: existing.gpu_memory_utilization,
+                    served_model_name: existing.served_model_name.clone(),
                 });
                 continue;
             }
@@ -1550,69 +1582,85 @@ impl ModelsRegistry {
         let mut claimed_files = HashSet::new();
 
         for entry in &self.models {
-            let is_vllm = entry.effective_backend(&self.defaults.backend) == "vllm";
+            // One alias can carry both a GGUF source and a vLLM source (see
+            // RegistryEntry::backend docs) — validate each independently and
+            // drop whichever one doesn't check out, rather than rejecting the
+            // whole entry. resolve_backend_and_weights() picks between
+            // whatever survives.
+            let mut candidate = entry.clone();
 
-            if is_vllm {
-                // vLLM entries point at a local safetensors directory (or, when
-                // `entry.file` is empty, are served straight from `hf_repo` and
-                // have nothing local to validate). No GGUF magic-byte check applies.
-                if entry.file.is_empty() {
-                    entries.push(entry.clone());
-                    continue;
+            if candidate.has_vllm_source() {
+                if let Some(vllm_file) = &candidate.vllm_file {
+                    let path = Path::new(vllm_file);
+                    let path = if path.is_absolute() {
+                        path.to_path_buf()
+                    } else {
+                        models_dirs
+                            .first()
+                            .map(|dir| dir.join(vllm_file))
+                            .unwrap_or_else(|| path.to_path_buf())
+                    };
+                    if path.exists() {
+                        claimed_files.insert(normalize_file_key(&models_dirs, vllm_file));
+                    } else {
+                        tracing::warn!(
+                            alias = %entry.alias,
+                            vllm_file = %vllm_file,
+                            "vLLM source path not found for this entry; dropping it \
+                             (falling back to any GGUF source on the same alias)"
+                        );
+                        candidate.vllm_file = None;
+                    }
                 }
-                let path = Path::new(&entry.file);
-                let path = if path.is_absolute() {
-                    path.to_path_buf()
-                } else {
-                    models_dirs
-                        .first()
-                        .map(|dir| dir.join(&entry.file))
-                        .unwrap_or_else(|| path.to_path_buf())
-                };
-                if !path.exists() {
-                    tracing::warn!(
-                        alias = %entry.alias,
-                        file = %entry.file,
-                        "Skipping explicit vLLM model entry because the safetensors path was not found"
-                    );
-                    continue;
+                // vllm_hf_repo alone (no local dir) has nothing to validate —
+                // it's resolved by vLLM itself at serve time.
+            }
+
+            if candidate.has_gguf_source() {
+                match resolve_model_path(&models_dirs, &candidate.file) {
+                    Ok(path) if Path::new(&path).is_file() => {
+                        if let Err(reason) = validate_gguf_model(Path::new(&path)) {
+                            tracing::warn!(
+                                alias = %entry.alias,
+                                file = %candidate.file,
+                                reason = %reason,
+                                "GGUF file failed validation for this entry; dropping it \
+                                 (falling back to any vLLM source on the same alias)"
+                            );
+                            candidate.file = String::new();
+                        } else {
+                            claimed_files.insert(normalize_file_key(&models_dirs, &candidate.file));
+                        }
+                    }
+                    Ok(_) => {
+                        tracing::warn!(
+                            alias = %entry.alias,
+                            file = %candidate.file,
+                            "GGUF path is not a file for this entry; dropping it"
+                        );
+                        candidate.file = String::new();
+                    }
+                    Err(err) => {
+                        tracing::warn!(
+                            alias = %entry.alias,
+                            file = %candidate.file,
+                            error = %err,
+                            "GGUF file not found for this entry; dropping it"
+                        );
+                        candidate.file = String::new();
+                    }
                 }
-                claimed_files.insert(normalize_file_key(&models_dirs, &entry.file));
-                entries.push(entry.clone());
+            }
+
+            if !candidate.has_vllm_source() && !candidate.has_gguf_source() {
+                tracing::warn!(
+                    alias = %entry.alias,
+                    "Skipping model entry: neither its GGUF nor vLLM source is usable"
+                );
                 continue;
             }
 
-            match resolve_model_path(&models_dirs, &entry.file) {
-                Ok(path) => {
-                    if !Path::new(&path).is_file() {
-                        tracing::warn!(
-                            alias = %entry.alias,
-                            file = %entry.file,
-                            "Skipping explicit model entry because the GGUF path is not a file"
-                        );
-                        continue;
-                    }
-                    if let Err(reason) = validate_gguf_model(Path::new(&path)) {
-                        tracing::warn!(
-                            alias = %entry.alias,
-                            file = %entry.file,
-                            reason = %reason,
-                            "Skipping explicit model entry because the GGUF file failed validation"
-                        );
-                        continue;
-                    }
-                    claimed_files.insert(normalize_file_key(&models_dirs, &entry.file));
-                    entries.push(entry.clone());
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        alias = %entry.alias,
-                        file = %entry.file,
-                        error = %err,
-                        "Skipping explicit model entry because the GGUF file was not found"
-                    );
-                }
-            }
+            entries.push(candidate);
         }
 
         if self.auto_discover {
@@ -1682,7 +1730,6 @@ impl ModelsRegistry {
 
         let mut models = HashMap::new();
         for entry in &entries {
-            let entry_backend = entry.effective_backend(&backend);
             let port = entry.port.ok_or_else(|| {
                 RuntimeError::ConfigError(format!(
                     "Model '{}' has no assigned backend port",
@@ -1690,24 +1737,17 @@ impl ModelsRegistry {
                 ))
             })?;
 
-            let weights_mb: u64 = if entry_backend == "vllm" {
-                entry
-                    .min_vram_gb
-                    .map(|gb| u64::from(gb) * 1024)
-                    .unwrap_or_else(|| {
-                        let path = Path::new(&entry.file);
-                        if path.is_absolute() {
-                            crate::fit::sum_safetensors_mb(path)
-                        } else {
-                            0
-                        }
-                    })
-            } else {
-                resolve_model_path(&models_dirs, &entry.file)
-                    .ok()
-                    .and_then(|p| std::fs::metadata(&p).ok())
-                    .map(|m| m.len() / (1024 * 1024))
-                    .unwrap_or(0)
+            // Preference decision: vLLM first when both sources are present
+            // and vLLM's weights fit; GGUF/llama.cpp otherwise. See
+            // RegistryEntry::backend docs for the full policy.
+            let Some((entry_backend, weights_mb)) =
+                resolve_backend_and_weights(entry, &backend, &models_dirs, &hardware_summary)
+            else {
+                tracing::warn!(
+                    alias = %entry.alias,
+                    "Skipping model: no usable source (vLLM or GGUF) fits this hardware"
+                );
+                continue;
             };
             if !crate::fit::hardware_can_possibly_serve(
                 weights_mb,
@@ -1818,7 +1858,11 @@ impl ModelsRegistry {
                 max_context_length: entry.max_context_length.or(max_context_from_gguf),
                 min_vram_gb: entry.min_vram_gb,
                 capabilities: entry.capabilities.clone(),
-                hf_repo: entry.hf_repo.clone(),
+                hf_repo: if entry_backend == "vllm" {
+                    entry.vllm_hf_repo.clone().or_else(|| entry.hf_repo.clone())
+                } else {
+                    entry.hf_repo.clone()
+                },
                 ctx_floor: entry.ctx,
                 block_count,
                 ngl_pinned,
@@ -1831,6 +1875,95 @@ impl ModelsRegistry {
 
         Ok(models)
     }
+}
+
+/// Estimate a vLLM entry's weight size in MB: prefers the pull-time
+/// `min_vram_gb` hint (set from the actual downloaded byte count), falling
+/// back to scanning the local `vllm_file` directory. Returns 0 (unknown,
+/// don't block on it) when serving straight from `vllm_hf_repo` with no
+/// local copy and no hint.
+fn vllm_weights_mb(entry: &RegistryEntry) -> u64 {
+    entry
+        .min_vram_gb
+        .map(|gb| u64::from(gb) * 1024)
+        .unwrap_or_else(|| {
+            entry
+                .vllm_file
+                .as_deref()
+                .filter(|f| !f.is_empty())
+                .map(|f| {
+                    let path = Path::new(f);
+                    if path.is_absolute() {
+                        crate::fit::sum_safetensors_mb(path)
+                    } else {
+                        0
+                    }
+                })
+                .unwrap_or(0)
+        })
+}
+
+/// Estimate a GGUF entry's weight size in MB from the resolved file's actual
+/// size on disk. Returns 0 (unknown) when the file can't be resolved/read.
+fn gguf_weights_mb(entry: &RegistryEntry, models_dirs: &[PathBuf]) -> u64 {
+    resolve_model_path(models_dirs, &entry.file)
+        .ok()
+        .and_then(|p| std::fs::metadata(&p).ok())
+        .map(|m| m.len() / (1024 * 1024))
+        .unwrap_or(0)
+}
+
+/// Decide which backend serves `entry` and how big its weights are.
+///
+/// - An explicit `entry.backend` pin always wins (no fit-based override).
+/// - Otherwise, when a vLLM source is present, prefer it — but only if its
+///   weights fit this hardware (vLLM has no CPU offload). If they don't and a
+///   GGUF source also exists, fall back to that instead.
+/// - Otherwise, use whichever single source is present.
+///
+/// Returns `None` when nothing usable remains (caller skips the entry).
+fn resolve_backend_and_weights(
+    entry: &RegistryEntry,
+    fallback_backend: &str,
+    models_dirs: &[PathBuf],
+    hardware: &crate::fit::HardwareSummary,
+) -> Option<(String, u64)> {
+    if let Some(pinned) = &entry.backend {
+        let weights = if pinned == "vllm" {
+            vllm_weights_mb(entry)
+        } else {
+            gguf_weights_mb(entry, models_dirs)
+        };
+        return Some((pinned.clone(), weights));
+    }
+
+    if entry.has_vllm_source() {
+        let weights = vllm_weights_mb(entry);
+        if crate::fit::hardware_can_possibly_serve(weights, hardware, false) {
+            return Some(("vllm".to_string(), weights));
+        }
+        if !entry.has_gguf_source() {
+            return None;
+        }
+        tracing::info!(
+            alias = %entry.alias,
+            vllm_weights_mb = weights,
+            total_vram_mb = hardware.total_vram_mb,
+            "vLLM source doesn't fit this hardware's VRAM; falling back to GGUF/llama.cpp \
+             (this model has both sources registered under the same alias)"
+        );
+    }
+
+    if entry.has_gguf_source() {
+        let gguf_backend = if fallback_backend == "vllm" {
+            "llama.cpp"
+        } else {
+            fallback_backend
+        };
+        return Some((gguf_backend.to_string(), gguf_weights_mb(entry, models_dirs)));
+    }
+
+    None
 }
 
 /// Build the `uv run vllm serve ...` command/args for a vLLM-backed entry.
@@ -1846,21 +1979,21 @@ fn build_vllm_args(
 ) -> Result<(String, Vec<String>, Option<u32>, Option<u32>, Option<String>), RuntimeError> {
     // Prefer a local safetensors directory; fall back to serving straight
     // from the HF repo id when no local copy was pulled.
-    let model_ref = if !entry.file.is_empty() {
-        let path = Path::new(&entry.file);
+    let model_ref = if let Some(vllm_file) = entry.vllm_file.as_deref().filter(|f| !f.is_empty()) {
+        let path = Path::new(vllm_file);
         if path.is_absolute() {
-            entry.file.clone()
+            vllm_file.to_string()
         } else {
             models_dirs
                 .first()
-                .map(|dir| dir.join(&entry.file).to_string_lossy().into_owned())
-                .unwrap_or_else(|| entry.file.clone())
+                .map(|dir| dir.join(vllm_file).to_string_lossy().into_owned())
+                .unwrap_or_else(|| vllm_file.to_string())
         }
-    } else if let Some(repo) = &entry.hf_repo {
+    } else if let Some(repo) = &entry.vllm_hf_repo {
         repo.clone()
     } else {
         return Err(RuntimeError::ConfigError(format!(
-            "vLLM model '{}' has neither a local `file` path nor an `hf_repo` to serve",
+            "vLLM model '{}' has neither a local `vllm_file` path nor a `vllm_hf_repo` to serve",
             entry.alias
         )));
     };
