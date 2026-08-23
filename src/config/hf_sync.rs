@@ -111,10 +111,7 @@ fn infer_kind_from_hf(
         .join(" ");
     let hay = format!("{tag} {joined} {}", local_filename.to_ascii_lowercase());
 
-    if tag.contains("text-ranking")
-        || tag.contains("sentence-ranking")
-        || hay.contains("rerank")
-    {
+    if tag.contains("text-ranking") || tag.contains("sentence-ranking") || hay.contains("rerank") {
         return Some("reranker".to_string());
     }
     if tag.contains("feature-extraction")
