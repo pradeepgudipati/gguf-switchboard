@@ -143,7 +143,57 @@ pub async fn cmd_search(args: &[String]) -> Result<(), Box<dyn std::error::Error
         println!("{command}");
     }
 
+    // vLLM preference: when a safetensors build of the same query exists,
+    // recommend it over GGUF/llama.cpp — vLLM generally has better throughput
+    // and native speculative-decoding/quantization support on GPU hardware.
+    if let Some(vllm_repo) = quick_check_vllm_alternative(&client, &query).await {
+        println!();
+        println!(
+            "★ A vLLM-servable (safetensors) build is also available: {vllm_repo}\n  \
+             vLLM is preferred when both exist — see: ggs models search vllm \"{query}\""
+        );
+    }
+
+    print!("{}", search_commands_help());
     Ok(())
+}
+
+/// Lightweight check (one HF API call, no per-repo tree fetch) for whether a
+/// safetensors build of `query` exists, to nudge users toward the preferred
+/// vLLM backend from the plain (GGUF) search path.
+async fn quick_check_vllm_alternative(client: &reqwest::Client, query: &str) -> Option<String> {
+    let url = reqwest::Url::parse_with_params(
+        HF_MODELS_API,
+        &[("search", query), ("limit", "5"), ("expand", "siblings")],
+    )
+    .ok()?;
+    let resp = client.get(url).send().await.ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let hits: Vec<Value> = resp.json().await.ok()?;
+    hits.into_iter().find_map(|hit| {
+        let siblings = hit.get("siblings")?.as_array()?;
+        let has_safetensors = siblings.iter().any(|s| {
+            s.get("rfilename")
+                .and_then(Value::as_str)
+                .is_some_and(|f| f.ends_with(".safetensors"))
+        });
+        has_safetensors
+            .then(|| hit.get("id").and_then(Value::as_str).map(str::to_string))
+            .flatten()
+    })
+}
+
+/// Shared "what commands exist" footer for both search modes.
+fn search_commands_help() -> String {
+    "\nCommands:\n  \
+     ggs models search <query>                 GGUF/llama.cpp models\n  \
+     ggs models search vllm <query>            safetensors/vLLM models (preferred when available)\n  \
+     ggs models pull <repo> [--quant Q]         download + register a GGUF model\n  \
+     ggs models pull vllm <repo> [--draft ...]  download + register a vLLM model\n  \
+     ggs models files <repo>                    list a repo's files\n"
+        .to_string()
 }
 
 /// `gguf-switchboard models search vllm <query> [--limit N]` — searches for
@@ -226,6 +276,34 @@ async fn cmd_search_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         return Ok(());
     }
 
+    // Fit gate: don't recommend a model this hardware cannot possibly hold
+    // (vLLM needs weights fully GPU-resident — no CPU offload like llama.cpp).
+    let hardware = crate::fit::HardwareSummary::probe(12);
+    let total_found = candidates.len();
+    let candidates: Vec<_> = candidates
+        .into_iter()
+        .filter(|(_, _, size_bytes)| {
+            crate::fit::hardware_can_possibly_serve(size_bytes / (1024 * 1024), &hardware, false)
+        })
+        .collect();
+    let hidden = total_found - candidates.len();
+
+    if candidates.is_empty() {
+        println!(
+            "Found {total_found} safetensors repo(s) for \"{query}\", but none fit this \
+             hardware's {:.1} GiB total VRAM (vLLM requires GPU-resident weights). \
+             Try `ggs models search {query}` for a quantized GGUF alternative instead.",
+            hardware.total_vram_mb as f64 / 1024.0
+        );
+        return Ok(());
+    }
+    if hidden > 0 {
+        println!(
+            "({hidden} result(s) hidden — weights don't fit this hardware's {:.1} GiB total VRAM)",
+            hardware.total_vram_mb as f64 / 1024.0
+        );
+    }
+
     println!(
         "{:<48} | {:<10} | {:<10} | {:<10} | {:<24} | DRAFT MODEL (speculative decoding)",
         "REPO", "SIZE", "QUANT", "MAX CTX", "ARCHITECTURE"
@@ -249,6 +327,7 @@ async fn cmd_search_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         "\nTry: ggs models pull vllm {}   (pulls safetensors + config, writes models.toml with backend = \"vllm\")",
         candidates[0].0
     );
+    print!("{}", search_commands_help());
 
     Ok(())
 }
@@ -575,6 +654,20 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
 
     // 1. Fetch repo tree.
     let client = hf_download::build_hf_client()?;
+
+    // vLLM preference: this exact repo may ship both GGUF and safetensors
+    // (some repos bundle both formats). If so, nudge toward vLLM before
+    // committing to a GGUF download — vLLM is preferred when both exist.
+    if let Ok(all_entries) = hf_download::fetch_repo_tree_all(&client, &repo).await
+        && super::vllm_meta::is_safetensors_repo(&all_entries)
+    {
+        println!(
+            "★ {repo} also ships safetensors weights — vLLM is preferred when available.\n  \
+             Run instead: ggs models pull vllm {repo}\n  \
+             Continuing with the GGUF/llama.cpp pull you requested..."
+        );
+    }
+
     let entries = hf_download::fetch_repo_tree(&client, &repo).await?;
     let model_entries: Vec<&HfTreeEntry> =
         entries.iter().filter(|e| is_model_gguf(&e.path)).collect();
@@ -969,16 +1062,17 @@ async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     }
     println!("✓ Download complete");
 
+    let weights_mb: u64 = serving_files
+        .iter()
+        .filter(|e| e.path.ends_with(".safetensors"))
+        .map(|e| e.size)
+        .sum::<u64>()
+        / (1024 * 1024);
+
     // 4b. Hardware fit preview — same planner the scheduler runs at load time,
     // so what's printed here is what will actually be requested of vLLM.
     {
         use crate::fit::{HardwareSummary, VllmFitPlanner};
-        let weights_mb: u64 = serving_files
-            .iter()
-            .filter(|e| e.path.ends_with(".safetensors"))
-            .map(|e| e.size)
-            .sum::<u64>()
-            / (1024 * 1024);
         let hardware = HardwareSummary::probe(12);
         println!("── Hardware Fit ──");
         if hardware.gpus.is_empty() {
@@ -1088,6 +1182,7 @@ async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         enabled: true,
         backend: Some("vllm".to_string()),
         hf_repo: Some(repo.clone()),
+        min_vram_gb: Some(((weights_mb as f64 / 1024.0).ceil() as u32).max(1)),
         quantization: meta.quantization.clone(),
         attention_backend,
         draft_model: resolved_draft.or(meta.draft_model.clone()),

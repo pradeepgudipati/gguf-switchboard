@@ -446,23 +446,14 @@ pub fn vllm_tensor_parallel_size_from_args(args: &[String]) -> Option<u32> {
     flag_value(args, "--tensor-parallel-size").and_then(|v| v.parse().ok())
 }
 
-/// Estimate a vLLM model's on-disk weight size in MB: sums `*.safetensors`
-/// file sizes in the model's local directory (the positional arg right after
-/// `serve`). Returns 0 (treated as "unknown, assume it fits") when the model
-/// is served straight from an HF repo id with no local directory.
-pub fn vllm_model_size_mb_from_args(args: &[String]) -> u64 {
-    let Some(model_ref) = args
-        .iter()
-        .position(|a| a == "serve")
-        .and_then(|i| args.get(i + 1))
-    else {
-        return 0;
-    };
-    let path = std::path::Path::new(model_ref);
-    if !path.is_dir() {
+/// Sum `*.safetensors` file sizes in a local directory, in MB. Returns 0 when
+/// the directory doesn't exist or can't be read (treated as "unknown size,
+/// don't block on it" by callers).
+pub fn sum_safetensors_mb(dir: &std::path::Path) -> u64 {
+    if !dir.is_dir() {
         return 0;
     }
-    let Ok(read_dir) = std::fs::read_dir(path) else {
+    let Ok(read_dir) = std::fs::read_dir(dir) else {
         return 0;
     };
     let total_bytes: u64 = read_dir
@@ -476,6 +467,48 @@ pub fn vllm_model_size_mb_from_args(args: &[String]) -> u64 {
         .map(|m| m.len())
         .sum();
     total_bytes / (1024 * 1024)
+}
+
+/// Estimate a vLLM model's on-disk weight size in MB: sums `*.safetensors`
+/// file sizes in the model's local directory (the positional arg right after
+/// `serve`). Returns 0 (treated as "unknown, assume it fits") when the model
+/// is served straight from an HF repo id with no local directory.
+pub fn vllm_model_size_mb_from_args(args: &[String]) -> u64 {
+    let Some(model_ref) = args
+        .iter()
+        .position(|a| a == "serve")
+        .and_then(|i| args.get(i + 1))
+    else {
+        return 0;
+    };
+    sum_safetensors_mb(std::path::Path::new(model_ref))
+}
+
+/// Coarse "can this possibly be served at all" check — not a full fit plan,
+/// just a hard reject for models that are guaranteed to fail regardless of
+/// context/quant tuning. Used to keep gguf-switchboard from registering (and
+/// later trying, and OOM-looping on) a model the hardware fundamentally
+/// cannot hold.
+///
+/// `allow_cpu_ram`: true for llama.cpp (which can offload to system RAM),
+/// false for vLLM (GPU-resident weights only — no CPU fallback).
+pub fn hardware_can_possibly_serve(
+    weights_mb: u64,
+    hardware: &HardwareSummary,
+    allow_cpu_ram: bool,
+) -> bool {
+    if weights_mb == 0 {
+        // Unknown size (e.g. no local file yet) — don't block registration on it.
+        return true;
+    }
+    // 15% headroom for KV cache/activations on top of raw weight size.
+    let required_mb = weights_mb.saturating_add(weights_mb / 7);
+    let capacity_mb = if allow_cpu_ram {
+        hardware.total_vram_mb.saturating_add(hardware.system_ram_mb)
+    } else {
+        hardware.total_vram_mb
+    };
+    required_mb <= capacity_mb
 }
 
 /// A single vLLM load profile to attempt.

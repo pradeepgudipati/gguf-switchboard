@@ -1670,6 +1670,16 @@ impl ModelsRegistry {
             self.defaults.backend.clone()
         };
 
+        // Probed once per expand() call (not per model) — this is fit planning's
+        // hard gate: a model whose weights cannot possibly fit in available
+        // VRAM (+ system RAM for llama.cpp, which can offload) is excluded from
+        // scheduling entirely rather than registered and left to OOM-loop on
+        // every load attempt. This is deliberately coarse (raw weight size vs.
+        // capacity, no KV cache/context math) — the real per-load fit ladders
+        // (FitPlanner / VllmFitPlanner) still run and can further reduce
+        // context; this only catches "no context size could ever make this work".
+        let hardware_summary = crate::fit::HardwareSummary::probe(vram_gb);
+
         let mut models = HashMap::new();
         for entry in &entries {
             let entry_backend = entry.effective_backend(&backend);
@@ -1679,6 +1689,42 @@ impl ModelsRegistry {
                     entry.alias
                 ))
             })?;
+
+            let weights_mb: u64 = if entry_backend == "vllm" {
+                entry
+                    .min_vram_gb
+                    .map(|gb| u64::from(gb) * 1024)
+                    .unwrap_or_else(|| {
+                        let path = Path::new(&entry.file);
+                        if path.is_absolute() {
+                            crate::fit::sum_safetensors_mb(path)
+                        } else {
+                            0
+                        }
+                    })
+            } else {
+                resolve_model_path(&models_dirs, &entry.file)
+                    .ok()
+                    .and_then(|p| std::fs::metadata(&p).ok())
+                    .map(|m| m.len() / (1024 * 1024))
+                    .unwrap_or(0)
+            };
+            if !crate::fit::hardware_can_possibly_serve(
+                weights_mb,
+                &hardware_summary,
+                entry_backend != "vllm",
+            ) {
+                tracing::warn!(
+                    alias = %entry.alias,
+                    backend = %entry_backend,
+                    weights_mb,
+                    total_vram_mb = hardware_summary.total_vram_mb,
+                    system_ram_mb = hardware_summary.system_ram_mb,
+                    "Skipping model: this hardware cannot possibly serve it \
+                     (weights exceed available VRAM, or VRAM+RAM for llama.cpp)"
+                );
+                continue;
+            }
 
             let (command, args, block_count, max_context_from_gguf, model_fingerprint) =
                 if entry_backend == "vllm" {
