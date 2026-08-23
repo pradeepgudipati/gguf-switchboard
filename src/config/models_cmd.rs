@@ -201,7 +201,11 @@ fn search_commands_help() -> String {
 /// speculative-decoding (dspark draft model) pairing instead of GGUF quants.
 async fn cmd_search_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let mut query: Option<String> = None;
-    let mut limit: u32 = 10;
+    // Higher than GGUF search's default: HF's relevance ranking for a bare
+    // query tends to surface official full-precision repos first, so a small
+    // limit can miss the quantized (AWQ/GPTQ/FP8) variants most likely to fit
+    // a consumer GPU. Cast a wider net before the fit filter narrows it down.
+    let mut limit: u32 = 30;
 
     let mut i = 1; // args[0] is "vllm"
     while i < args.len() {
@@ -278,43 +282,47 @@ async fn cmd_search_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         return Ok(());
     }
 
-    // Fit gate: don't recommend a model this hardware cannot possibly hold
+    // Fit gate: flag (don't hide) models this hardware cannot possibly hold
     // (vLLM needs weights fully GPU-resident — no CPU offload like llama.cpp).
+    // Showing every result with a FITS column beats silently dropping rows —
+    // a query that finds nothing but full-precision repos should say so, not
+    // look identical to a query that found nothing at all.
     let hardware = crate::fit::HardwareSummary::probe(12);
-    let total_found = candidates.len();
-    let candidates: Vec<_> = candidates
-        .into_iter()
-        .filter(|(_, _, size_bytes)| {
-            crate::fit::hardware_can_possibly_serve(size_bytes / (1024 * 1024), &hardware, false)
-        })
-        .collect();
-    let hidden = total_found - candidates.len();
+    let fits = |size_bytes: u64| {
+        crate::fit::hardware_can_possibly_serve(size_bytes / (1024 * 1024), &hardware, false)
+    };
+    let any_fits = candidates
+        .iter()
+        .any(|(_, _, size_bytes)| fits(*size_bytes));
 
-    if candidates.is_empty() {
+    if !any_fits {
         println!(
-            "Found {total_found} safetensors repo(s) for \"{query}\", but none fit this \
-             hardware's {:.1} GiB total VRAM (vLLM requires GPU-resident weights). \
-             Try `ggs models search {query}` for a quantized GGUF alternative instead.",
-            hardware.total_vram_mb as f64 / 1024.0
-        );
-        return Ok(());
-    }
-    if hidden > 0 {
-        println!(
-            "({hidden} result(s) hidden — weights don't fit this hardware's {:.1} GiB total VRAM)",
+            "Found {} safetensors repo(s) for \"{query}\", but none fit this hardware's \
+             {:.1} GiB total VRAM (vLLM requires GPU-resident weights) — listed below anyway \
+             so you can see what was found. Try a more specific query for a quantized variant \
+             (e.g. `ggs models search vllm \"{query} awq\"` or `\"{query} gptq\"`), a higher \
+             `--limit` (currently {limit}), or `ggs models search {query}` for GGUF instead.",
+            candidates.len(),
             hardware.total_vram_mb as f64 / 1024.0
         );
     }
 
     println!(
-        "{:<48} | {:<10} | {:<10} | {:<10} | {:<24} | DRAFT MODEL (speculative decoding)",
-        "REPO", "SIZE", "QUANT", "MAX CTX", "ARCHITECTURE"
+        "{:<48} | {:<10} | {:<5} | {:<10} | {:<10} | {:<24} | DRAFT MODEL (speculative decoding)",
+        "REPO", "SIZE", "FITS", "QUANT", "MAX CTX", "ARCHITECTURE"
     );
     for (repo, meta, size_bytes) in &candidates {
         let size = if *size_bytes > 0 {
             format_bytes(*size_bytes)
         } else {
             "-".to_string()
+        };
+        let fits_str = if *size_bytes == 0 {
+            "?"
+        } else if fits(*size_bytes) {
+            "yes"
+        } else {
+            "no"
         };
         let quant = meta.quantization.as_deref().unwrap_or("none (fp16/bf16)");
         let ctx = meta
@@ -323,11 +331,20 @@ async fn cmd_search_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Erro
             .unwrap_or_else(|| "-".to_string());
         let arch = meta.architecture.as_deref().unwrap_or("-");
         let draft = meta.draft_model.as_deref().unwrap_or("-");
-        println!("{repo:<48} | {size:<10} | {quant:<10} | {ctx:<10} | {arch:<24} | {draft}");
+        println!(
+            "{repo:<48} | {size:<10} | {fits_str:<5} | {quant:<10} | {ctx:<10} | {arch:<24} | {draft}"
+        );
     }
+
+    let Some((first_fitting, ..)) = candidates
+        .iter()
+        .find(|(_, _, size_bytes)| fits(*size_bytes))
+    else {
+        print!("{}", search_commands_help());
+        return Ok(());
+    };
     println!(
-        "\nTry: ggs models pull vllm {}   (pulls safetensors + config, writes models.toml with backend = \"vllm\")",
-        candidates[0].0
+        "\nTry: ggs models pull vllm {first_fitting}   (pulls safetensors + config, writes models.toml with backend = \"vllm\")"
     );
     print!("{}", search_commands_help());
 
