@@ -832,7 +832,7 @@ for i in {1..30}; do
         if [[ "$REFRESH_MODELS" == "true" ]]; then
             echo "==> models.toml was regenerated from disk."
             echo "    Edit aliases / priority in $MODELS_FILE as needed, then:"
-            echo "    sudo systemctl restart gguf-switchboard"
+            echo "    ggs restart   (or: sudo systemctl restart gguf-switchboard)"
         fi
         exit 0
     fi

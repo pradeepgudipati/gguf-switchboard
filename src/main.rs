@@ -46,6 +46,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         return run_models_cmd(&args).await;
     }
 
+    if args.len() >= 2 && args[1] == "stop" {
+        return run_service_ctl("stop");
+    }
+
+    if args.len() >= 2 && args[1] == "restart" {
+        return run_service_ctl("restart");
+    }
+
     let config_path = args
         .get(1)
         .cloned()
@@ -150,6 +158,57 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("GGUF Switchboard stopped");
     Ok(())
+}
+
+/// Name of the systemd unit installed by deploy.sh.
+const SERVICE_NAME: &str = "gguf-switchboard";
+
+/// Handles `stop` / `restart`: shells out to `systemctl` to control the
+/// gguf-switchboard system service, prefixing with `sudo` when not already
+/// running as root.
+fn run_service_ctl(action: &str) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(not(unix))]
+    {
+        let _ = action;
+        return Err(
+            "'stop'/'restart' manage the systemd service and are only supported on Linux".into(),
+        );
+    }
+
+    #[cfg(unix)]
+    {
+        use std::process::Command;
+
+        let is_root = nix::unistd::Uid::effective().is_root();
+
+        let status = if is_root {
+            Command::new("systemctl")
+                .arg(action)
+                .arg(SERVICE_NAME)
+                .status()
+        } else {
+            Command::new("sudo")
+                .arg("systemctl")
+                .arg(action)
+                .arg(SERVICE_NAME)
+                .status()
+        }
+        .map_err(|e| format!("failed to invoke systemctl: {e}"))?;
+
+        if !status.success() {
+            return Err(format!(
+                "systemctl {action} {SERVICE_NAME} failed (exit {})",
+                status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            )
+            .into());
+        }
+
+        println!("{SERVICE_NAME}: {action} OK");
+        Ok(())
+    }
 }
 
 fn run_discover_models(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
