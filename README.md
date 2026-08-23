@@ -340,6 +340,8 @@ After that:
 ggs models search "Qwen3.5"
 ggs models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M
 ggs config.toml
+ggs stop      # sudo systemctl stop gguf-switchboard
+ggs restart   # sudo systemctl restart gguf-switchboard
 ```
 
 ### Troubleshooting first install
@@ -350,9 +352,9 @@ ggs config.toml
 | `llama-server: not found` / models fail to load | Same as above |
 | Service unhealthy / no models | Put GGUFs in `/var/lib/gguf-switchboard/models` and run `./deploy.sh --refresh-models` |
 | First install has no GGUF models | Not fatal. Installer leaves the service stopped and prints `ggs models search`, `ggs models pull`, and `./deploy.sh --refresh-models` |
-| Empty `/v1/models` | Check `models_dir` in `/opt/gguf-switchboard/models.toml`; enable `auto_discover = true`; restart |
+| Empty `/v1/models` | Check `models_dir` in `/opt/gguf-switchboard/models.toml`; enable `auto_discover = true`; `ggs restart` |
 | Deploy "lost" my edits | `git stash list` — deploy stashes dirty trees before pull |
-| Port 9090 in use | Change `bind` in `/opt/gguf-switchboard/config.toml` and restart |
+| Port 9090 in use | Change `bind` in `/opt/gguf-switchboard/config.toml` and `ggs restart` |
 
 ## Further documentation
 
