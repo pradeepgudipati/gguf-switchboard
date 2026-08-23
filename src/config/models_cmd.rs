@@ -1254,10 +1254,8 @@ async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             "✓ Merged vLLM source into existing alias: {alias} \
              (this model now has both GGUF and vLLM sources — vLLM is preferred when it fits)"
         );
-        let refreshed = refresh_after_pull().await;
-        if !refreshed {
-            eprintln!("Start or restart gguf-switchboard to load the updated registry.");
-        }
+        // refresh_after_pull() already prints a "start or restart" hint on failure.
+        refresh_after_pull().await;
         return Ok(());
     }
 
@@ -1286,10 +1284,8 @@ async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     registry.write(&registry_path)?;
     println!("✓ Registered as: {alias} (vLLM source)");
 
-    let refreshed = refresh_after_pull().await;
-    if !refreshed {
-        eprintln!("Start or restart gguf-switchboard to load the updated registry.");
-    }
+    // refresh_after_pull() already prints a "start or restart" hint on failure.
+    refresh_after_pull().await;
 
     Ok(())
 }
