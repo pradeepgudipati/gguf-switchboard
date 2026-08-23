@@ -504,7 +504,9 @@ pub fn hardware_can_possibly_serve(
     // 15% headroom for KV cache/activations on top of raw weight size.
     let required_mb = weights_mb.saturating_add(weights_mb / 7);
     let capacity_mb = if allow_cpu_ram {
-        hardware.total_vram_mb.saturating_add(hardware.system_ram_mb)
+        hardware
+            .total_vram_mb
+            .saturating_add(hardware.system_ram_mb)
     } else {
         hardware.total_vram_mb
     };
@@ -603,7 +605,11 @@ impl VllmFitPlanner {
     /// Apply a plan to a base vLLM args list, rewriting `--max-model-len`,
     /// `--gpu-memory-utilization`, and `--tensor-parallel-size`.
     pub fn apply_plan_to_args(base_args: &[String], plan: &VllmFitPlan) -> Vec<String> {
-        let mut args = with_flag(base_args, "--max-model-len", &plan.max_model_len.to_string());
+        let mut args = with_flag(
+            base_args,
+            "--max-model-len",
+            &plan.max_model_len.to_string(),
+        );
         args = with_flag(
             &args,
             "--gpu-memory-utilization",

@@ -251,7 +251,9 @@ async fn cmd_search_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         let client = client.clone();
         async move {
             let repo = hit.get("id").and_then(Value::as_str)?.to_string();
-            let entries = hf_download::fetch_repo_tree_all(&client, &repo).await.ok()?;
+            let entries = hf_download::fetch_repo_tree_all(&client, &repo)
+                .await
+                .ok()?;
             if !super::vllm_meta::is_safetensors_repo(&entries) {
                 return None;
             }
@@ -1002,27 +1004,27 @@ async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             }
             "--num-speculative-tokens" => {
                 let val = require_val(args, &mut i, "--num-speculative-tokens")?;
-                num_speculative_tokens = Some(
-                    val.parse()
-                        .map_err(|_| "models pull vllm: invalid value for --num-speculative-tokens")?,
-                );
+                num_speculative_tokens =
+                    Some(val.parse().map_err(
+                        |_| "models pull vllm: invalid value for --num-speculative-tokens",
+                    )?);
             }
             "--attention-backend" => {
                 attention_backend = Some(require_val(args, &mut i, "--attention-backend")?);
             }
             "--tensor-parallel-size" => {
                 let val = require_val(args, &mut i, "--tensor-parallel-size")?;
-                tensor_parallel_size = Some(
-                    val.parse()
-                        .map_err(|_| "models pull vllm: invalid value for --tensor-parallel-size")?,
-                );
+                tensor_parallel_size =
+                    Some(val.parse().map_err(
+                        |_| "models pull vllm: invalid value for --tensor-parallel-size",
+                    )?);
             }
             "--gpu-memory-utilization" => {
                 let val = require_val(args, &mut i, "--gpu-memory-utilization")?;
-                gpu_memory_utilization = Some(
-                    val.parse()
-                        .map_err(|_| "models pull vllm: invalid value for --gpu-memory-utilization")?,
-                );
+                gpu_memory_utilization =
+                    Some(val.parse().map_err(
+                        |_| "models pull vllm: invalid value for --gpu-memory-utilization",
+                    )?);
             }
             "--served-model-name" => {
                 served_model_name = Some(require_val(args, &mut i, "--served-model-name")?);
@@ -1036,10 +1038,13 @@ async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>
             }
         }
     }
-    let repo = repo.ok_or("models pull vllm: missing repository id (e.g. Qwen/Qwen2.5-7B-Instruct)")?;
+    let repo =
+        repo.ok_or("models pull vllm: missing repository id (e.g. Qwen/Qwen2.5-7B-Instruct)")?;
 
     // 1. Deploy check up front — fail before downloading anything multi-GB.
-    let registry_path_hint = models_file.clone().unwrap_or_else(|| "models.toml".to_string());
+    let registry_path_hint = models_file
+        .clone()
+        .unwrap_or_else(|| "models.toml".to_string());
     let (vllm_command, vllm_project) = if Path::new(&registry_path_hint).is_file() {
         let existing = ModelsRegistry::load(&registry_path_hint)?;
         (
@@ -1604,7 +1609,13 @@ fn alias_from_repo(repo: &str) -> String {
     let lower = name.to_ascii_lowercase().replace('_', "-");
     let alias: String = lower
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     alias.trim_matches('-').to_string()
 }

@@ -1960,7 +1960,10 @@ fn resolve_backend_and_weights(
         } else {
             fallback_backend
         };
-        return Some((gguf_backend.to_string(), gguf_weights_mb(entry, models_dirs)));
+        return Some((
+            gguf_backend.to_string(),
+            gguf_weights_mb(entry, models_dirs),
+        ));
     }
 
     None
@@ -1974,7 +1977,16 @@ fn resolve_backend_and_weights(
 /// `(command, args, block_count, max_context_from_gguf, model_fingerprint)` —
 /// shared by both the llama.cpp and vLLM branches of `expand()`'s per-entry
 /// build step (the last three are always `None` for vLLM).
-type BackendArgsResult = Result<(String, Vec<String>, Option<u32>, Option<u32>, Option<String>), RuntimeError>;
+type BackendArgsResult = Result<
+    (
+        String,
+        Vec<String>,
+        Option<u32>,
+        Option<u32>,
+        Option<String>,
+    ),
+    RuntimeError,
+>;
 
 fn build_vllm_args(
     entry: &RegistryEntry,
@@ -2007,7 +2019,10 @@ fn build_vllm_args(
         .served_model_name
         .clone()
         .unwrap_or_else(|| entry.alias.clone());
-    let context_size = entry.context_size.or(entry.ctx).unwrap_or(defaults.context_size);
+    let context_size = entry
+        .context_size
+        .or(entry.ctx)
+        .unwrap_or(defaults.context_size);
 
     let mut args = vec!["run".to_string()];
     if let Some(project) = &defaults.vllm_project {

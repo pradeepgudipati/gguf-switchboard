@@ -66,7 +66,10 @@ pub fn parse_config_json(text: &str) -> VllmMetadata {
 
     let quantization = value
         .get("quantization_config")
-        .and_then(|q| q.get("quant_method").or_else(|| q.get("quantization_method")))
+        .and_then(|q| {
+            q.get("quant_method")
+                .or_else(|| q.get("quantization_method"))
+        })
         .and_then(Value::as_str)
         .map(str::to_ascii_lowercase);
 
@@ -75,9 +78,11 @@ pub fn parse_config_json(text: &str) -> VllmMetadata {
     // target model it pairs with and the number of tokens it proposes.
     let speculators = value.get("speculators_config");
     let draft_model = speculators
-        .and_then(|s| s.get("target_model")
-            .or_else(|| s.get("verifier"))
-            .or_else(|| s.get("base_model")))
+        .and_then(|s| {
+            s.get("target_model")
+                .or_else(|| s.get("verifier"))
+                .or_else(|| s.get("base_model"))
+        })
         .and_then(Value::as_str)
         .map(str::to_string);
     let num_speculative_tokens = speculators

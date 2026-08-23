@@ -1,6 +1,6 @@
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -20,8 +20,8 @@ use crate::types::chat::{
 use crate::types::completions::{CompletionChunk, CompletionRequest, CompletionResponse};
 use crate::types::embeddings::{EmbeddingRequest, EmbeddingResponse};
 
-use super::llama_cpp::SseLineParser;
 use super::Backend;
+use super::llama_cpp::SseLineParser;
 
 /// vLLM backend: spawns `<vllm_command> run [--project <dir>] vllm serve ...`
 /// as a child process and proxies OpenAI-compatible requests to it. vLLM's

@@ -1610,7 +1610,11 @@ impl SchedulerInner {
             match self.wait_until_healthy(model_id, &backend).await {
                 Ok(()) => {
                     let elapsed = start.elapsed();
-                    metrics::record_load_attempt(model_id, metrics::result::OK, elapsed.as_secs_f64());
+                    metrics::record_load_attempt(
+                        model_id,
+                        metrics::result::OK,
+                        elapsed.as_secs_f64(),
+                    );
                     LOADED_MODEL.set(1);
                     BACKEND_HEALTH.set(1);
                     info!(model = %model_id, attempt, plan = %plan, elapsed_ms = elapsed.as_millis(), "VllmFitPlanner: model loaded successfully");
@@ -1634,7 +1638,11 @@ impl SchedulerInner {
                         continue;
                     }
 
-                    metrics::record_load_attempt(model_id, load_error_label(&e), start.elapsed().as_secs_f64());
+                    metrics::record_load_attempt(
+                        model_id,
+                        load_error_label(&e),
+                        start.elapsed().as_secs_f64(),
+                    );
                     self.backends.write().await.remove(model_id);
                     return Err(e);
                 }
