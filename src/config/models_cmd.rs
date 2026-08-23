@@ -1375,7 +1375,7 @@ async fn refresh_after_pull() -> bool {
             return false;
         }
     };
-    match refresh_running_server(&client, Path::new("config.toml")).await {
+    match refresh_running_server(&client, &resolve_config_toml_path()).await {
         Ok(()) => {
             println!("✓ Running server refreshed");
             true
@@ -1513,8 +1513,8 @@ async fn maybe_bench_after_pull(alias: &str, kind: &str, no_bench: bool, refresh
 }
 
 async fn bench_pulled_model(alias: &str) -> Result<(), String> {
-    let config_path = Path::new("config.toml");
-    let url = chat_url_from_config(config_path).map_err(|e| e.to_string())?;
+    let config_path = resolve_config_toml_path();
+    let url = chat_url_from_config(&config_path).map_err(|e| e.to_string())?;
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()
@@ -1594,6 +1594,40 @@ fn resolve_default_models_dir() -> Result<PathBuf, RuntimeError> {
     Err(RuntimeError::ConfigError(
         "No models directory found; use --dir or create ~/models".to_string(),
     ))
+}
+
+/// Locate the running server's `config.toml` for the live-refresh/benchmark
+/// calls `ggs models pull [vllm]` makes after registering a model. `ggs` is
+/// installed system-wide (`/usr/local/bin/gguf-switchboard`) and must work
+/// from any `$PWD`, so this can't just assume `./config.toml` — that only
+/// happened to work when run from the install directory.
+///
+/// Checked in order: `$GGUF_SWITCHBOARD_CONFIG_DIR` (the directory containing
+/// `config.toml` — already documented as the override for a runtime config
+/// kept outside the checkout, see docs/superpowers/specs/2026-08-08-deploy-
+/// runtime-config-design.md, but never actually read anywhere until now),
+/// `./config.toml` (still honored for custom/dev setups run from their own
+/// directory), then `/opt/gguf-switchboard/config.toml` — the actual install
+/// path per `deploy.sh` and `gguf-switchboard.service`. Falls back to the
+/// literal `"config.toml"` (today's behavior) so a legitimately custom,
+/// undetectable layout still gets the same error message as before.
+fn resolve_config_toml_path() -> PathBuf {
+    if let Ok(dir) = std::env::var("GGUF_SWITCHBOARD_CONFIG_DIR") {
+        let path = PathBuf::from(dir).join("config.toml");
+        if path.is_file() {
+            return path;
+        }
+    }
+    for candidate in [
+        PathBuf::from("config.toml"),
+        PathBuf::from("/opt/gguf-switchboard/config.toml"), // matches deploy.sh / gguf-switchboard.service
+        PathBuf::from("/etc/gguf-switchboard/config.toml"), // legacy location deploy.sh migrates from
+    ] {
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    PathBuf::from("config.toml")
 }
 
 /// Default destination for vLLM safetensors pulls: a `vllm-models` directory
