@@ -1,5 +1,6 @@
 pub mod llama_cpp;
 pub mod tool_probe;
+pub mod vllm;
 
 use std::pin::Pin;
 
@@ -98,6 +99,7 @@ pub trait Backend: Send + Sync {
 pub fn create_backend(model_id: &str, config: &ModelConfig) -> Box<dyn Backend> {
     match config.backend.as_str() {
         "llama.cpp" => Box::new(llama_cpp::LlamaCppBackend::new(model_id, config)),
+        "vllm" => Box::new(vllm::VllmBackend::new(model_id, config)),
         other => {
             tracing::warn!(
                 backend = other,

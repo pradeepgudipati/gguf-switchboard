@@ -491,14 +491,14 @@ impl LlamaCppBackend {
 
 /// Parses a raw byte SSE stream and yields deserialized typed chunks.
 /// Handles partial line buffering, `data: ` prefix stripping, and `[DONE]` termination.
-struct SseLineParser<T> {
+pub(crate) struct SseLineParser<T> {
     inner: Pin<Box<dyn Stream<Item = Result<bytes::Bytes, RuntimeError>> + Send>>,
     buffer: Vec<u8>,
     _marker: std::marker::PhantomData<T>,
 }
 
 impl<T> SseLineParser<T> {
-    fn new(
+    pub(crate) fn new(
         stream: impl Stream<Item = Result<bytes::Bytes, RuntimeError>> + Send + 'static,
     ) -> Self {
         Self {
@@ -513,7 +513,9 @@ impl<T> SseLineParser<T> {
 /// `function.arguments` to a string first (the shape is generic over `T`,
 /// so this is a no-op for response types without `tool_calls`, e.g.
 /// `CompletionChunk`).
-fn parse_sse_json<T: serde::de::DeserializeOwned>(json_str: &str) -> Result<T, serde_json::Error> {
+pub(crate) fn parse_sse_json<T: serde::de::DeserializeOwned>(
+    json_str: &str,
+) -> Result<T, serde_json::Error> {
     let mut value: serde_json::Value = serde_json::from_str(json_str)?;
     super::tool_probe::normalize_tool_call_arguments(&mut value);
     serde_json::from_value(value)

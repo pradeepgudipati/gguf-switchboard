@@ -1075,6 +1075,20 @@ impl SchedulerInner {
         &self,
         model_id: &str,
     ) -> Result<Arc<dyn Backend>, RuntimeError> {
+        // vLLM has no `-ngl`/`-c` flags, so the llama.cpp-specific auto_ngl and
+        // FitPlanner paths below don't apply — they'd rewrite/append flags vLLM's
+        // argparse doesn't recognize. vLLM always goes through its own planner
+        // (not gated by `fit.enabled`: an initial --gpu-memory-utilization /
+        // --tensor-parallel-size still needs to be derived from hardware).
+        let is_vllm = self
+            .models
+            .read()
+            .get(model_id)
+            .is_some_and(|cfg| cfg.backend == "vllm");
+        if is_vllm {
+            return self.load_vllm_model_with_fit(model_id).await;
+        }
+
         // Embedding models use the balanced VRAM planner by default. Other model
         // kinds retain the opt-in global fit behavior.
         let embedding_fit = self.config.embedding_fit.enabled
@@ -1501,6 +1515,126 @@ impl SchedulerInner {
                         load_error_label(&e),
                         start.elapsed().as_secs_f64(),
                     );
+                    self.backends.write().await.remove(model_id);
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    /// Load a vLLM model using the vLLM-specific fit planner: probes hardware,
+    /// derives an initial `--gpu-memory-utilization` / `--tensor-parallel-size`
+    /// / `--max-model-len`, and retries with a reduced context on OOM. The
+    /// llama.cpp `FitPlanner` (ngl/KV-cache-type/tensor-split) doesn't apply
+    /// here — see [`load_model_with_context_fallback`].
+    async fn load_vllm_model_with_fit(
+        &self,
+        model_id: &str,
+    ) -> Result<Arc<dyn Backend>, RuntimeError> {
+        use crate::fit::{HardwareSummary, VllmFitPlanner};
+
+        let base_args = self.effective_args(model_id).await?;
+        let requested_context = crate::fit::vllm_max_model_len_from_args(&base_args)
+            .unwrap_or(self.config.fit.context_minimum());
+        let model_size_mb = crate::fit::vllm_model_size_mb_from_args(&base_args);
+        let pinned_tp = crate::fit::vllm_tensor_parallel_size_from_args(&base_args);
+        let pinned_gmu = crate::fit::vllm_gpu_memory_utilization_from_args(&base_args);
+
+        let plan_started = Instant::now();
+        let vram_gb = self.config.vram_gb;
+        let hardware = tokio::task::spawn_blocking(move || HardwareSummary::probe(vram_gb))
+            .await
+            .map_err(|e| {
+                RuntimeError::ModelLoadingFailed(format!("Hardware probe task failed: {e}"))
+            })?;
+        metrics::record_phase(
+            model_id,
+            metrics::phase::PLAN,
+            plan_started.elapsed().as_secs_f64(),
+        );
+
+        let mut planner = VllmFitPlanner::new(
+            &hardware,
+            model_size_mb,
+            requested_context,
+            pinned_tp,
+            pinned_gmu,
+            &self.config.fit,
+        );
+
+        loop {
+            let plan = planner.current_plan();
+            let attempt = plan.attempt;
+            info!(model = %model_id, attempt, plan = %plan, "VllmFitPlanner: attempting load");
+
+            let fit_args = VllmFitPlanner::apply_plan_to_args(&base_args, plan);
+            self.backends.write().await.remove(model_id);
+            self.runtime_args
+                .write()
+                .await
+                .insert(model_id.to_string(), fit_args);
+
+            let backend = self.get_or_create_backend(model_id).await?;
+            let start = Instant::now();
+
+            if let Err(e) = backend.load().await {
+                let stderr = backend.take_startup_stderr().await;
+                let message = e.to_string();
+                let kind = classify_load_failure(&message, &stderr);
+                warn!(model = %model_id, attempt, error = %message, failure_kind = ?kind, "VllmFitPlanner: load failed");
+                let _ = backend.unload().await;
+
+                if kind.is_oom()
+                    && let Some(next) = planner.advance(&message)
+                {
+                    metrics::record_load_attempt(
+                        model_id,
+                        metrics::result::OOM_RETRY,
+                        start.elapsed().as_secs_f64(),
+                    );
+                    warn!(model = %model_id, next_attempt = next.attempt, next_plan = %next, "VllmFitPlanner: retrying with fallback");
+                    continue;
+                }
+
+                metrics::record_load_attempt(
+                    model_id,
+                    metrics::result::ERROR,
+                    start.elapsed().as_secs_f64(),
+                );
+                self.backends.write().await.remove(model_id);
+                return Err(RuntimeError::ModelLoadingFailed(format!(
+                    "Failed to start model '{model_id}' after {attempt} attempt(s): {message}"
+                )));
+            }
+
+            match self.wait_until_healthy(model_id, &backend).await {
+                Ok(()) => {
+                    let elapsed = start.elapsed();
+                    metrics::record_load_attempt(model_id, metrics::result::OK, elapsed.as_secs_f64());
+                    LOADED_MODEL.set(1);
+                    BACKEND_HEALTH.set(1);
+                    info!(model = %model_id, attempt, plan = %plan, elapsed_ms = elapsed.as_millis(), "VllmFitPlanner: model loaded successfully");
+                    return Ok(backend);
+                }
+                Err(e) => {
+                    let stderr = backend.take_startup_stderr().await;
+                    let message = e.to_string();
+                    let kind = classify_load_failure(&message, &stderr);
+                    warn!(model = %model_id, attempt, error = %message, failure_kind = ?kind, "VllmFitPlanner: health check failed");
+
+                    if kind.is_oom()
+                        && let Some(next) = planner.advance(&message)
+                    {
+                        metrics::record_load_attempt(
+                            model_id,
+                            metrics::result::OOM_RETRY,
+                            start.elapsed().as_secs_f64(),
+                        );
+                        warn!(model = %model_id, next_attempt = next.attempt, next_plan = %next, "VllmFitPlanner: retrying with fallback");
+                        continue;
+                    }
+
+                    metrics::record_load_attempt(model_id, load_error_label(&e), start.elapsed().as_secs_f64());
                     self.backends.write().await.remove(model_id);
                     return Err(e);
                 }
