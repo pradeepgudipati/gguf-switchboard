@@ -7,6 +7,7 @@ pub mod embeddings;
 pub mod health;
 pub mod metrics;
 pub mod models;
+pub mod rerank;
 pub mod responses;
 pub mod usage;
 
@@ -46,6 +47,7 @@ use crate::state::AppState;
         chat::chat_completions,
         completions::completions,
         embeddings::embeddings,
+        rerank::rerank,
         responses::responses,
         audio::transcriptions,
         anthropic::messages,
@@ -90,6 +92,10 @@ use crate::state::AppState;
         crate::types::embeddings::EmbeddingInput,
         crate::types::embeddings::EmbeddingData,
         crate::types::embeddings::EmbeddingUsage,
+        crate::types::rerank::RerankRequest,
+        crate::types::rerank::RerankResponse,
+        crate::types::rerank::RerankResult,
+        crate::types::rerank::RerankUsage,
         crate::types::responses::ResponseRequest,
         crate::types::responses::ResponseInput,
         crate::types::responses::ResponseMessage,
@@ -134,6 +140,7 @@ use crate::state::AppState;
         (name = "completions", description = "Text completion endpoints"),
         (name = "Anthropic", description = "Anthropic Messages API endpoints"),
         (name = "embeddings", description = "Embedding endpoints"),
+        (name = "rerank", description = "Document reranking endpoints"),
         (name = "responses", description = "Responses API endpoints"),
         (name = "audio", description = "Audio transcription and speech endpoints"),
         (name = "usage", description = "Usage statistics endpoints"),
@@ -213,6 +220,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             "/v1/embeddings",
             axum::routing::post(embeddings::embeddings),
         )
+        .route("/v1/rerank", axum::routing::post(rerank::rerank))
         .route("/v1/models", axum::routing::get(models::list_models))
         .route(
             "/v1/models/refresh",

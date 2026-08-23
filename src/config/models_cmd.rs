@@ -1501,8 +1501,8 @@ async fn maybe_bench_after_pull(alias: &str, kind: &str, no_bench: bool, refresh
     if no_bench {
         return;
     }
-    if kind.eq_ignore_ascii_case("embedding") {
-        eprintln!("Speed test skipped: embedding models have no chat generation");
+    if kind.eq_ignore_ascii_case("embedding") || kind.eq_ignore_ascii_case("reranker") {
+        eprintln!("Speed test skipped: {kind} models have no chat generation");
         return;
     }
     if !refreshed {
@@ -2067,7 +2067,9 @@ fn display_name_from_alias(alias: &str) -> String {
 /// Infer model kind from a GGUF filename.
 fn infer_kind_from_filename(filename: &str) -> String {
     let lower = filename.to_ascii_lowercase();
-    if lower.contains("embed") {
+    if lower.contains("rerank") {
+        "reranker".to_string()
+    } else if lower.contains("embed") {
         "embedding".to_string()
     } else if lower.contains("-vl") || lower.contains("vision") {
         "vision".to_string()

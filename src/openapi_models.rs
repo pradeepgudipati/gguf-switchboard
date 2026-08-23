@@ -49,6 +49,7 @@ pub fn inject_model_enums(doc: &mut Value, models: &[(String, ModelConfig)]) {
         "ChatCompletionRequest",
         "CompletionRequest",
         "EmbeddingRequest",
+        "RerankRequest",
         "ResponseRequest",
         "ResolveTemplateRequest",
     ];

@@ -168,8 +168,9 @@ pub struct ModelSummary {
     pub model_fingerprint: String,
     pub ngl_pinned: bool,
     pub pinned_ngl: Option<u32>,
-    /// Model kind: "chat", "embedding", "coder", "vision", etc.
-    /// Used to apply kind-specific optimizations (e.g., batch sizes for embedding models).
+    /// Model kind: "chat", "embedding", "reranker", "coder", "vision", etc.
+    /// Used to apply kind-specific optimizations (e.g., batch sizes for
+    /// embedding/reranker pooling models).
     pub kind: Option<String>,
     /// Minimum context size this model must always keep, even after VRAM-
     /// pressure fallback reduces context for other models (`RegistryEntry.ctx`).
@@ -933,8 +934,11 @@ fn compute_embedding_batch_sizes(
     (Some(base_batch), Some(base_ubatch), steps)
 }
 
+/// True for pooling-style models (embedding and reranker/cross-encoder) that
+/// need the same batch-size and context-headroom treatment, as opposed to
+/// generative chat models.
 fn is_embedding(model: &ModelSummary) -> bool {
-    model.kind.as_deref() == Some("embedding")
+    matches!(model.kind.as_deref(), Some("embedding") | Some("reranker"))
 }
 
 fn balanced_embedding_context(headroom_mb: u64) -> u32 {
