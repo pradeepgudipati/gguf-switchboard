@@ -18,6 +18,7 @@ use crate::config::ModelConfig;
     "object": "model",
     "created": 1710000000,
     "owned_by": "local",
+    "backend": "vllm",
     "display_name": "Qwen2.5 Coder 7b",
     "kind": "coder",
     "description": "Code-specialized Qwen 2.5 instruct model",
@@ -25,7 +26,10 @@ use crate::config::ModelConfig;
     "max_context_length": 32768,
     "min_vram_gb": 8,
     "capabilities": ["tools"],
-    "hf_repo": "lmstudio-community/Qwen2.5-Coder-7B-Instruct-GGUF"
+    "hf_repo": "lmstudio-community/Qwen2.5-Coder-7B-Instruct-GGUF",
+    "quantization": "awq",
+    "tensor_parallel_size": 1,
+    "gpu_memory_utilization": 0.85
 }))]
 pub struct ModelInfo {
     pub id: String,
@@ -33,6 +37,8 @@ pub struct ModelInfo {
     /// Model creation timestamp as Unix seconds
     pub created: i64,
     pub owned_by: String,
+    /// The engine actually serving this model: `"llama.cpp"` or `"vllm"`.
+    pub backend: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
     /// Model role: `chat`, `coder`, `vision`, or `embedding`.
@@ -40,7 +46,8 @@ pub struct ModelInfo {
     pub kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    /// Serving context size (`-c`), when known from launch args.
+    /// Serving context size, when known from launch args — `-c`/`--ctx-size`
+    /// for llama.cpp, `--max-model-len` for vLLM.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub context_size: Option<u32>,
     /// Model maximum context length from GGUF/HF metadata.
@@ -52,6 +59,26 @@ pub struct ModelInfo {
     pub capabilities: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hf_repo: Option<String>,
+    /// vLLM `--quantization` (e.g. `awq`, `gptq`, `fp8`). `None` for
+    /// llama.cpp models or an unquantized vLLM model.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quantization: Option<String>,
+    /// vLLM `--attention-backend` (e.g. `FLASH_ATTN`, `FLASHINFER`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attention_backend: Option<String>,
+    /// vLLM `--speculative-model` — the paired dspark draft model, if any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub draft_model: Option<String>,
+    /// vLLM `--tensor-parallel-size`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tensor_parallel_size: Option<u32>,
+    /// vLLM `--gpu-memory-utilization` (0.0-1.0) as configured in
+    /// `models.toml`. Note: if this wasn't pinned, the scheduler's
+    /// VllmFitPlanner computes and injects the actual value fresh at every
+    /// load from live free VRAM — that live-adjusted value isn't reflected
+    /// here yet (no vLLM equivalent of `runtime_profile` persists it).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu_memory_utilization: Option<f32>,
     /// The effective runtime profile after the last successful load.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub runtime_profile: Option<RuntimeProfileInfo>,
@@ -93,6 +120,7 @@ impl ModelInfo {
             object: "model".to_string(),
             created: Utc::now().timestamp(),
             owned_by: "local".to_string(),
+            backend: "llama.cpp".to_string(),
             display_name: None,
             kind: None,
             description: None,
@@ -101,13 +129,38 @@ impl ModelInfo {
             min_vram_gb: None,
             capabilities: Vec::new(),
             hf_repo: None,
+            quantization: None,
+            attention_backend: None,
+            draft_model: None,
+            tensor_parallel_size: None,
+            gpu_memory_utilization: None,
             runtime_profile: None,
             tools_verified: None,
         }
     }
 
     pub fn from_config(id: impl Into<String>, config: &ModelConfig) -> Self {
-        let context_size = crate::context::get_context_size(&config.args);
+        // llama.cpp uses -c/--ctx-size; vLLM uses --max-model-len. Neither
+        // helper matches the other backend's flags, so try both.
+        let context_size = crate::context::get_context_size(&config.args)
+            .or_else(|| crate::fit::vllm_max_model_len_from_args(&config.args));
+        let (
+            quantization,
+            attention_backend,
+            draft_model,
+            tensor_parallel_size,
+            gpu_memory_utilization,
+        ) = if config.backend == "vllm" {
+            (
+                crate::fit::vllm_quantization_from_args(&config.args),
+                crate::fit::vllm_attention_backend_from_args(&config.args),
+                crate::fit::vllm_draft_model_from_args(&config.args),
+                crate::fit::vllm_tensor_parallel_size_from_args(&config.args),
+                crate::fit::vllm_gpu_memory_utilization_from_args(&config.args),
+            )
+        } else {
+            (None, None, None, None, None)
+        };
         let runtime_profile = config
             .runtime_profile
             .as_ref()
@@ -129,6 +182,7 @@ impl ModelInfo {
             object: "model".to_string(),
             created: Utc::now().timestamp(),
             owned_by: "local".to_string(),
+            backend: config.backend.clone(),
             display_name: Some(config.display_name.clone()),
             kind: Some(config.kind.clone()),
             description: config.description.clone(),
@@ -137,6 +191,11 @@ impl ModelInfo {
             min_vram_gb: config.min_vram_gb,
             capabilities: config.capabilities.clone(),
             hf_repo: config.hf_repo.clone(),
+            quantization,
+            attention_backend,
+            draft_model,
+            tensor_parallel_size,
+            gpu_memory_utilization,
             runtime_profile,
             tools_verified: None,
         }
