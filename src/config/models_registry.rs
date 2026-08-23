@@ -42,6 +42,15 @@ pub struct RegistryDefaults {
     pub ngl: u32,
     #[serde(default = "default_backend")]
     pub backend: String,
+    /// `uv` invocation used for vLLM entries (`backend = "vllm"`), e.g. `"uv"`
+    /// or an absolute path. Passed as `<vllm_command> run [--project <dir>] vllm serve ...`.
+    #[serde(default = "default_vllm_command")]
+    pub vllm_command: String,
+    /// Optional `uv --project` directory pinning the vLLM environment (e.g. a
+    /// project dir with vLLM installed via `uv pip install vllm`). When unset,
+    /// `uv run vllm ...` resolves vLLM from the ambient/active uv environment.
+    #[serde(default)]
+    pub vllm_project: Option<String>,
 }
 
 fn default_enabled() -> bool {
@@ -128,6 +137,36 @@ pub struct RegistryEntry {
     /// accident.
     #[serde(default)]
     pub ctx: Option<u32>,
+    /// Per-model backend override ("llama.cpp" | "vllm"). Falls back to
+    /// `defaults.backend` when unset. This is what decides which engine
+    /// serves the model — GGUF entries stay on llama.cpp, safetensors
+    /// entries pulled via `models pull --backend vllm` get `Some("vllm")`.
+    #[serde(default)]
+    pub backend: Option<String>,
+    /// vLLM `--quantization` value (e.g. `awq`, `gptq`, `fp8`). Detected from
+    /// the repo's `config.json` `quantization_config` during `models pull`.
+    #[serde(default)]
+    pub quantization: Option<String>,
+    /// vLLM `--attention-backend` override (`FLASH_ATTN`, `FLASHINFER`, ...).
+    #[serde(default)]
+    pub attention_backend: Option<String>,
+    /// HF repo id or local path of a speculative-decoding draft ("dspark")
+    /// model, passed as vLLM's `--speculative-model`.
+    #[serde(default)]
+    pub draft_model: Option<String>,
+    /// vLLM `--num-speculative-tokens`. Detected from the draft repo's
+    /// Speculators-format `config.json` (`speculators_config`) when possible.
+    #[serde(default)]
+    pub num_speculative_tokens: Option<u32>,
+    /// vLLM `--tensor-parallel-size`.
+    #[serde(default)]
+    pub tensor_parallel_size: Option<u32>,
+    /// vLLM `--gpu-memory-utilization` (0.0-1.0).
+    #[serde(default)]
+    pub gpu_memory_utilization: Option<f32>,
+    /// vLLM `--served-model-name`. Defaults to `alias` when unset.
+    #[serde(default)]
+    pub served_model_name: Option<String>,
 }
 
 impl Default for RegistryEntry {
@@ -156,6 +195,14 @@ impl Default for RegistryEntry {
             chat_template_file: None,
             reasoning_format: None,
             ctx: None,
+            backend: None,
+            quantization: None,
+            attention_backend: None,
+            draft_model: None,
+            num_speculative_tokens: None,
+            tensor_parallel_size: None,
+            gpu_memory_utilization: None,
+            served_model_name: None,
         }
     }
 }
@@ -165,6 +212,14 @@ impl RegistryEntry {
         self.kind
             .clone()
             .unwrap_or_else(|| infer_kind(&self.alias, &self.file))
+    }
+
+    /// Resolve which engine serves this model: the per-entry `backend`
+    /// override if set, otherwise the registry-wide `defaults.backend`.
+    pub fn effective_backend(&self, defaults_backend: &str) -> String {
+        self.backend
+            .clone()
+            .unwrap_or_else(|| defaults_backend.to_string())
     }
 }
 
@@ -210,6 +265,8 @@ impl Default for RegistryDefaults {
             context_size: default_context_size(),
             ngl: default_ngl(),
             backend: default_backend(),
+            vllm_command: default_vllm_command(),
+            vllm_project: None,
         }
     }
 }
@@ -242,6 +299,10 @@ fn default_backend() -> String {
     "llama.cpp".to_string()
 }
 
+fn default_vllm_command() -> String {
+    "uv".to_string()
+}
+
 fn default_auto_discover() -> bool {
     true
 }
@@ -265,6 +326,38 @@ pub fn detect_llama_server() -> String {
     }
 
     default_llama_server()
+}
+
+/// Deploy check for the vLLM backend: verifies `uv` is on PATH and that
+/// `vllm` is importable in the resolved uv environment (ambient, or the
+/// `--project <dir>` given). Returns `Err` with an actionable install
+/// message when either is missing — used both before spawning a vLLM
+/// backend and as a `models pull --backend vllm` preflight, so a user
+/// finds out before waiting on a multi-GB download.
+pub fn check_vllm_available(vllm_command: &str, vllm_project: Option<&str>) -> Result<(), String> {
+    let mut cmd = std::process::Command::new(vllm_command);
+    cmd.arg("run");
+    if let Some(project) = vllm_project {
+        cmd.arg("--project").arg(project);
+    }
+    cmd.args(["vllm", "--version"]);
+
+    match cmd.output() {
+        Ok(out) if out.status.success() => Ok(()),
+        Ok(out) => {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            Err(format!(
+                "vLLM not found in the configured uv environment ({vllm_command} run vllm --version failed: {}).\n\
+                 Install it with:\n  uv pip install vllm\nor:\n  uv tool install vllm\n\
+                 See https://docs.vllm.ai/en/latest/getting_started/installation.html",
+                stderr.trim()
+            ))
+        }
+        Err(e) => Err(format!(
+            "Could not run '{vllm_command}' ({e}). Install uv (https://docs.astral.sh/uv/) \
+             and vLLM with: uv pip install vllm"
+        )),
+    }
 }
 
 /// Split `models_dir` on commas (e.g. `"/models,/data/gguf"`).
@@ -1457,6 +1550,38 @@ impl ModelsRegistry {
         let mut claimed_files = HashSet::new();
 
         for entry in &self.models {
+            let is_vllm = entry.effective_backend(&self.defaults.backend) == "vllm";
+
+            if is_vllm {
+                // vLLM entries point at a local safetensors directory (or, when
+                // `entry.file` is empty, are served straight from `hf_repo` and
+                // have nothing local to validate). No GGUF magic-byte check applies.
+                if entry.file.is_empty() {
+                    entries.push(entry.clone());
+                    continue;
+                }
+                let path = Path::new(&entry.file);
+                let path = if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    models_dirs
+                        .first()
+                        .map(|dir| dir.join(&entry.file))
+                        .unwrap_or_else(|| path.to_path_buf())
+                };
+                if !path.exists() {
+                    tracing::warn!(
+                        alias = %entry.alias,
+                        file = %entry.file,
+                        "Skipping explicit vLLM model entry because the safetensors path was not found"
+                    );
+                    continue;
+                }
+                claimed_files.insert(normalize_file_key(&models_dirs, &entry.file));
+                entries.push(entry.clone());
+                continue;
+            }
+
             match resolve_model_path(&models_dirs, &entry.file) {
                 Ok(path) => {
                     if !Path::new(&path).is_file() {
@@ -1547,76 +1672,97 @@ impl ModelsRegistry {
 
         let mut models = HashMap::new();
         for entry in &entries {
-            let model_path = resolve_model_path(&models_dirs, &entry.file)?;
+            let entry_backend = entry.effective_backend(&backend);
             let port = entry.port.ok_or_else(|| {
                 RuntimeError::ConfigError(format!(
                     "Model '{}' has no assigned backend port",
                     entry.alias
                 ))
             })?;
-            let context_size =
-                suggest_context_size(vram_gb, entry, &model_path, self.defaults.context_size);
-            let ngl = entry.ngl.unwrap_or(self.defaults.ngl);
-            let extra = effective_extra_args(entry);
-            let ngl_pinned = entry.ngl.is_some() || extra_args_pin_ngl(&extra);
-            let gguf_meta = inspect_gguf_metadata(Path::new(&model_path)).ok();
-            let block_count = gguf_meta
-                .as_ref()
-                .and_then(|m| m.block_count)
-                .and_then(|n| u32::try_from(n).ok());
-            let max_context_from_gguf = gguf_meta
-                .as_ref()
-                .and_then(|m| m.context_length)
-                .and_then(|n| u32::try_from(n).ok());
-            let model_fingerprint = {
-                let fname = std::path::Path::new(&model_path)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| model_path.clone());
-                let size_mb = std::fs::metadata(&model_path)
-                    .map(|m| m.len() / (1024 * 1024))
-                    .unwrap_or(0);
-                format!("{fname}:{size_mb}")
-            };
 
-            let mut args = vec![
-                "-m".to_string(),
-                model_path,
-                "--host".to_string(),
-                self.defaults.host.clone(),
-                "--port".to_string(),
-                port.to_string(),
-                "-c".to_string(),
-                context_size.to_string(),
-                "-ngl".to_string(),
-                ngl.to_string(),
-            ];
-            if entry.effective_kind() == "embedding" {
-                args.push("--embeddings".to_string());
-                // Add batch size flags for embedding models if not already configured.
-                // This prevents "input exceeds physical batch size" errors with large inputs.
-                if !crate::batch::has_batch_flags(&args) {
-                    let (batch_size, ubatch_size) =
-                        if let (Some(b), Some(ub)) = (entry.batch_size, entry.ubatch_size) {
-                            (b, ub)
-                        } else {
-                            crate::batch::embedding_batch_defaults()
-                        };
-                    args.push("-b".to_string());
-                    args.push(batch_size.to_string());
-                    args.push("-ub".to_string());
-                    args.push(ubatch_size.to_string());
-                }
-            }
-            args.extend(extra);
+            let (command, args, block_count, max_context_from_gguf, model_fingerprint) =
+                if entry_backend == "vllm" {
+                    build_vllm_args(entry, &self.defaults, &models_dirs, port)?
+                } else {
+                    let model_path = resolve_model_path(&models_dirs, &entry.file)?;
+                    let context_size = suggest_context_size(
+                        vram_gb,
+                        entry,
+                        &model_path,
+                        self.defaults.context_size,
+                    );
+                    let ngl = entry.ngl.unwrap_or(self.defaults.ngl);
+                    let extra = effective_extra_args(entry);
+                    let gguf_meta = inspect_gguf_metadata(Path::new(&model_path)).ok();
+                    let block_count = gguf_meta
+                        .as_ref()
+                        .and_then(|m| m.block_count)
+                        .and_then(|n| u32::try_from(n).ok());
+                    let max_context_from_gguf = gguf_meta
+                        .as_ref()
+                        .and_then(|m| m.context_length)
+                        .and_then(|n| u32::try_from(n).ok());
+                    let model_fingerprint = {
+                        let fname = std::path::Path::new(&model_path)
+                            .file_name()
+                            .map(|n| n.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| model_path.clone());
+                        let size_mb = std::fs::metadata(&model_path)
+                            .map(|m| m.len() / (1024 * 1024))
+                            .unwrap_or(0);
+                        format!("{fname}:{size_mb}")
+                    };
+
+                    let mut args = vec![
+                        "-m".to_string(),
+                        model_path,
+                        "--host".to_string(),
+                        self.defaults.host.clone(),
+                        "--port".to_string(),
+                        port.to_string(),
+                        "-c".to_string(),
+                        context_size.to_string(),
+                        "-ngl".to_string(),
+                        ngl.to_string(),
+                    ];
+                    if entry.effective_kind() == "embedding" {
+                        args.push("--embeddings".to_string());
+                        // Add batch size flags for embedding models if not already configured.
+                        // This prevents "input exceeds physical batch size" errors with large inputs.
+                        if !crate::batch::has_batch_flags(&args) {
+                            let (batch_size, ubatch_size) = if let (Some(b), Some(ub)) =
+                                (entry.batch_size, entry.ubatch_size)
+                            {
+                                (b, ub)
+                            } else {
+                                crate::batch::embedding_batch_defaults()
+                            };
+                            args.push("-b".to_string());
+                            args.push(batch_size.to_string());
+                            args.push("-ub".to_string());
+                            args.push(ubatch_size.to_string());
+                        }
+                    }
+                    args.extend(extra);
+
+                    (
+                        self.defaults.llama_server.clone(),
+                        args,
+                        block_count,
+                        max_context_from_gguf,
+                        Some(model_fingerprint),
+                    )
+                };
+            let ngl_pinned = entry_backend != "vllm"
+                && (entry.ngl.is_some() || extra_args_pin_ngl(&effective_extra_args(entry)));
 
             let config = ModelConfig {
-                backend: backend.clone(),
+                backend: entry_backend,
                 display_name: entry
                     .display_name
                     .clone()
                     .unwrap_or_else(|| display_name_from_alias(&entry.alias)),
-                command: self.defaults.llama_server.clone(),
+                command,
                 args,
                 backend_url: format!("http://{}:{}/v1", self.defaults.host, port),
                 health_url: format!("http://{}:{}/health", self.defaults.host, port),
@@ -1630,7 +1776,7 @@ impl ModelsRegistry {
                 ctx_floor: entry.ctx,
                 block_count,
                 ngl_pinned,
-                model_fingerprint: Some(model_fingerprint),
+                model_fingerprint,
                 max_context_from_gguf,
                 runtime_profile: None,
             };
@@ -1639,6 +1785,91 @@ impl ModelsRegistry {
 
         Ok(models)
     }
+}
+
+/// Build the `uv run vllm serve ...` command/args for a vLLM-backed entry.
+/// Returns `(command, args, block_count, max_context_from_gguf, model_fingerprint)`
+/// — the last three mirror the llama.cpp branch's tuple shape but are always
+/// `None` here: vLLM manages its own memory fitting (`--gpu-memory-utilization`)
+/// rather than the GGUF-derived `auto_ngl`/fit-planner heuristics.
+fn build_vllm_args(
+    entry: &RegistryEntry,
+    defaults: &RegistryDefaults,
+    models_dirs: &[PathBuf],
+    port: u16,
+) -> Result<(String, Vec<String>, Option<u32>, Option<u32>, Option<String>), RuntimeError> {
+    // Prefer a local safetensors directory; fall back to serving straight
+    // from the HF repo id when no local copy was pulled.
+    let model_ref = if !entry.file.is_empty() {
+        let path = Path::new(&entry.file);
+        if path.is_absolute() {
+            entry.file.clone()
+        } else {
+            models_dirs
+                .first()
+                .map(|dir| dir.join(&entry.file).to_string_lossy().into_owned())
+                .unwrap_or_else(|| entry.file.clone())
+        }
+    } else if let Some(repo) = &entry.hf_repo {
+        repo.clone()
+    } else {
+        return Err(RuntimeError::ConfigError(format!(
+            "vLLM model '{}' has neither a local `file` path nor an `hf_repo` to serve",
+            entry.alias
+        )));
+    };
+
+    let served_name = entry
+        .served_model_name
+        .clone()
+        .unwrap_or_else(|| entry.alias.clone());
+    let context_size = entry.context_size.or(entry.ctx).unwrap_or(defaults.context_size);
+
+    let mut args = vec!["run".to_string()];
+    if let Some(project) = &defaults.vllm_project {
+        args.push("--project".to_string());
+        args.push(project.clone());
+    }
+    args.extend([
+        "vllm".to_string(),
+        "serve".to_string(),
+        model_ref,
+        "--host".to_string(),
+        defaults.host.clone(),
+        "--port".to_string(),
+        port.to_string(),
+        "--served-model-name".to_string(),
+        served_name,
+        "--max-model-len".to_string(),
+        context_size.to_string(),
+    ]);
+    if let Some(quant) = &entry.quantization {
+        args.push("--quantization".to_string());
+        args.push(quant.clone());
+    }
+    if let Some(attn) = &entry.attention_backend {
+        args.push("--attention-backend".to_string());
+        args.push(attn.clone());
+    }
+    if let Some(draft) = &entry.draft_model {
+        args.push("--speculative-model".to_string());
+        args.push(draft.clone());
+        if let Some(n) = entry.num_speculative_tokens {
+            args.push("--num-speculative-tokens".to_string());
+            args.push(n.to_string());
+        }
+    }
+    if let Some(tp) = entry.tensor_parallel_size {
+        args.push("--tensor-parallel-size".to_string());
+        args.push(tp.to_string());
+    }
+    if let Some(gmu) = entry.gpu_memory_utilization {
+        args.push("--gpu-memory-utilization".to_string());
+        args.push(gmu.to_string());
+    }
+    args.extend(entry.extra_args.clone());
+
+    Ok((defaults.vllm_command.clone(), args, None, None, None))
 }
 
 fn extra_args_pin_ngl(extra_args: &[String]) -> bool {

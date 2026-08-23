@@ -20,7 +20,12 @@ const HF_MODELS_API: &str = "https://huggingface.co/api/models";
 // ── models search ────────────────────────────────────────────────────────────
 
 /// `gguf-switchboard models search <query> [--limit N] [--ram-bandwidth-gbps N]`
+/// `gguf-switchboard models search vllm <query> [--limit N]`
 pub async fn cmd_search(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if args.get(1).is_some_and(|a| a == "vllm") {
+        return cmd_search_vllm(&args[1..]).await;
+    }
+
     let mut query: Option<String> = None;
     let mut limit: u32 = 10;
     let mut ram_bandwidth_override: Option<f64> = None;
@@ -137,6 +142,113 @@ pub async fn cmd_search(args: &[String]) -> Result<(), Box<dyn std::error::Error
     if let Some(command) = sample_pull_command(&hits, &assessments) {
         println!("{command}");
     }
+
+    Ok(())
+}
+
+/// `gguf-switchboard models search vllm <query> [--limit N]` — searches for
+/// safetensors repos vLLM can serve directly, showing quantization and
+/// speculative-decoding (dspark draft model) pairing instead of GGUF quants.
+async fn cmd_search_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut query: Option<String> = None;
+    let mut limit: u32 = 10;
+
+    let mut i = 1; // args[0] is "vllm"
+    while i < args.len() {
+        match args[i].as_str() {
+            "--limit" => {
+                if let Some(val) = args.get(i + 1) {
+                    limit = val
+                        .parse()
+                        .map_err(|_| "models search vllm: invalid value for --limit")?;
+                    i += 2;
+                } else {
+                    return Err("models search vllm: missing value for --limit".into());
+                }
+            }
+            arg if arg.starts_with('-') => {
+                return Err(format!("models search vllm: unknown flag '{arg}'").into());
+            }
+            val => {
+                query = Some(val.to_string());
+                i += 1;
+            }
+        }
+    }
+    let query = query.ok_or("models search vllm: missing search query")?;
+
+    let client = hf_download::build_hf_client()?;
+    let url = reqwest::Url::parse_with_params(
+        HF_MODELS_API,
+        &[
+            ("search", query.as_str()),
+            ("limit", &limit.to_string()),
+            ("expand", "siblings"),
+            ("expand", "tags"),
+            ("expand", "pipeline_tag"),
+        ],
+    )
+    .map_err(|e| RuntimeError::InternalError(e.to_string()))?;
+    let resp = client.get(url).send().await.map_err(RuntimeError::from)?;
+    if !resp.status().is_success() {
+        return Err(format!("HF API search failed: HTTP {}", resp.status()).into());
+    }
+    let hits: Vec<Value> = resp.json().await.map_err(RuntimeError::from)?;
+
+    // Keep only repos that actually look like servable safetensors models
+    // (has weights + config.json), fetching each repo's tree to check.
+    let candidates = stream::iter(hits.into_iter().map(|hit| {
+        let client = client.clone();
+        async move {
+            let repo = hit.get("id").and_then(Value::as_str)?.to_string();
+            let entries = hf_download::fetch_repo_tree_all(&client, &repo).await.ok()?;
+            if !super::vllm_meta::is_safetensors_repo(&entries) {
+                return None;
+            }
+            let meta = super::vllm_meta::detect_vllm_metadata(&client, &repo)
+                .await
+                .unwrap_or_default();
+            let size_bytes: u64 = entries
+                .iter()
+                .filter(|e| e.path.ends_with(".safetensors"))
+                .map(|e| e.size)
+                .sum();
+            Some((repo, meta, size_bytes))
+        }
+    }))
+    .buffer_unordered(4)
+    .filter_map(|item| async move { item })
+    .collect::<Vec<_>>()
+    .await;
+
+    if candidates.is_empty() {
+        println!("No vLLM-servable (safetensors) models found for \"{query}\"");
+        return Ok(());
+    }
+
+    println!(
+        "{:<48} | {:<10} | {:<10} | {:<10} | {:<24} | DRAFT MODEL (speculative decoding)",
+        "REPO", "SIZE", "QUANT", "MAX CTX", "ARCHITECTURE"
+    );
+    for (repo, meta, size_bytes) in &candidates {
+        let size = if *size_bytes > 0 {
+            format_bytes(*size_bytes)
+        } else {
+            "-".to_string()
+        };
+        let quant = meta.quantization.as_deref().unwrap_or("none (fp16/bf16)");
+        let ctx = meta
+            .max_position_embeddings
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "-".to_string());
+        let arch = meta.architecture.as_deref().unwrap_or("-");
+        let draft = meta.draft_model.as_deref().unwrap_or("-");
+        println!("{repo:<48} | {size:<10} | {quant:<10} | {ctx:<10} | {arch:<24} | {draft}");
+    }
+    println!(
+        "\nTry: ggs models pull vllm {}   (pulls safetensors + config, writes models.toml with backend = \"vllm\")",
+        candidates[0].0
+    );
 
     Ok(())
 }
@@ -392,7 +504,12 @@ pub async fn cmd_files(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 // ── models pull ──────────────────────────────────────────────────────────────
 
 /// `gguf-switchboard models pull <repo-id> [--quant Q4_K_M] [--dir /path] [--no-bench]`
+/// `gguf-switchboard models pull vllm <repo-id> [--dir /path] [--draft <repo>] ...`
 pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    if args.get(1).is_some_and(|a| a == "vllm") {
+        return cmd_pull_vllm(&args[1..]).await;
+    }
+
     let mut repo: Option<String> = None;
     let mut quant: Option<String> = None;
     let mut dest_override: Option<String> = None;
@@ -722,6 +839,239 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
+/// `gguf-switchboard models pull vllm <repo-id> [--dir /path] [--registry /path]
+///     [--draft <repo>] [--num-speculative-tokens N] [--attention-backend NAME]
+///     [--tensor-parallel-size N] [--gpu-memory-utilization F] [--served-model-name NAME]
+///     [--connections N]`
+///
+/// Downloads a safetensors repo (weights + config/tokenizer files) into a
+/// `vllm-models` directory sibling to the GGUF models dir, detects
+/// quantization/speculative-decoding metadata from `config.json`, and writes
+/// a `models.toml` entry with `backend = "vllm"` and the exact parameters
+/// vLLM needs to serve it.
+async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let mut repo: Option<String> = None;
+    let mut dest_override: Option<String> = None;
+    let mut models_file: Option<String> = None;
+    let mut connections: u16 = 8;
+    let mut draft_repo: Option<String> = None;
+    let mut num_speculative_tokens: Option<u32> = None;
+    let mut attention_backend: Option<String> = None;
+    let mut tensor_parallel_size: Option<u32> = None;
+    let mut gpu_memory_utilization: Option<f32> = None;
+    let mut served_model_name: Option<String> = None;
+
+    let mut i = 1; // args[0] is "vllm"
+    while i < args.len() {
+        match args[i].as_str() {
+            "--dir" => {
+                dest_override = Some(require_val(args, &mut i, "--dir")?);
+            }
+            "--registry" => {
+                models_file = Some(require_val(args, &mut i, "--registry")?);
+            }
+            "--connections" => {
+                connections = parse_connections(&require_val(args, &mut i, "--connections")?)?;
+            }
+            "--draft" => {
+                draft_repo = Some(require_val(args, &mut i, "--draft")?);
+            }
+            "--num-speculative-tokens" => {
+                let val = require_val(args, &mut i, "--num-speculative-tokens")?;
+                num_speculative_tokens = Some(
+                    val.parse()
+                        .map_err(|_| "models pull vllm: invalid value for --num-speculative-tokens")?,
+                );
+            }
+            "--attention-backend" => {
+                attention_backend = Some(require_val(args, &mut i, "--attention-backend")?);
+            }
+            "--tensor-parallel-size" => {
+                let val = require_val(args, &mut i, "--tensor-parallel-size")?;
+                tensor_parallel_size = Some(
+                    val.parse()
+                        .map_err(|_| "models pull vllm: invalid value for --tensor-parallel-size")?,
+                );
+            }
+            "--gpu-memory-utilization" => {
+                let val = require_val(args, &mut i, "--gpu-memory-utilization")?;
+                gpu_memory_utilization = Some(
+                    val.parse()
+                        .map_err(|_| "models pull vllm: invalid value for --gpu-memory-utilization")?,
+                );
+            }
+            "--served-model-name" => {
+                served_model_name = Some(require_val(args, &mut i, "--served-model-name")?);
+            }
+            arg if arg.starts_with('-') => {
+                return Err(format!("models pull vllm: unknown flag '{arg}'").into());
+            }
+            val => {
+                repo = Some(val.to_string());
+                i += 1;
+            }
+        }
+    }
+    let repo = repo.ok_or("models pull vllm: missing repository id (e.g. Qwen/Qwen2.5-7B-Instruct)")?;
+
+    // 1. Deploy check up front — fail before downloading anything multi-GB.
+    let registry_path_hint = models_file.clone().unwrap_or_else(|| "models.toml".to_string());
+    let (vllm_command, vllm_project) = if Path::new(&registry_path_hint).is_file() {
+        let existing = ModelsRegistry::load(&registry_path_hint)?;
+        (
+            existing.defaults.vllm_command.clone(),
+            existing.defaults.vllm_project.clone(),
+        )
+    } else {
+        ("uv".to_string(), None)
+    };
+    if let Err(reason) =
+        super::models_registry::check_vllm_available(&vllm_command, vllm_project.as_deref())
+    {
+        return Err(reason.into());
+    }
+    println!("✓ vLLM environment OK ({vllm_command} run vllm)");
+
+    // 2. Fetch repo tree and validate it's a servable safetensors repo.
+    let client = hf_download::build_hf_client()?;
+    let entries = hf_download::fetch_repo_tree_all(&client, &repo).await?;
+    if !super::vllm_meta::is_safetensors_repo(&entries) {
+        return Err(format!(
+            "{repo} does not look like a vLLM-servable safetensors repo \
+             (no *.safetensors + config.json found). Use `ggs models search vllm <query>` \
+             to find one, or `ggs models pull {repo}` for GGUF/llama.cpp instead."
+        )
+        .into());
+    }
+    let serving_files: Vec<&HfTreeEntry> = entries
+        .iter()
+        .filter(|e| super::vllm_meta::is_vllm_serving_file(&e.path))
+        .collect();
+
+    // 3. Resolve destination: <vllm-models>/<org>__<repo>/.
+    let base_dest = match &dest_override {
+        Some(dir) => PathBuf::from(dir),
+        None => resolve_default_vllm_models_dir()?,
+    };
+    let dest_dir = base_dest.join(sanitize_repo_dirname(&repo));
+    println!("Repository: {repo}");
+    println!(
+        "Files: {} ({} total)",
+        serving_files.len(),
+        format_bytes(serving_files.iter().map(|e| e.size).sum())
+    );
+    println!("Destination: {}", dest_dir.display());
+
+    // 4. Download every serving file.
+    for entry in serving_files.iter().copied() {
+        println!("  {} ({})", entry.path, format_bytes(entry.size));
+        hf_download::download_file_auto(&client, &repo, entry, &dest_dir, connections).await?;
+    }
+    println!("✓ Download complete");
+
+    // 5. Detect quantization / speculative-decoding metadata from config.json.
+    let meta = super::vllm_meta::detect_vllm_metadata(&client, &repo)
+        .await
+        .unwrap_or_default();
+    if let Some(q) = &meta.quantization {
+        println!("Detected quantization: {q}");
+    }
+    if let Some(d) = &meta.draft_model {
+        println!("Detected Speculators draft/target pairing: {d}");
+    }
+
+    // 6. Optionally pull a draft (dspark) model for speculative decoding.
+    let resolved_draft = if let Some(draft_repo) = &draft_repo {
+        let draft_entries = hf_download::fetch_repo_tree_all(&client, draft_repo).await?;
+        let draft_dest = base_dest.join(sanitize_repo_dirname(draft_repo));
+        println!("Draft model: {draft_repo}");
+        for entry in draft_entries
+            .iter()
+            .filter(|e| super::vllm_meta::is_vllm_serving_file(&e.path))
+        {
+            println!("  {} ({})", entry.path, format_bytes(entry.size));
+            hf_download::download_file_auto(&client, draft_repo, entry, &draft_dest, connections)
+                .await?;
+        }
+        Some(draft_dest.to_string_lossy().into_owned())
+    } else {
+        None
+    };
+
+    // 7. Register in models.toml.
+    let alias = alias_from_repo(&repo);
+    let registry_path = models_file
+        .clone()
+        .or_else(|| {
+            let candidate = base_dest.join("models.toml");
+            if candidate.is_file() {
+                Some(candidate.to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "models.toml".to_string());
+
+    let mut registry = if Path::new(&registry_path).is_file() {
+        ModelsRegistry::load(&registry_path)?
+    } else {
+        ModelsRegistry {
+            auto_discover: true,
+            models: Vec::new(),
+            ..Default::default()
+        }
+    };
+
+    let used_aliases: HashSet<String> = registry.models.iter().map(|e| e.alias.clone()).collect();
+    let alias = dedupe_alias(&alias, &used_aliases);
+    let kind = infer_kind_from_filename(&format!(
+        "{repo} {}",
+        meta.architecture.as_deref().unwrap_or("")
+    ));
+
+    let entry = RegistryEntry {
+        alias: alias.clone(),
+        file: dest_dir.to_string_lossy().into_owned(),
+        display_name: Some(display_name_from_alias(&alias)),
+        kind: Some(kind.clone()),
+        enabled: true,
+        backend: Some("vllm".to_string()),
+        hf_repo: Some(repo.clone()),
+        quantization: meta.quantization.clone(),
+        attention_backend,
+        draft_model: resolved_draft.or(meta.draft_model.clone()),
+        num_speculative_tokens: num_speculative_tokens.or(meta.num_speculative_tokens),
+        tensor_parallel_size,
+        gpu_memory_utilization,
+        served_model_name,
+        max_context_length: meta.max_position_embeddings,
+        ..Default::default()
+    };
+    registry.models.push(entry);
+    registry.write(&registry_path)?;
+    println!("✓ Registered as: {alias} (backend = vllm)");
+
+    let refreshed = refresh_after_pull().await;
+    if !refreshed {
+        eprintln!("Start or restart gguf-switchboard to load the updated registry.");
+    }
+
+    Ok(())
+}
+
+/// Shift-and-fetch the value following a flag, advancing `i` by 2. Errors
+/// with a `models pull vllm: missing value for <flag>` message when absent.
+fn require_val(args: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
+    match args.get(*i + 1) {
+        Some(val) => {
+            let val = val.clone();
+            *i += 2;
+            Ok(val)
+        }
+        None => Err(format!("models pull vllm: missing value for {flag}")),
+    }
+}
+
 fn parse_connections(value: &str) -> Result<u16, &'static str> {
     let connections = value
         .parse::<u16>()
@@ -1013,6 +1363,37 @@ fn resolve_default_models_dir() -> Result<PathBuf, RuntimeError> {
     Err(RuntimeError::ConfigError(
         "No models directory found; use --dir or create ~/models".to_string(),
     ))
+}
+
+/// Default destination for vLLM safetensors pulls: a `vllm-models` directory
+/// *sibling* to wherever GGUF models live (not nested inside it), so the two
+/// backends' downloads stay clearly separated on disk.
+fn resolve_default_vllm_models_dir() -> Result<PathBuf, RuntimeError> {
+    let gguf_dir = resolve_default_models_dir()?;
+    let sibling = gguf_dir
+        .parent()
+        .map(|parent| parent.join("vllm-models"))
+        .unwrap_or_else(|| PathBuf::from("vllm-models"));
+    Ok(sibling)
+}
+
+/// Sanitize a HF repo id (`org/name`) into a single path segment.
+fn sanitize_repo_dirname(repo: &str) -> String {
+    repo.replace('/', "__")
+}
+
+/// Derive a short alias from a HF repo id (e.g. `Qwen/Qwen2.5-7B-Instruct` ->
+/// `qwen2.5-7b-instruct`). Unlike `alias_from_filename`, this doesn't treat
+/// `.` as an extension separator — repo names routinely contain literal dots
+/// (version numbers) that `Path::file_stem()` would otherwise mis-split on.
+fn alias_from_repo(repo: &str) -> String {
+    let name = repo.rsplit('/').next().unwrap_or(repo);
+    let lower = name.to_ascii_lowercase().replace('_', "-");
+    let alias: String = lower
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' { c } else { '-' })
+        .collect();
+    alias.trim_matches('-').to_string()
 }
 
 /// Return true if the filename looks like a main model GGUF (not mmproj/lora/projector).

@@ -118,6 +118,52 @@ pub async fn fetch_repo_tree(
         .collect())
 }
 
+/// Fetch the full file tree for a repo (no extension filter) — used for
+/// safetensors/vLLM repos, which ship many files (shards, `config.json`,
+/// tokenizer files) rather than a single `.gguf`.
+pub async fn fetch_repo_tree_all(
+    client: &reqwest::Client,
+    repo: &str,
+) -> Result<Vec<HfTreeEntry>, RuntimeError> {
+    let url = format!("{HF_MODELS_API}/{repo}/tree/main");
+    let resp = client.get(&url).send().await.map_err(RuntimeError::from)?;
+
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Err(RuntimeError::ConfigError(format!(
+            "Repository not found: {repo}"
+        )));
+    }
+    if !resp.status().is_success() {
+        return Err(RuntimeError::ProxyError(format!(
+            "HF tree API failed for {repo}: HTTP {}",
+            resp.status()
+        )));
+    }
+
+    let entries: Vec<HfTreeEntry> = resp.json().await.map_err(RuntimeError::from)?;
+    Ok(entries.into_iter().filter(|e| e.r#type == "file").collect())
+}
+
+/// Fetch a single file's raw text content from a repo (e.g. `config.json`).
+/// Returns `Ok(None)` when the file doesn't exist rather than erroring, since
+/// callers use this for best-effort metadata detection.
+pub async fn fetch_repo_file_text(
+    client: &reqwest::Client,
+    repo: &str,
+    filename: &str,
+) -> Result<Option<String>, RuntimeError> {
+    let url = download_url(repo, filename);
+    let resp = client.get(&url).send().await.map_err(RuntimeError::from)?;
+    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !resp.status().is_success() {
+        return Ok(None);
+    }
+    let text = resp.text().await.map_err(RuntimeError::from)?;
+    Ok(Some(text))
+}
+
 /// Stream-download a file from HF into `dest_dir`, printing progress to stdout.
 ///
 /// Returns the path to the downloaded file.
