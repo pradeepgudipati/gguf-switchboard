@@ -414,6 +414,261 @@ fn with_flag(args: &[String], flag: &str, value: &str) -> Vec<String> {
     updated
 }
 
+/// Read the value following `flag` in an args list, if present.
+fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .map(String::as_str)
+}
+
+// ── vLLM fit planning ───────────────────────────────────────────────────────
+//
+// vLLM has a different set of serving knobs than llama.cpp — no `-ngl`/KV
+// quant type, instead `--max-model-len` (context), `--gpu-memory-utilization`
+// (fraction of VRAM vLLM is allowed to claim), and `--tensor-parallel-size`
+// (GPU sharding). The fallback ladder here only varies context on OOM, since
+// that is the one knob analogous to llama.cpp's context-halving that's safe
+// to change after a failed load without re-deriving GPU topology.
+
+/// Read `--max-model-len` from a vLLM args list.
+pub fn vllm_max_model_len_from_args(args: &[String]) -> Option<u32> {
+    flag_value(args, "--max-model-len").and_then(|v| v.parse().ok())
+}
+
+/// Read `--gpu-memory-utilization` from a vLLM args list.
+pub fn vllm_gpu_memory_utilization_from_args(args: &[String]) -> Option<f32> {
+    flag_value(args, "--gpu-memory-utilization").and_then(|v| v.parse().ok())
+}
+
+/// Read `--tensor-parallel-size` from a vLLM args list.
+pub fn vllm_tensor_parallel_size_from_args(args: &[String]) -> Option<u32> {
+    flag_value(args, "--tensor-parallel-size").and_then(|v| v.parse().ok())
+}
+
+/// Estimate a vLLM model's on-disk weight size in MB: sums `*.safetensors`
+/// file sizes in the model's local directory (the positional arg right after
+/// `serve`). Returns 0 (treated as "unknown, assume it fits") when the model
+/// is served straight from an HF repo id with no local directory.
+pub fn vllm_model_size_mb_from_args(args: &[String]) -> u64 {
+    let Some(model_ref) = args
+        .iter()
+        .position(|a| a == "serve")
+        .and_then(|i| args.get(i + 1))
+    else {
+        return 0;
+    };
+    let path = std::path::Path::new(model_ref);
+    if !path.is_dir() {
+        return 0;
+    }
+    let Ok(read_dir) = std::fs::read_dir(path) else {
+        return 0;
+    };
+    let total_bytes: u64 = read_dir
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.path()
+                .extension()
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("safetensors"))
+        })
+        .filter_map(|e| e.metadata().ok())
+        .map(|m| m.len())
+        .sum();
+    total_bytes / (1024 * 1024)
+}
+
+/// A single vLLM load profile to attempt.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct VllmFitPlan {
+    pub max_model_len: u32,
+    pub gpu_memory_utilization: f32,
+    pub tensor_parallel_size: u32,
+    pub reason: String,
+    pub attempt: u32,
+}
+
+impl fmt::Display for VllmFitPlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "max_model_len={} gpu_memory_utilization={:.2} tensor_parallel_size={} [attempt {} — {}]",
+            self.max_model_len,
+            self.gpu_memory_utilization,
+            self.tensor_parallel_size,
+            self.attempt,
+            self.reason,
+        )
+    }
+}
+
+/// State machine producing a bounded, increasingly conservative sequence of
+/// [`VllmFitPlan`]s — the vLLM analog of [`FitPlanner`].
+pub struct VllmFitPlanner {
+    plans: Vec<VllmFitPlan>,
+    current: usize,
+}
+
+impl VllmFitPlanner {
+    /// Compute an initial plan (and context-reduction fallback ladder) from
+    /// hardware and model size. `pinned_tp`/`pinned_gmu` come from an explicit
+    /// `--tensor-parallel-size`/`--gpu-memory-utilization` already present in
+    /// the model's args (registry override) and are never auto-adjusted.
+    pub fn new(
+        hardware: &HardwareSummary,
+        model_size_mb: u64,
+        requested_context: u32,
+        pinned_tensor_parallel_size: Option<u32>,
+        pinned_gpu_memory_utilization: Option<f32>,
+        config: &FitConfig,
+    ) -> Self {
+        let plans = build_vllm_fallback_ladder(
+            hardware,
+            model_size_mb,
+            requested_context,
+            pinned_tensor_parallel_size,
+            pinned_gpu_memory_utilization,
+            config,
+        );
+        info!(
+            attempts = plans.len(),
+            hardware = %hardware.hardware_fingerprint,
+            "VllmFitPlanner: built fallback ladder"
+        );
+        Self { plans, current: 0 }
+    }
+
+    pub fn current_plan(&self) -> &VllmFitPlan {
+        &self.plans[self.current.min(self.plans.len() - 1)]
+    }
+
+    pub fn advance(&mut self, failure_reason: &str) -> Option<&VllmFitPlan> {
+        debug!(
+            attempt = self.current + 1,
+            reason = failure_reason,
+            "VllmFitPlanner: advancing to next fallback"
+        );
+        self.current += 1;
+        if self.current >= self.plans.len() {
+            return None;
+        }
+        Some(self.current_plan())
+    }
+
+    pub fn is_exhausted(&self) -> bool {
+        self.current >= self.plans.len()
+    }
+
+    pub fn total_plans(&self) -> usize {
+        self.plans.len()
+    }
+
+    pub fn all_plans(&self) -> &[VllmFitPlan] {
+        &self.plans
+    }
+
+    /// Apply a plan to a base vLLM args list, rewriting `--max-model-len`,
+    /// `--gpu-memory-utilization`, and `--tensor-parallel-size`.
+    pub fn apply_plan_to_args(base_args: &[String], plan: &VllmFitPlan) -> Vec<String> {
+        let mut args = with_flag(base_args, "--max-model-len", &plan.max_model_len.to_string());
+        args = with_flag(
+            &args,
+            "--gpu-memory-utilization",
+            &format!("{:.2}", plan.gpu_memory_utilization),
+        );
+        args = with_flag(
+            &args,
+            "--tensor-parallel-size",
+            &plan.tensor_parallel_size.to_string(),
+        );
+        args
+    }
+}
+
+fn build_vllm_fallback_ladder(
+    hardware: &HardwareSummary,
+    model_size_mb: u64,
+    requested_context: u32,
+    pinned_tensor_parallel_size: Option<u32>,
+    pinned_gpu_memory_utilization: Option<f32>,
+    config: &FitConfig,
+) -> Vec<VllmFitPlan> {
+    let max_attempts = config.max_attempts.max(1) as usize;
+    let usable = hardware.usable_vram_mb(config.vram_reserve_mb);
+
+    // Tensor parallel size: shard across all GPUs when the model doesn't fit
+    // on a single one; otherwise 1. Left as a heuristic — vLLM additionally
+    // requires attention-head counts to divide evenly by this, which we
+    // can't verify without the model's config.json at plan time.
+    let tensor_parallel_size = pinned_tensor_parallel_size.unwrap_or_else(|| {
+        if hardware.gpus.len() <= 1 || model_size_mb == 0 {
+            1
+        } else {
+            let per_gpu_usable = usable / hardware.gpus.len().max(1) as u64;
+            if model_size_mb <= per_gpu_usable.max(1) {
+                1
+            } else {
+                hardware.gpus.len() as u32
+            }
+        }
+    });
+
+    // Initial GPU memory utilization: the fraction of *total* VRAM vLLM may
+    // claim. Derived from how much is actually free right now, minus the
+    // configured reserve, expressed as a fraction of total — capped to a
+    // sane [0.5, 0.95] band so we neither starve vLLM nor overcommit.
+    let gpu_memory_utilization = pinned_gpu_memory_utilization.unwrap_or_else(|| {
+        if hardware.total_vram_mb == 0 {
+            0.9
+        } else {
+            (usable as f32 / hardware.total_vram_mb as f32).clamp(0.5, 0.95)
+        }
+    });
+
+    let min_ctx = config.context_minimum().max(512);
+    let mut ctx_steps: Vec<u32> = config
+        .context_steps()
+        .iter()
+        .map(|&ratio| ((requested_context as f64 * ratio).floor() as u32).max(min_ctx))
+        .collect();
+    ctx_steps.sort_unstable();
+    ctx_steps.dedup();
+    ctx_steps.reverse();
+    ctx_steps.truncate(max_attempts.max(1));
+
+    let mut plans = Vec::new();
+    for &ctx in &ctx_steps {
+        let attempt = plans.len() as u32 + 1;
+        let reason = if ctx < requested_context {
+            format!(
+                "attempt {attempt}: max_model_len {requested_context}→{ctx} ({:.0}%)",
+                (ctx as f64 / requested_context as f64) * 100.0
+            )
+        } else {
+            format!("attempt {attempt}: requested parameters")
+        };
+        plans.push(VllmFitPlan {
+            max_model_len: ctx,
+            gpu_memory_utilization,
+            tensor_parallel_size,
+            reason,
+            attempt,
+        });
+    }
+
+    if plans.is_empty() {
+        plans.push(VllmFitPlan {
+            max_model_len: requested_context.max(min_ctx),
+            gpu_memory_utilization,
+            tensor_parallel_size,
+            reason: "default (no fallbacks configured)".to_string(),
+            attempt: 1,
+        });
+    }
+
+    plans
+}
+
 // ── Fallback ladder construction ─────────────────────────────────────────────
 
 fn build_fallback_ladder(

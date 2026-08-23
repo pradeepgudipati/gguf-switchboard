@@ -969,6 +969,57 @@ async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     }
     println!("✓ Download complete");
 
+    // 4b. Hardware fit preview — same planner the scheduler runs at load time,
+    // so what's printed here is what will actually be requested of vLLM.
+    {
+        use crate::fit::{HardwareSummary, VllmFitPlanner};
+        let weights_mb: u64 = serving_files
+            .iter()
+            .filter(|e| e.path.ends_with(".safetensors"))
+            .map(|e| e.size)
+            .sum::<u64>()
+            / (1024 * 1024);
+        let hardware = HardwareSummary::probe(12);
+        println!("── Hardware Fit ──");
+        if hardware.gpus.is_empty() {
+            println!(
+                "RAM: {:.1} GiB | GPU: not detected (CPU-only)",
+                hardware.system_ram_mb as f64 / 1024.0
+            );
+        } else {
+            for g in &hardware.gpus {
+                println!(
+                    "GPU{}: {} — {:.1}/{:.1} GiB free",
+                    g.index,
+                    g.name,
+                    g.free_mb as f64 / 1024.0,
+                    g.total_mb as f64 / 1024.0,
+                );
+            }
+        }
+        println!("Model weights: {:.1} GiB", weights_mb as f64 / 1024.0);
+        let default_context = 16384u32;
+        let planner = VllmFitPlanner::new(
+            &hardware,
+            weights_mb,
+            default_context,
+            tensor_parallel_size,
+            gpu_memory_utilization,
+            &crate::fit::FitConfig::default(),
+        );
+        let plan = planner.current_plan();
+        println!(
+            "Estimated profile: max_model_len={} gpu_memory_utilization={:.2} tensor_parallel_size={}",
+            plan.max_model_len, plan.gpu_memory_utilization, plan.tensor_parallel_size
+        );
+        println!(
+            "(The scheduler re-runs this at load time against live free VRAM and retries \
+             with a reduced max_model_len on OOM — these are the settings the running \
+             server actually starts with.)"
+        );
+    }
+    println!();
+
     // 5. Detect quantization / speculative-decoding metadata from config.json.
     let meta = super::vllm_meta::detect_vllm_metadata(&client, &repo)
         .await
