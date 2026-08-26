@@ -277,6 +277,16 @@ gguf-switchboard integrates Mem0 (via Context Harbor's Mem0 MCP integration) as 
 
 Memory is separate from document RAG (Context Harbor MCP docs) and from source code (jbcontext).
 
+### MCP — Explicit Tools Only
+
+Use **only** Context Harbor's memory MCP tools:
+
+- `search_memory(project_name="GGUF-Switchboard", query="...")`
+- `add_memory(project_name="GGUF-Switchboard", messages=[...])`
+- `forget_memory(project_name="GGUF-Switchboard", memory_id="...")`
+
+**Never** use another memory MCP or plugin (e.g. `plugin-mem0-mem0`, `mem0.ai`) for GGUF-Switchboard knowledge.
+
 ### Responsibilities
 
 - **jbcontext** → current source-code understanding
@@ -316,11 +326,22 @@ For implementation tasks, prefer this order:
 3. Context Harbor document RAG for other requirements/source material
 4. Mem0 when historical decisions or durable knowledge are relevant
 
-### Memory Writes
+### Memory Writes — Mandatory
 
-Write to Mem0 only when information is durable and likely to matter in future sessions.
+Memory capture is **mandatory**. A task is NOT complete until Mem0 has been reviewed for durable knowledge.
 
-Good candidates:
+**Fixed end-of-task sequence:**
+
+1. `search_memory(project_name="GGUF-Switchboard", query="<related decision>")` — check for existing memory.
+2. If nothing durable already covers it: `add_memory(project_name="GGUF-Switchboard", messages=[...])` — record the decision. On 429 (rate limit), retry once after a brief pause.
+3. If durable memory is explicitly not required: state `Durable memory: NOT REQUIRED`.
+4. Always report durable memory status in the completion report.
+
+### Parent Only — Subagent Restriction
+
+Only the top-level/parent session writes memory. A delegated subagent must **not** call `add_memory` or `forget_memory`. If a subagent surfaces a durable decision, the parent must handle the memory write.
+
+### Good Candidates for Memory
 
 - accepted architecture decisions (e.g. positioning vs llama-swap, single-slot vs multi-slot)
 - confirmed product requirements
@@ -375,3 +396,5 @@ When completing implementation work, report:
 - Remaining issues: none or list them
 
 Never claim completion when an implementation-caused mandatory verification step is failing.
+
+**Durable memory lines are mandatory** — cannot be omitted after meaningful work. Always state whether durable memory was reviewed and what was stored (or that it wasn't required).
