@@ -618,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "gguf-switchboard"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
