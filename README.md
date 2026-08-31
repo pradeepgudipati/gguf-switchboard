@@ -2,30 +2,91 @@
 
 ![GGUF Switchboard](banner.png)
 
-**One API. Any GGUF Model. Seamless local LLM switching.**
+**Run and switch between local GGUF and Safetensors models through one OpenAI-compatible API.**
 
-A lightweight OpenAI and Anthropic-compatible API server that loads, manages, and switches between GGUF models on a single GPU. Point any OpenAI or Anthropic SDK or tool at it (Python, Node, Cursor, Cline, Continue) — no manual process or port juggling.
+GGUF Switchboard uses [llama.cpp](https://github.com/ggml-org/llama.cpp) for GGUF models and [vLLM](https://github.com/vllm-project/vllm) for Safetensors models. It downloads models from Hugging Face, evaluates what fits the available hardware, and safely swaps one model at a time without manual process, port, or VRAM management.
 
-A **[llama-swap](https://github.com/mostlygeek/llama-swap) alternative in Rust** with system memory-pressure eviction, OOM-only context fallback, Swagger UI, Hugging Face metadata enrichment, and built-in usage tracking.
-
-**Requires** [llama.cpp](https://github.com/ggerganov/llama.cpp) `llama-server` and GGUF model files — on Linux NVIDIA hosts install with `./scripts/update-llama-cpp.sh` (see [Quick Start](#quick-start)).
-
-> **Status:** Experimental — single-GPU home labs and development machines on a **trusted LAN**. One model loaded at a time. System RAM is monitored for pressure eviction; `vram_gb` sizes context heuristically. Opt-in `auto_ngl` can pick GPU layers from free VRAM (nvidia-smi or `vram_gb` fallback) — still a heuristic, not live layer telemetry. Opt-in `[fit]` section enables a hardware-aware fit planner with bounded fallback ladder and profile caching. Tool-call capability is probed at load time for `tools`-tagged models. See [docs/COMPATIBILITY.md](docs/COMPATIBILITY.md).
+> **The local model router for llama.cpp and vLLM.**
 
 ![gguf-switchboard demo](gguf-switchboard-demo.gif)
 
 <sub>[▶ Watch with audio](demo.mp4)</sub>
 
+## Start here
+
+Linux with NVIDIA/CUDA is the primary deployment target. Install a CUDA-enabled `llama-server`, then build and start GGUF Switchboard as a systemd service:
+
+```bash
+git clone --branch main https://github.com/pradeepgudipati/gguf-switchboard.git
+cd gguf-switchboard
+./scripts/update-llama-cpp.sh
+./deploy.sh
+```
+
+Download and register either model format from Hugging Face:
+
+```bash
+# GGUF served by llama.cpp
+gguf-switchboard models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M
+
+# Safetensors served by vLLM (after `uv run vllm --version` succeeds)
+gguf-switchboard models pull vllm Qwen/Qwen2.5-7B-Instruct
+```
+
+List the registered model IDs, then send a request through the same endpoint regardless of backend:
+
+```bash
+curl -s http://localhost:9090/v1/models | jq -r '.data[].id'
+
+MODEL_ID="$(curl -s http://localhost:9090/v1/models | jq -r '.data[0].id')"
+curl http://localhost:9090/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d "$(jq -n --arg model "$MODEL_ID" '{
+    model: $model,
+    messages: [{role: "user", content: "Hello"}]
+  }')"
+```
+
+Name the model you want. GGUF Switchboard selects its registered backend, unloads the resident model when necessary, starts the requested model, and forwards the request through the same API.
+
+## Where it fits
+
+| Tool | Best fit | Model lifecycle | Formats and backends |
+|------|----------|-----------------|----------------------|
+| **GGUF Switchboard** | Development machines and trusted home labs with more models than available GPU memory | Single-slot, request-driven switching with drain and rollback | GGUF via llama.cpp; Safetensors via vLLM |
+| **Ollama** | Simple local model use with its own model library and CLI | Loads and unloads models with `keep_alive` | Ollama-managed models, including converted GGUF |
+| **llama.cpp** | Direct, low-level GGUF inference | You manage each `llama-server` process and port | GGUF |
+| **vLLM** | High-throughput serving of models that fit the available GPU resources | Serves configured models; no Switchboard lifecycle | Primarily Safetensors; [upstream GGUF support is experimental](https://docs.vllm.ai/en/latest/features/quantization/gguf/) |
+
+See [the detailed comparison](docs/COMPARISON.md) for llama-swap, LocalAI, LiteLLM, and feature-level trade-offs.
+
+## Supported scope
+
+- **Primary target:** Linux, NVIDIA GPUs, and CUDA. macOS can build from source and use llama.cpp with Metal; the systemd deployment script does not support macOS.
+- **One resident model:** the scheduler runs one model at a time across llama.cpp and vLLM. This is model switching, not concurrent multi-model serving.
+- **Two explicit paths:** GGUF runs through llama.cpp; Safetensors runs through vLLM. GGUF Switchboard does not currently route GGUF through vLLM.
+- **Trusted networks:** there is no built-in authentication. Do not expose the service directly to the public internet.
+- **Hardware fit is estimated:** model size, context, KV cache, quantization, and runtime allocations can still cause a load to fail. Failed switches roll back to the previous model when possible.
+
+## Why this exists
+
+Local model experimentation usually means managing backend processes, ports, downloads, model formats, and limited GPU memory by hand. GGUF Switchboard turns model loading into one controlled lifecycle behind a stable API:
+
+- searches Hugging Face and downloads either GGUF or Safetensors models;
+- scores GGUF quantizations against detected hardware and plans backend memory use;
+- drains in-flight requests before swaps and rolls back failed switches;
+- exposes OpenAI-compatible APIs, Anthropic Messages, Swagger UI, Prometheus metrics, and persistent usage history.
+
 ## Features
 
 - **Fast & Lightweight** — Minimal overhead, maximum performance
-- **Hot-Swap Models** — Switch between GGUF models on the fly
+- **Hot-Swap Models** — Switch between GGUF and Safetensors models on demand
 - **Open & Extensible** — Modular, easy to extend, community-driven
 - **100% Local** — Your models. Your data. Your machine.
 
 Also included:
 
-- **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/responses`, `/v1/models`, `/v1/models/registry.json`, `/v1/audio/*`
+- **OpenAI-compatible API** — `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/responses`, `/v1/rerank`, `/v1/models`, `/v1/models/registry.json`, `/v1/audio/*`
 - **Anthropic Messages API** — `POST /v1/messages` (stream + non-stream); translated onto the loaded `llama-server` OpenAI backend; tool calling and content blocks supported
 - **Tool calling** — Chat Completions forwards `tools` / `tool_choice` / `tool_calls`; the Responses API translates function tools, function calls, and strict streaming events to/from `llama-server`; Anthropic Messages translates tool definitions and calls bidirectionally. Actual model behavior depends on the model and llama.cpp build (see [COMPATIBILITY](docs/COMPATIBILITY.md))
 - **Tool-call capability probe** — `tools`-tagged models are probed with a real tool call at load time; verdict exposed as `tools_verified` on `/v1/models`
@@ -33,7 +94,7 @@ Also included:
 - **Auto-discovery** — Scans GGUF dirs with a cheap validation ladder (filename → header → metadata); sidecars skipped
 - **Live model rescan** — `POST /v1/models/refresh` plus a configurable daily watcher (`models_rescan_interval_secs`); merges new GGUFs without a full redeploy
 - **HF metadata enrichment** — fills empty `description` / context / VRAM / `capabilities` / `hf_repo` from Hugging Face on launch and rescan (`sync-hf-metadata` CLI also available)
-- **Model management** — `models search`, `models files`, and `models pull` for one-command GGUF discovery, download, validation, and registry from Hugging Face
+- **Model management** — `models search`, `models files`, and `models pull` for GGUF/llama.cpp; `models search vllm` and `models pull vllm` for Safetensors/vLLM
 - **Quant scoring** — `models search`/`models files` score every discovered quant against your detected hardware: a 0–100 FIT score, an estimated tok/s from a memory-bandwidth model, and a precision-retention % from published per-quant perplexity data, then recommend the fastest, most balanced, and least-lossy quant separately with `Try:` pull commands (see [docs/QUANT_SCORING.md](docs/QUANT_SCORING.md))
 - **Kind-aware routing** — chat / completions / messages / responses require chat-like kinds; embeddings require `embedding` (and pass `--embeddings` to `llama-server`)
 - **Single-slot hot-swap** — One resident model; switches drain in-flight requests; failed switches roll back
@@ -41,25 +102,25 @@ Also included:
 - **Auto GPU layers (`auto_ngl`)** — Opt-in: at load, pick `-ngl` from free VRAM + GGUF size (manual `ngl` / `extra_args` still win)
 - **ModelFitPlanner** — Opt-in `[fit]` section: inspects GPU topology and free VRAM before every load to produce a safe launch profile; bounded fallback ladder on OOM; caches known-good profiles to skip the ladder on subsequent loads
 - **Idle priority model** — Preferred model auto-loads after a configurable idle timeout
-- **llama.cpp backend** — Spawns and manages `llama-server` child processes
+- **llama.cpp and vLLM backends** — Spawns the registered engine while preserving one public API and one scheduler slot
 - **SSE streaming**, **Prometheus** (`/metrics`), **usage history** (`/v1/usage`), **portable `models.json`**
 
 ### How it works
 
 ```
-Models (GGUF)                    API endpoints
- Mistral / Llama / Phi / …   →   /v1/chat/completions
-         ↓                       /v1/completions
-   gguf-switchboard  ─────────▶  /v1/embeddings
-   (single-slot swap)            /v1/responses, /v1/audio/*
-                                 /v1/messages (Anthropic)
+Models                              API endpoints
+ GGUF → llama.cpp               →   /v1/chat/completions
+ Safetensors → vLLM             →   /v1/completions
+          ↓                         /v1/embeddings, /v1/rerank
+    gguf-switchboard  ──────────▶   /v1/responses, /v1/audio/*
+    (single-slot swap)               /v1/messages (Anthropic)
 ```
 
 Request for model `B` while `A` is loaded → drain → unload `A` → load `B` → forward. After `idle_timeout`, the priority model warms back up. With `[fit]` enabled, each load is preceded by a hardware-aware planning step that picks safe context/nGL/KV parameters. Details in [Architecture](docs/ARCHITECTURE.md).
 
 ## Why gguf-switchboard
 
-When running local LLMs you usually juggle `llama-server` processes, ports, and GPU memory by hand. gguf-switchboard is a **llama-swap-style swap proxy in Rust** for constrained GPUs: memory-pressure eviction, OOM context fallback, hardware-aware fit planner, idle priority model, HF-enriched registry metadata, and usage tracking — one OpenAI/Anthropic endpoint, llama.cpp only.
+When running local models you usually juggle backend processes, ports, formats, and GPU memory by hand. GGUF Switchboard is a **single-slot model router in Rust** for constrained GPUs: GGUF through llama.cpp, Safetensors through vLLM, memory-pressure eviction, backend-specific fit planning, rollback, Hugging Face model management, and usage tracking behind one OpenAI/Anthropic endpoint.
 
 Full landscape table and vs llama-swap feature matrix: **[docs/COMPARISON.md](docs/COMPARISON.md)**.
 
@@ -67,12 +128,13 @@ Full landscape table and vs llama-swap feature matrix: **[docs/COMPARISON.md](do
 
 ### Prerequisites
 
-gguf-switchboard is a **swap proxy** — it does not run inference itself. You need a working **[llama.cpp](https://github.com/ggerganov/llama.cpp)** `llama-server` and GGUF models on disk before the systemd service will stay enabled.
+gguf-switchboard is a **model router** — it does not run inference itself. It launches llama.cpp for GGUF models and vLLM for registered Safetensors models. The current systemd installer requires a working `llama-server` and at least one GGUF registration before it enables the service; vLLM support is optional and can be added to the same registry.
 
 | Requirement | Notes |
 |-------------|--------|
 | **`llama-server` (required)** | From [llama.cpp](https://github.com/ggerganov/llama.cpp). On Linux NVIDIA hosts prefer `./scripts/update-llama-cpp.sh` → `/usr/local/bin/llama-server`. Otherwise put it on `PATH` or set `defaults.llama_server` in `models.toml`. |
 | **GGUF model files** | Directory of `.gguf` weights (system default: `/var/lib/gguf-switchboard/models`). |
+| **vLLM (optional)** | Required for Safetensors models. Install vLLM in a uv environment and confirm `uv run vllm --version`; set `defaults.vllm_project` in `models.toml` when using a dedicated uv project. |
 | **Linux** (recommended) | Ubuntu/Debian for `deploy.sh` (`apt`). Other distros: install build deps yourself. |
 | **macOS** | Build from source only — no systemd. See [macOS](#macos). |
 | **Rust** | Installed automatically by `deploy.sh` if missing; otherwise [rustup](https://rustup.rs/). |
