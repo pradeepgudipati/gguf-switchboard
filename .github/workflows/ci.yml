@@ -4,8 +4,8 @@
 #   - Linux release legs:  .woodpecker/release-linux.yml
 #   - macOS release legs:  .woodpecker/release-macos.yml (pending Mac agent)
 # Both jobs are kept here as a workflow_dispatch fallback (pick the tag as
-# the ref when running manually). The "ci" checks job is unchanged — it's
-# ubuntu-only, cheap, and still runs automatically on every push/PR.
+# the ref when running manually). Hosted CI runs on pull requests only so a
+# merge to main does not repeat the checks that already passed on the PR.
 name: CI
 
 concurrency:
@@ -13,10 +13,11 @@ concurrency:
   cancel-in-progress: true
 
 on:
-  push:
-    branches: [main, Dev]
   pull_request:
     branches: [main, Dev]
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
   workflow_dispatch: {}
 
 permissions:
@@ -51,7 +52,7 @@ jobs:
           cache-all-crates: true
 
       - name: Run checks
-        run: ./precommit.sh
+        run: ./ci.sh
 
   build-release:
     name: Build release (${{ matrix.target }})
@@ -134,8 +135,8 @@ jobs:
 
       - name: Generate checksums
         run: |
-          for dir in gguf-switchboard-*/; do
-            (cd "$dir" && sha256sum * >> ../checksums.txt)
+          for dir in ./gguf-switchboard-*/; do
+            (cd "$dir" && sha256sum ./* >> ../checksums.txt)
           done
 
       - name: Create GitHub release
