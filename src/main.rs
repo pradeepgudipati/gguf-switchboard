@@ -14,6 +14,56 @@ use gguf_switchboard::metrics;
 use gguf_switchboard::scheduler::Scheduler;
 use gguf_switchboard::state::AppState;
 
+const CLI_HELP: &str = r#"GGUF Switchboard
+
+Usage:
+  ggs [<config.toml>]
+  ggs <command> [arguments]
+
+Commands and examples:
+  ggs models search <query>                 Search GGUF/llama.cpp models
+  ggs models search vllm <query>            Search safetensors/vLLM models
+  ggs models files <repo-id>                List files in a Hugging Face repository
+  ggs models pull <repo-id> --quant Q4_K_M  Download and register a GGUF model
+  ggs models pull vllm <repo-id>             Download and register a vLLM model
+  ggs discover-models <models-dir>           Discover local GGUF models
+  ggs sync-hf-metadata                       Refresh Hugging Face metadata
+  ggs export-registry <models.toml>          Export a registry as JSON
+  ggs stop                                   Stop the system service
+  ggs restart                                Restart the system service
+  ggs <config.toml>                          Start the server with a config file
+  ggs help                                   Show this help
+
+Detailed examples:
+  ggs models search "Qwen 7B"
+  ggs models search vllm "Muse"
+  ggs models files bartowski/Qwen2.5-7B-Instruct-GGUF
+  ggs models pull bartowski/Qwen2.5-7B-Instruct-GGUF --quant Q4_K_M
+  ggs models pull vllm Qwen/Qwen2.5-7B-Instruct
+  ggs discover-models ~/models -o models.toml
+  ggs sync-hf-metadata models.toml
+  ggs export-registry models.toml -o models.json
+  ggs stop
+  ggs restart
+  ggs config.toml
+"#;
+
+struct CliUsageError(String);
+
+impl std::fmt::Display for CliUsageError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::fmt::Debug for CliUsageError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(self, formatter)
+    }
+}
+
+impl std::error::Error for CliUsageError {}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -30,20 +80,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let args: Vec<String> = std::env::args().collect();
 
+    if args
+        .get(1)
+        .is_some_and(|arg| matches!(arg.as_str(), "help" | "--help" | "-h"))
+    {
+        print!("{CLI_HELP}");
+        return Ok(());
+    }
+
+    if args.get(1).is_some_and(|arg| arg == "model") {
+        let corrected = corrected_models_command(&args);
+        return Err(cli_error(format!(
+            "Unknown command 'model'. Did you mean 'models'?\n\nTry:\n  {corrected}"
+        )));
+    }
+
     if args.len() >= 2 && args[1] == "discover-models" {
-        return run_discover_models(&args);
+        return run_discover_models(&args).map_err(add_help_to_cli_usage_error);
     }
 
     if args.len() >= 2 && args[1] == "sync-hf-metadata" {
-        return run_sync_hf_metadata(&args).await;
+        return run_sync_hf_metadata(&args)
+            .await
+            .map_err(add_help_to_cli_usage_error);
     }
 
-    if args.len() >= 3 && args[1] == "export-registry" {
-        return run_export_registry(&args);
+    if args.len() >= 2 && args[1] == "export-registry" {
+        return run_export_registry(&args).map_err(add_help_to_cli_usage_error);
     }
 
     if args.len() >= 2 && args[1] == "models" {
-        return run_models_cmd(&args).await;
+        return run_models_cmd(&args)
+            .await
+            .map_err(add_help_to_cli_usage_error);
     }
 
     if args.len() >= 2 && args[1] == "stop" {
@@ -52,6 +121,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.len() >= 2 && args[1] == "restart" {
         return run_service_ctl("restart");
+    }
+
+    if let Some(command) = args.get(1)
+        && !looks_like_config_path(command)
+    {
+        return Err(cli_error(format!("unknown command '{command}'")));
     }
 
     let config_path = args
@@ -378,6 +453,10 @@ async fn run_models_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     let sub_args: Vec<String> = args[2..].to_vec();
     match sub.as_str() {
+        "help" | "--help" | "-h" => {
+            print!("{CLI_HELP}");
+            Ok(())
+        }
         "search" => cmd_search(&sub_args).await,
         "files" => cmd_files(&sub_args).await,
         "pull" => cmd_pull(&sub_args).await,
@@ -393,4 +472,63 @@ fn json_sibling_path_for_output(toml_path: &str) -> String {
     } else {
         format!("{toml_path}.json")
     }
+}
+
+fn cli_error(message: impl std::fmt::Display) -> Box<dyn std::error::Error> {
+    Box::new(CliUsageError(format!("{message}\n\n{CLI_HELP}")))
+}
+
+fn looks_like_config_path(arg: &str) -> bool {
+    arg.ends_with(".toml")
+        || arg.contains(std::path::MAIN_SEPARATOR)
+        || std::path::Path::new(arg).is_file()
+}
+
+fn corrected_models_command(args: &[String]) -> String {
+    std::iter::once("ggs".to_string())
+        .chain(std::iter::once("models".to_string()))
+        .chain(args.iter().skip(2).map(|arg| shell_display_arg(arg)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn shell_display_arg(arg: &str) -> String {
+    if arg
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || "-._/:".contains(ch))
+    {
+        arg.to_string()
+    } else {
+        format!("\"{}\"", arg.replace('"', "\\\""))
+    }
+}
+
+fn add_help_to_cli_usage_error(error: Box<dyn std::error::Error>) -> Box<dyn std::error::Error> {
+    let message = error.to_string();
+    if is_cli_usage_error(&message) {
+        cli_error(message)
+    } else {
+        error
+    }
+}
+
+fn is_cli_usage_error(message: &str) -> bool {
+    message.starts_with("discover-models: unknown flag")
+        || message.starts_with("discover-models: missing value")
+        || message.starts_with("sync-hf-metadata: unknown flag")
+        || message.starts_with("sync-hf-metadata: missing value")
+        || message.starts_with("export-registry: unknown argument")
+        || message.starts_with("export-registry: missing input path")
+        || message.starts_with("export-registry: missing value")
+        || message.starts_with("models: ")
+        || (message.starts_with("models search")
+            && (message.contains("missing")
+                || message.contains("invalid value")
+                || message.contains("unknown flag")))
+        || (message.starts_with("models files") && message.contains("missing"))
+        || (message.starts_with("models pull")
+            && (message.contains("missing")
+                || message.contains("unknown flag")
+                || message.contains("must be")
+                || message.contains("is required")))
 }
