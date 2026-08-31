@@ -10,18 +10,18 @@ When running local LLMs you usually manage models by hand: start `llama-server` 
 
 ### Landscape comparison
 
-**[llama-swap](https://github.com/mostlygeek/llama-swap)** is the closest mature alternative for on-demand model swapping. gguf-switchboard targets the same problem — single endpoint, swap on request — and adds memory-pressure eviction, context reduction on OOM, and usage history. Trade-off: llama.cpp only (no multi-backend swap matrix or web dashboard). See [vs llama-swap](#vs-llama-swap) below for a feature-by-feature table.
+**[llama-swap](https://github.com/mostlygeek/llama-swap)** is the closest mature alternative for on-demand model swapping. gguf-switchboard targets the same problem — single endpoint, swap on request — and adds hardware-aware model acquisition, memory-pressure eviction, backend-specific load planning, rollback, and usage history. It supports GGUF through llama.cpp and Safetensors through vLLM, but keeps one resident model rather than exposing llama-swap's concurrent swap matrix. See [vs llama-swap](#vs-llama-swap) below for a feature-by-feature table.
 
 | Tool | OpenAI API | Loads by model name | Auto unload/load | GGUF support | Memory-pressure scheduling | Worth using? |
 |------|:----------:|:-------------------:|:----------------:|:------------:|:---------------------:|--------------|
 | **Ollama** | Yes | Yes | Yes — `keep_alive` unloads idle models; not memory-pressure aware | Yes | No | Easy drop-in; auto-unload is TTL-based, not scheduler-driven |
 | **llama.cpp** (`llama-server`) | Yes | Manual — one process per model | No — you manage start/stop | Yes | No | Low-level; you own process and port management |
 | **[llama-swap](https://github.com/mostlygeek/llama-swap)** | Yes | Yes | Yes — swaps on request (TTL-based) | Yes | No | **Mature swap proxy** — multi-backend, swap matrix, web dashboard; no memory-pressure eviction, context reduction on OOM, or `/v1/usage` history |
-| **vLLM** | Yes | Yes (pre-loaded) | No — serves loaded models; not on-demand swap | No (HuggingFace weights) | Partial — memory-efficient serving | Datacenter / multi-tenant throughput; not GGUF or per-request model lifecycle |
+| **vLLM** | Yes | Yes (pre-loaded) | No — serves loaded models; not on-demand swap | Experimental and under-optimized | Partial — memory-efficient serving | Datacenter / multi-tenant throughput; primarily Safetensors, not per-request model lifecycle |
 | **LocalAI** | Yes | Yes | Partial — not memory-pressure aware | Yes | No | Full-stack alternative; not designed for proactive eviction under memory pressure |
 | **Open WebUI** | Yes (proxy) | Via backend | Depends on backend | Via backend | Via backend | UI layer — not a model scheduler |
 | **LiteLLM** | Yes | Routes only | No — does not load models | Via providers | No | API router, not a model loader |
-| **gguf-switchboard** (this project) | Yes | Yes | Yes — single-slot swap + idle priority model | Yes | Yes (system RAM) | **llama-swap alternative (Rust)** — memory eviction, OOM context fallback, Swagger UI, usage tracking; llama.cpp-only |
+| **gguf-switchboard** (this project) | Yes | Yes | Yes — single-slot swap + idle priority model | Yes | Yes (system RAM) | **Local model router (Rust)** — GGUF/llama.cpp and Safetensors/vLLM with rollback, Swagger UI, and usage tracking |
 
 ### The gaps in existing tools
 
@@ -34,11 +34,12 @@ When running local LLMs you usually manage models by hand: start `llama-server` 
 
 ### What makes gguf-switchboard different
 
-gguf-switchboard is a **llama-swap-style swap proxy in Rust**, extended for constrained GPUs with:
+gguf-switchboard is a **single-slot local model router in Rust**, built for constrained GPUs with:
 - **Memory-pressure eviction** — monitors system RAM and unloads when thresholds are crossed
 - **Automatic context-size reduction** — on OOM, reduces context and retries (OOM-only fallback)
 - **Idle priority model** — keeps your preferred model warm automatically
 - **Built-in usage tracking** — `/v1/usage` history and Prometheus metrics
+- **Two backend paths** — GGUF through llama.cpp and Safetensors through vLLM
 - **Single OpenAI endpoint** — no port juggling, no process management
 
 Your tools never manage processes or ports — they just point at `http://localhost:9090/v1` and pick a model name from the config.
@@ -61,7 +62,7 @@ Point your IDE or agent at `http://localhost:9090/v1`, set a model name from you
 
 | Feature | llama-swap | gguf-switchboard |
 |---|---|---|
-| Backends supported | Any OpenAI-compatible server (llama.cpp, vllm, tabbyAPI, stable-diffusion.cpp, ...) | llama.cpp only |
+| Backends supported | Any configured OpenAI-compatible server (llama.cpp, vLLM, tabbyAPI, stable-diffusion.cpp, ...) | Managed llama.cpp for GGUF and vLLM for Safetensors |
 | Concurrent models | Yes — custom "swap matrix" DSL / groups run multiple models at once | No — one model loaded at a time |
 | System memory-pressure eviction | No — unload is TTL-based only | Yes — monitors system RAM and unloads at critical threshold |
 | context-size reduction on OOM | No | Yes — auto-retries only on OOM-class failures at a lower `-c` |
@@ -72,7 +73,7 @@ Point your IDE or agent at `http://localhost:9090/v1`, set a model name from you
 | Request filtering | Yes — `filters`/`stripParams`/`setParams` rewrite requests per model | No |
 | Startup preload | Yes — explicit `hooks` | Only incidental, via the idle-timeout priority-model watcher (~30s after boot, not deterministic) |
 | Custom stop command | Yes — `cmdStop` (e.g. graceful Docker/Podman stop) | No |
-| Other API surfaces | Anthropic `/messages`, image gen (SDAPI), reranking, infilling | OpenAI-only: chat, completions, embeddings, responses, audio |
+| Other API surfaces | Anthropic `/messages`, image gen (SDAPI), reranking, infilling | OpenAI chat, completions, embeddings, responses, audio, reranking; Anthropic Messages |
 | Remote CLI log streaming | Yes | No — stdout JSON logs only |
 
-Both are thin proxies in front of `llama-server`. To measure proxy overhead on your hardware, see [Benchmarks](BENCHMARKS.md).
+Both manage inference backends behind one endpoint. llama-swap accepts arbitrary configured server commands; gguf-switchboard owns model acquisition, backend selection, and a single-slot lifecycle for llama.cpp and vLLM. To measure proxy overhead on your hardware, see [Benchmarks](BENCHMARKS.md).

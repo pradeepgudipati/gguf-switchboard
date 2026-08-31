@@ -2,7 +2,7 @@
 # /etc/systemd/system/gguf-switchboard.service.
 
 [Unit]
-Description=GGUF Switchboard - GPU-aware local GGUF model scheduler
+Description=GGUF Switchboard - local llama.cpp and vLLM model router
 After=network.target
 Documentation=https://github.com/pradeepgudipati/gguf-switchboard
 

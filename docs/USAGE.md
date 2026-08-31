@@ -93,15 +93,24 @@ ggs models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --no-bench
 
 # Dry-run: show what the fit planner would generate
 ggs models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M --fit-dry-run
+
+# Search and pull Hugging Face Safetensors models for vLLM
+ggs models search vllm "Qwen 7B Instruct"
+ggs models pull vllm Qwen/Qwen2.5-7B-Instruct \
+  --registry /opt/gguf-switchboard/models.toml
 ```
 
 `models pull` performs the complete workflow: fetches the repo tree, resolves `--quant` case-insensitively, streams the download with progress, validates the GGUF header, generates an alias, runs the fit planner to generate context_size/ngl/extra_args, and merges into `models.toml`. A successful pull refreshes a running gguf-switchboard server automatically.
 
+`models pull vllm` requires `config.json` and Safetensors weights. It downloads weights plus tokenizer/configuration files, detects AWQ/GPTQ/FP8-style quantization metadata when declared by the repository, writes the vLLM source and launch options into the registry, and refreshes a running server. It never enables `trust_remote_code` automatically.
+
+When an alias has both source types and no explicit backend pin, startup prefers vLLM if the Safetensors weights fit detected VRAM; otherwise it uses the GGUF source through llama.cpp.
+
 ## Systemd service
 
-Native install is recommended: the runtime spawns `llama-server` as a child and needs direct GPU + model-file access.
+Native install is recommended: the runtime spawns `llama-server` or vLLM as a child and needs direct GPU and model-file access. Plain `./deploy.sh` installs both engines; use `--skip-llama-cpp` or `--skip-vllm` only to retain an existing engine during an update.
 
-**Install or upgrade:** see [Fresh machine](../README.md#fresh-machine-linux--systemd) and [Updating](../README.md#updating) in the README. Day-to-day:
+**Install or upgrade:** see [Installation](../README.md#installation) and [Updating](../README.md#updating) in the README. Day-to-day:
 
 ```bash
 sudo systemctl status gguf-switchboard

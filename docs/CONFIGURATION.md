@@ -7,7 +7,7 @@ Configuration is split across two files:
 | File | Purpose |
 |------|---------|
 | **`config.toml`** | Server bind address, idle timeout, GPU VRAM, database path |
-| **`models.toml`** | Model registry — aliases, GGUF paths, priorities, per-model overrides |
+| **`models.toml`** | Model registry: aliases, GGUF and Safetensors sources, backend selection, priorities, per-model overrides |
 
 Default runtime paths after `deploy.sh`:
 
@@ -16,6 +16,7 @@ Default runtime paths after `deploy.sh`:
 | `/opt/gguf-switchboard/config.toml` | Server config |
 | `/opt/gguf-switchboard/models.toml` | Model registry |
 | `/var/lib/gguf-switchboard/models/` | GGUF files |
+| `/opt/gguf-switchboard/vllm-runtime/` | Managed uv/vLLM environment |
 | `/var/lib/gguf-switchboard/usage.db` | Token usage SQLite |
 | `/usr/local/bin/gguf-switchboard` | Binary (root-owned) |
 
@@ -60,6 +61,8 @@ base_port = 18081                              # First internal model port; othe
 context_size = 16384                          # Safe default for consumer GPUs; raise if you have VRAM headroom
 ngl = 999                                     # Default -ngl (GPU layers)
 backend = "llama.cpp"
+vllm_command = "/usr/local/bin/uv"
+vllm_project = "/opt/gguf-switchboard/vllm-runtime"
 
 auto_discover = true    # Also register any .gguf under models_dir not listed in [[models]]
 
@@ -81,18 +84,40 @@ priority = true           # Auto-load after idle_timeout (only one should be tru
 # extra_args = ["--jinja"]  # Extra llama-server flags (optional)
 ```
 
+A Safetensors source uses the same alias schema and selects vLLM:
+
+```toml
+[[models]]
+alias = "qwen2-5-7b-instruct"
+file = ""
+display_name = "Qwen 2.5 7B Instruct"
+kind = "chat"
+backend = "vllm"
+vllm_file = "/var/lib/gguf-switchboard/vllm-models/Qwen--Qwen2.5-7B-Instruct"
+vllm_hf_repo = "Qwen/Qwen2.5-7B-Instruct"
+# quantization = "awq"
+# attention_backend = "FLASH_ATTN"
+# tensor_parallel_size = 2
+# gpu_memory_utilization = 0.9
+# served_model_name = "qwen2-5-7b-instruct"
+```
+
+The CLI writes these fields with `ggs models pull vllm <repo>`. One entry may also retain a GGUF `file`/`hf_repo`. Without an explicit `backend` pin, vLLM is preferred when its weights fit VRAM and llama.cpp is the fallback.
+
 | Field | Description |
 |-------|-------------|
 | `version` | Registry schema version (currently `1`) |
 | `defaults.models_dir` | Directory (or comma-separated directories) scanned for llama.cpp-loadable GGUF files |
 | `defaults.llama_server` | Path to `llama-server` binary |
+| `defaults.vllm_command` | System-visible `uv` executable used to run vLLM |
+| `defaults.vllm_project` | Isolated uv project containing the managed vLLM installation |
 | `defaults.base_port` | Starting port; model at index *N* uses `base_port + N` unless `port` is set |
 | `defaults.context_size` | Fallback/ceiling context window when `vram_gb` heuristics do not apply (default `16384`; raise for 24 GB+ GPUs) |
 | `auto_discover` | When `true`, any `.gguf` under `models_dir` not listed in `[[models]]` is registered at runtime |
 | `[[models]].alias` | Short id used in API requests (`model` field) |
 | `[[models]].file` | GGUF filename relative to `models_dir`, or absolute path |
 | `[[models]].display_name` | Human-readable name; defaults to a title-cased alias |
-| `[[models]].kind` | `chat`, `coder`, `vision`, or `embedding` — inferred from alias/file when omitted |
+| `[[models]].kind` | `chat`, `coder`, `vision`, `embedding`, or `reranker` — inferred from alias/file when omitted |
 | `[[models]].enabled` | When `false`, model is omitted from `/v1/models` and scheduling |
 | `[[models]].priority` | If `true`, this model loads automatically after `idle_timeout` |
 | `[[models]].port` | Normalized internal backend port; discovery and refresh rewrite it from `defaults.base_port` |
@@ -104,6 +129,16 @@ priority = true           # Auto-load after idle_timeout (only one should be tru
 | `[[models]].capabilities` | Tags such as `tools`, `vision`, `reasoning` |
 | `[[models]].hf_repo` | Matched Hugging Face repo id after `sync-hf-metadata` |
 | `[[models]].extra_args` | Extra flags appended to `llama-server` launch args |
+| `[[models]].backend` | Optional `llama.cpp` or `vllm` pin; automatic source selection applies when omitted |
+| `[[models]].vllm_file` | Absolute or model-directory-relative Safetensors repository directory |
+| `[[models]].vllm_hf_repo` | Hugging Face repository id used when no local vLLM directory is present |
+| `[[models]].quantization` | vLLM quantization mode detected from `config.json` or set explicitly |
+| `[[models]].attention_backend` | Optional vLLM attention backend override |
+| `[[models]].draft_model` | Hugging Face repo or local path for speculative decoding |
+| `[[models]].num_speculative_tokens` | vLLM speculative token count |
+| `[[models]].tensor_parallel_size` | Number of GPUs used by vLLM tensor parallelism |
+| `[[models]].gpu_memory_utilization` | vLLM GPU allocator fraction from `0.0` to `1.0` |
+| `[[models]].served_model_name` | Model id exposed by the internal vLLM server; defaults to the alias |
 
 Duplicate `[[models]]` entries (same alias or file) are merged automatically on load and during `discover-models --merge`. Only one model may be `priority = true`; extras are cleared with a warning.
 
@@ -454,7 +489,7 @@ priority = false
 | `vram_gb` | Assumed GPU capacity in GB — heuristic for per-model `-c` when not set in `models.toml` (default: `12` for RTX 3060); also VRAM fallback when `auto_ngl` cannot query `nvidia-smi` |
 | `auto_ngl` | When `true`, pick `-ngl` at load from free VRAM + GGUF size (default: `false`) |
 | `models_file` | Path to model registry (`models.toml` or `models.json`) |
-| `models.<id>.backend` | Engine type (`llama.cpp`) |
+| `models.<id>.backend` | Engine type (`llama.cpp` or `vllm`) |
 | `models.<id>.display_name` | Human-readable name shown in `/v1/models` |
 | `models.<id>.command` | Path to the backend binary |
 | `models.<id>.args` | Command-line arguments (model path, port, context size, etc.) |

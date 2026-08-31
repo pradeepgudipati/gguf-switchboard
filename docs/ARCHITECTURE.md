@@ -2,7 +2,7 @@
 
 > [← Back to README](../README.md)
 
-Scheduler, llama.cpp backend, ModelFitPlanner, and repository layout.
+Scheduler, llama.cpp and vLLM backends, ModelFitPlanner, and repository layout.
 
 ## Overview
 
@@ -12,7 +12,7 @@ Client Request
      ▼
 ┌──────────┐    ┌───────────────┐    ┌──────────────┐
 │  Axum    │───▶│   Scheduler   │───▶│   Backend    │
-│  Router  │    │               │    │  (llama.cpp) │
+│  Router  │    │               │    │ llama / vLLM │
 │          │    │ • swap slot   │    │              │
 │ /v1/...  │    │ • Load lock   │    │ • child proc │
 │ /health  │    │ • Priority    │    │ • health ck  │
@@ -39,7 +39,7 @@ Client Request
 3. If model `Y` is loaded → drain `Y` → unload `Y` (frees VRAM) → load `X` → wait for health → forward; if `X` fails, `Y` is re-loaded (`switch_strategy = "load_first"` instead loads `X` next to `Y` and needs VRAM for both)
 4. After `idle_timeout` seconds with no requests, the priority model auto-loads
 
-**ModelFitPlanner** (opt-in, `[fit]` section in `config.toml`):
+**ModelFitPlanner** (opt-in, `[fit]` section in `config.toml`) plans llama.cpp/GGUF launches:
 - Before every model load, inspects GPU topology / free VRAM, model metadata, and requested context
 - Produces a safe launch profile (context size, nGL, split mode, KV cache type)
 - On OOM, advances through a bounded degradation sequence instead of blindly retrying:
@@ -49,14 +49,17 @@ Client Request
   4. 50% context + Q8 KV + auto-fit GPU
   5. 25% context + Q8 KV + reduced GPU offload
 - Caches known-good profiles to `model-profiles.json` so subsequent loads skip the fallback ladder entirely
+- vLLM/Safetensors models use a weight-size VRAM fit gate and typed vLLM launch parameters; they do not use llama.cpp's nGL/KV fallback ladder
 
-**Backend** (llama.cpp implementation):
-- Spawns `llama-server` as a child process using the configured `command` + `args`
+**Backends** implement the common `Backend` trait:
+- llama.cpp spawns `llama-server` for GGUF sources and applies context, GPU-layer, KV-cache, embedding, reranking, and chat-template arguments
+- vLLM runs `uv run --project <runtime> vllm serve <safetensors-source>` with quantization, tensor-parallel, speculative-decoding, attention-backend, and GPU-utilization options from the registry
 - Polls the health endpoint until healthy or timeout
 - Proxies all OpenAI-compatible HTTP requests to the backend URL
 - Parses SSE streams and re-emits them with proper framing
 - Probes tool-call capability at load time (`tools_verified` on model info)
-- Auto-injects `--chat-template llama3` for Llama 3.1 models unless overridden
+
+One registry alias may contain both sources. An explicit `backend` pin wins. Otherwise the registry prefers vLLM when Safetensors weights fit VRAM and falls back to GGUF/llama.cpp when they do not.
 
 ## API Endpoints
 
@@ -74,6 +77,7 @@ Client Request
 | `/v1/chat/completions` | POST | OpenAI Chat Completions (stream + non-stream) |
 | `/v1/completions` | POST | OpenAI Text Completions (stream + non-stream) |
 | `/v1/embeddings` | POST | OpenAI Embeddings |
+| `/v1/rerank` | POST | Jina/Cohere-style document reranking |
 | `/v1/responses` | POST | OpenAI Responses API (function tools, streaming) |
 | `/v1/messages` | POST | Anthropic Messages API (stream + non-stream, tool calling) |
 | `/v1/audio/transcriptions` | POST | Audio transcription (proxied to backend) |
@@ -92,7 +96,8 @@ Client Request
 ├── config.docker.toml      # Docker server configuration
 ├── models.example.toml     # Tracked default for runtime models.toml
 ├── models.docker.toml      # Docker model registry
-├── deploy.sh               # Build, install, discover models
+├── deploy.sh               # Install both engines, build switchboard, configure systemd
+├── vllm-runtime/           # Isolated uv project for the managed vLLM runtime
 ├── banner.png              # README hero banner
 ├── docs/                   # Configuration, usage, architecture, comparison
 ├── CHANGELOG.md            # Version index (details in releases/)
@@ -123,6 +128,7 @@ Client Request
     ├── backend/
     │   ├── mod.rs          # Backend trait definition
     │   ├── llama_cpp.rs    # llama.cpp backend implementation
+    │   ├── vllm.rs         # vLLM backend implementation
     │   └── tool_probe.rs   # Tool-call capability verification at load time
     ├── scheduler/mod.rs    # Single-slot swapping, priority model, memory watcher, prewarm
     ├── fit.rs              # ModelFitPlanner — hardware-aware load planning with bounded fallback ladder
@@ -163,6 +169,7 @@ Every inbound request is checked against the model's `kind` field (`kind_guard.r
 |-----------------|---------------|
 | `/v1/chat/completions`, `/v1/completions`, `/v1/responses`, `/v1/messages` | `chat`, `coder`, `vision` |
 | `/v1/embeddings` | `embedding` |
+| `/v1/rerank` | `reranker` |
 
 Mismatched requests return a `400` with a clear error message indicating the model's actual kind.
 
