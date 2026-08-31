@@ -248,6 +248,23 @@ registry_has_model_candidates "$vllm_only_registry"
 registry_requires_vllm "$vllm_only_registry"
 ! registry_requires_llama_cpp "$vllm_only_registry"
 
+invalid_vllm_registry="$TMP/invalid-vllm.toml"
+cat >"$invalid_vllm_registry" <<EOF
+version = 1
+
+[[models]]
+alias = "missing-source"
+backend = "vllm"
+EOF
+if registry_has_model_candidates "$invalid_vllm_registry"; then
+  echo "backend = vllm without a model source must not count as deployable" >&2
+  exit 1
+fi
+if registry_requires_vllm "$invalid_vllm_registry"; then
+  echo "backend = vllm without vllm_file or vllm_hf_repo must not require vLLM" >&2
+  exit 1
+fi
+
 gguf_only_registry="$TMP/gguf-only.toml"
 cat >"$gguf_only_registry" <<EOF
 version = 1

@@ -323,7 +323,7 @@ registry_requires_vllm() {
     [[ -r "$registry" ]] || sudo test -r "$registry" || return 1
     content="$(read_config "$registry")"
     printf '%s\n' "$content" | grep -Eq \
-        '^(backend[[:space:]]*=[[:space:]]*"vllm"|vllm_(file|hf_repo)[[:space:]]*=[[:space:]]*"[^"]+)'
+        '^vllm_(file|hf_repo)[[:space:]]*=[[:space:]]*"[^"]+'
 }
 
 registry_requires_llama_cpp() {
