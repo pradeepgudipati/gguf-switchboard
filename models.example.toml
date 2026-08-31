@@ -18,6 +18,8 @@ version = 1
 # Root directory (or comma-separated directories) scanned for llama.cpp-loadable GGUF files.
 models_dir = "/var/lib/gguf-switchboard/models"
 llama_server = "/usr/local/bin/llama-server"
+vllm_command = "/usr/local/bin/uv"
+vllm_project = "/opt/gguf-switchboard/vllm-runtime"
 host = "127.0.0.1"
 base_port = 18081
 # Fallback context when VRAM heuristics do not apply; see config.toml `vram_gb`.
@@ -66,3 +68,16 @@ auto_discover = true
 #
 # Enrich empty metadata fields from Hugging Face (does not overwrite explicit pins):
 #   ./gguf-switchboard sync-hf-metadata models.toml
+
+# Safetensors/vLLM example (normally written by `models pull vllm`):
+# [[models]]
+# alias = "qwen2-5-7b-instruct"
+# file = ""
+# display_name = "Qwen 2.5 7B Instruct"
+# kind = "chat"
+# backend = "vllm"
+# vllm_file = "/var/lib/gguf-switchboard/vllm-models/Qwen--Qwen2.5-7B-Instruct"
+# vllm_hf_repo = "Qwen/Qwen2.5-7B-Instruct"
+# quantization = "awq"           # optional; detected from config.json
+# tensor_parallel_size = 2        # optional; number of GPUs
+# gpu_memory_utilization = 0.9    # optional; vLLM allocator fraction

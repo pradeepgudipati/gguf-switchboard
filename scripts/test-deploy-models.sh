@@ -133,6 +133,8 @@ grep -q 'vllm_project = "/opt/gguf-switchboard/vllm-runtime"' models.example.tom
 grep -q 'User=ggs' gguf-switchboard.service
 grep -q 'WorkingDirectory=/opt/gguf-switchboard' gguf-switchboard.service
 grep -q 'MODELS_DIR=/var/lib/gguf-switchboard/models' gguf-switchboard.service
+grep -q 'Description=GGUF Switchboard - local llama.cpp and vLLM model router' gguf-switchboard.service
+grep -q 'Description=GGUF Switchboard - local llama.cpp and vLLM model router' deploy.sh
 
 GGUF_SWITCHBOARD_DEPLOY_LIB=1 source ./deploy.sh
 

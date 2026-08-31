@@ -519,7 +519,7 @@ write_systemd_unit() {
     echo "==> Installing systemd unit ($SERVICE_FILE)..."
     sudo tee "$SERVICE_FILE" >/dev/null <<EOF
 [Unit]
-Description=GGUF Switchboard - GPU-aware local GGUF model scheduler
+Description=GGUF Switchboard - local llama.cpp and vLLM model router
 After=network.target
 
 [Service]
