@@ -4,9 +4,16 @@ Release notes for each version live in [`releases/`](releases/) and on [GitHub R
 
 ## Unreleased
 
-- **Tool-calling/template conformance console** — new Swagger UI panel (`/swagger-ui/conformance.html`) and `/v1/conformance/*` endpoints (`inspect`, `resolve-template`, `battery/{model_id}`, `compare`) for diagnosing broken tool-calling and chat templates: classifies whether a response's tool call is structured JSON, dumped as plain text, or leaked into `reasoning_content`; resolves a model's actual Jinja-rendered prompt via llama-server's `/apply-template`; runs a fixed 4-case pass/fail battery; compares two models side by side.
-- **Per-model `chat_template_file`, `reasoning_format`, and `ctx`** in `models.toml` `[[models]]` entries. `chat_template_file` overrides a broken/missing embedded Jinja template (`--chat-template-file`, takes priority over the existing Llama 3.1 auto-injection). `reasoning_format` sets llama-server's `--reasoning-format`. `ctx` is a per-model context *floor* — distinct from the existing `context_size` exact override — that VRAM-pressure fallback logic can never reduce a model below, preventing the sub-32k-context failure mode that silently breaks agentic tool calling in harnesses like opencode.
-- Fixed a Swagger UI bug where changing the model dropdown didn't update the `model` field already shown in an open "Try it out" request body (`updateModelFieldOnly`/`initializeRequestBody` now update React's own state via a native value-setter + dispatched `input` event, not a raw DOM `.value` assignment). Also added `Cache-Control: no-cache` on `/swagger-ui/*` static assets so a deployed fix can't be masked by stale browser caching.
+
+## [v0.1.6](https://github.com/pradeepgudipati/gguf-switchboard/releases/tag/v0.1.6) — 2026-08-31
+
+- **Dual vLLM and llama.cpp backends** — registry-driven routing supports safetensors models through vLLM and GGUF models through llama.cpp under the same alias, with hardware-fit planning, model-source reporting, and safer search/pull behavior.
+- **Default dual-backend installation** — `deploy.sh` installs llama.cpp and vLLM by default, validates that vLLM models have a usable source, and preserves aligned service and registry configuration.
+- **Reranker support** — reranker discovery, metadata, lifecycle handling, and the OpenAI-compatible `POST /v1/rerank` endpoint work across supported backends.
+- **Tool/template conformance console** — new Swagger UI diagnostics and `/v1/conformance/*` endpoints inspect structured tool calls, template rendering, fixed conformance batteries, and side-by-side model behavior.
+- **Model-specific runtime controls** — `chat_template_file`, `reasoning_format`, and a minimum `ctx` floor can be configured per model.
+- **Operations and observability** — `ggs stop` / `ggs restart`, model-aware NVIDIA monitoring, improved embedding admission and VRAM profiles, clearer CLI help, and refreshed deployment smoke tests.
+- **CI and release hardening** — pinned Rust release toolchain, cross-compilation fixes, Woodpecker Linux release support, PR-only hosted checks, and robust release checksum generation.
 
 ## [v0.1.5](https://github.com/pradeepgudipati/gguf-switchboard/releases/tag/v0.1.5) — 2026-08-20
 
