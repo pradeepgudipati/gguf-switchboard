@@ -17,7 +17,7 @@ When running local LLMs you usually manage models by hand: start `llama-server` 
 | **Ollama** | Yes | Yes | Yes — `keep_alive` unloads idle models; not memory-pressure aware | Yes | No | Easy drop-in; auto-unload is TTL-based, not scheduler-driven |
 | **llama.cpp** (`llama-server`) | Yes | Manual — one process per model | No — you manage start/stop | Yes | No | Low-level; you own process and port management |
 | **[llama-swap](https://github.com/mostlygeek/llama-swap)** | Yes | Yes | Yes — swaps on request (TTL-based) | Yes | No | **Mature swap proxy** — multi-backend, swap matrix, web dashboard; no memory-pressure eviction, context reduction on OOM, or `/v1/usage` history |
-| **vLLM** | Yes | Yes (pre-loaded) | No — serves loaded models; not on-demand swap | No (HuggingFace weights) | Partial — memory-efficient serving | Datacenter / multi-tenant throughput; not GGUF or per-request model lifecycle |
+| **vLLM** | Yes | Yes (pre-loaded) | No — serves loaded models; not on-demand swap | Experimental and under-optimized | Partial — memory-efficient serving | Datacenter / multi-tenant throughput; primarily Safetensors, not per-request model lifecycle |
 | **LocalAI** | Yes | Yes | Partial — not memory-pressure aware | Yes | No | Full-stack alternative; not designed for proactive eviction under memory pressure |
 | **Open WebUI** | Yes (proxy) | Via backend | Depends on backend | Via backend | Via backend | UI layer — not a model scheduler |
 | **LiteLLM** | Yes | Routes only | No — does not load models | Via providers | No | API router, not a model loader |

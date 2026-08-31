@@ -12,6 +12,8 @@
 #   --refresh-models   Regenerate models.toml from disk (merge existing pins)
 #   --skip-pull        Rebuild + reinstall without git fetch/pull
 #   --migrate-models   Copy legacy ~/models into /var/lib/gguf-switchboard/models
+#   --skip-llama-cpp   Keep the installed llama.cpp runtime without rebuilding it
+#   --skip-vllm        Keep the installed vLLM runtime without synchronizing it
 #
 set -euo pipefail
 
@@ -310,14 +312,30 @@ llama_server_ready() {
 }
 
 registry_has_model_candidates() {
-    local registry="$1" dirs dir
-    sudo test -r "$registry" || return 1
+    local registry="$1"
+    [[ -r "$registry" ]] || sudo test -r "$registry" || return 1
 
-    if read_config "$registry" | grep -q '^\[\[models\]\]'; then
+    registry_requires_llama_cpp "$registry" || registry_requires_vllm "$registry"
+}
+
+registry_requires_vllm() {
+    local registry="$1" content
+    [[ -r "$registry" ]] || sudo test -r "$registry" || return 1
+    content="$(read_config "$registry")"
+    printf '%s\n' "$content" | grep -Eq \
+        '^(backend[[:space:]]*=[[:space:]]*"vllm"|vllm_(file|hf_repo)[[:space:]]*=[[:space:]]*"[^"]+)'
+}
+
+registry_requires_llama_cpp() {
+    local registry="$1" content dirs dir
+    [[ -r "$registry" ]] || sudo test -r "$registry" || return 1
+    content="$(read_config "$registry")"
+
+    if printf '%s\n' "$content" | grep -Eq '^file[[:space:]]*=[[:space:]]*"[^"]+'; then
         return 0
     fi
 
-    dirs="$(read_models_dir_from_toml "$registry" 2>/dev/null || true)"
+    dirs="$(printf '%s\n' "$content" | awk -F'"' '/^models_dir[[:space:]]*=/ { print $2; exit }')"
     [[ -n "$dirs" ]] || return 1
     IFS=',' read -r -a model_dirs <<<"$dirs"
     for dir in "${model_dirs[@]}"; do
@@ -341,6 +359,13 @@ Download a recommended quantization:
 
 Then finish service setup:
   ./deploy.sh --refresh-models
+
+Or download a Safetensors model for vLLM:
+  ggs models search vllm "Qwen 7B Instruct"
+  ggs models pull vllm Qwen/Qwen2.5-7B-Instruct --registry "$MODELS_FILE"
+
+Then start the configured service:
+  ./deploy.sh --skip-llama-cpp --skip-vllm
 EOF
 }
 
@@ -424,6 +449,72 @@ EOF
     fi
 }
 
+configure_vllm_defaults() {
+    local file="$1"
+    [[ -r "$file" ]] || sudo test -r "$file" || return 1
+
+    local content need_command need_project tmp
+    content="$(read_config "$file")"
+    need_command=true
+    need_project=true
+    printf '%s\n' "$content" | grep -q '^vllm_command[[:space:]]*=' && need_command=false
+    printf '%s\n' "$content" | grep -q '^vllm_project[[:space:]]*=' && need_project=false
+    if [[ "$need_command" == "false" && "$need_project" == "false" ]]; then
+        return 0
+    fi
+
+    tmp="$(mktemp)"
+    printf '%s\n' "$content" | awk \
+        -v add_command="$need_command" \
+        -v add_project="$need_project" \
+        -v uv_bin="$UV_BIN" \
+        -v project_dir="$VLLM_PROJECT_DIR" '
+        function emit_missing() {
+            if (emitted) return
+            if (add_command == "true") print "vllm_command = \"" uv_bin "\""
+            if (add_project == "true") print "vllm_project = \"" project_dir "\""
+            emitted = 1
+        }
+        /^\[defaults\]$/ { in_defaults = 1; found_defaults = 1; print; next }
+        /^\[/ && in_defaults { emit_missing(); in_defaults = 0 }
+        { print }
+        END {
+            if (in_defaults) emit_missing()
+            if (!found_defaults) {
+                print ""
+                print "[defaults]"
+                emit_missing()
+            }
+        }
+    ' >"$tmp"
+    if [[ -w "$file" ]]; then
+        install -m 664 "$tmp" "$file"
+    else
+        sudo install -o "$DEPLOY_OWNER" -g "$SERVICE_GROUP" -m 664 "$tmp" "$file"
+    fi
+    rm -f "$tmp"
+}
+
+registry_vllm_command() {
+    local file="$1" value
+    value="$(read_config "$file" | awk -F'"' '/^vllm_command[[:space:]]*=/ { print $2; exit }')"
+    printf '%s\n' "${value:-$UV_BIN}"
+}
+
+registry_vllm_project() {
+    local file="$1" value
+    value="$(read_config "$file" | awk -F'"' '/^vllm_project[[:space:]]*=/ { print $2; exit }')"
+    printf '%s\n' "${value:-$VLLM_PROJECT_DIR}"
+}
+
+registry_vllm_ready() {
+    local file="$1" command project
+    command="$(registry_vllm_command "$file")"
+    project="$(registry_vllm_project "$file")"
+    [[ -x "$command" && -r "$project/pyproject.toml" ]] || return 1
+    "$command" run --project "$project" vllm --version >/dev/null 2>&1
+}
+
 write_systemd_unit() {
     echo "==> Installing systemd unit ($SERVICE_FILE)..."
     sudo tee "$SERVICE_FILE" >/dev/null <<EOF
@@ -449,7 +540,7 @@ EOF
 
 validate_runtime_access() {
     echo "==> Validating runtime access as $SERVICE_USER..."
-    local failed=0
+    local failed=0 effective_vllm_command effective_vllm_project
     sudo -u "$SERVICE_USER" test -r "$CONFIG_FILE" || {
         echo "ERROR: $SERVICE_USER cannot read $CONFIG_FILE" >&2
         failed=1
@@ -462,10 +553,29 @@ validate_runtime_access() {
         echo "ERROR: $SERVICE_USER cannot execute $BIN" >&2
         failed=1
     }
-    sudo -u "$SERVICE_USER" test -x "$LLAMA_SERVER" || {
-        echo "ERROR: $SERVICE_USER cannot execute $LLAMA_SERVER" >&2
-        failed=1
-    }
+    if registry_requires_llama_cpp "$MODELS_FILE"; then
+        sudo -u "$SERVICE_USER" test -x "$LLAMA_SERVER" || {
+            echo "ERROR: $SERVICE_USER cannot execute $LLAMA_SERVER" >&2
+            failed=1
+        }
+    fi
+    if registry_requires_vllm "$MODELS_FILE"; then
+        effective_vllm_command="$(registry_vllm_command "$MODELS_FILE")"
+        effective_vllm_project="$(registry_vllm_project "$MODELS_FILE")"
+        sudo -u "$SERVICE_USER" test -x "$effective_vllm_command" || {
+            echo "ERROR: $SERVICE_USER cannot execute $effective_vllm_command" >&2
+            failed=1
+        }
+        sudo -u "$SERVICE_USER" test -r "$effective_vllm_project/pyproject.toml" || {
+            echo "ERROR: $SERVICE_USER cannot read $effective_vllm_project/pyproject.toml" >&2
+            failed=1
+        }
+        sudo -u "$SERVICE_USER" "$effective_vllm_command" run --project "$effective_vllm_project" \
+            vllm --version >/dev/null 2>&1 || {
+            echo "ERROR: vLLM runtime check failed as $SERVICE_USER" >&2
+            failed=1
+        }
+    fi
     sudo -u "$SERVICE_USER" test -r "$MODELS_DIR" || {
         echo "ERROR: $SERVICE_USER cannot read $MODELS_DIR" >&2
         failed=1
@@ -579,9 +689,13 @@ ensure_repo
 SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SOURCE_DIR"
 
+GGUF_SWITCHBOARD_VLLM_LIB=1 source "$SOURCE_DIR/scripts/setup-vllm.sh"
+
 REFRESH_MODELS=false
 SKIP_PULL=false
 MIGRATE_MODELS=false
+SKIP_LLAMA_CPP=false
+SKIP_VLLM=false
 for arg in "$@"; do
     case "$arg" in
         --refresh-models)
@@ -593,9 +707,16 @@ for arg in "$@"; do
         --migrate-models)
             MIGRATE_MODELS=true
             ;;
+        --skip-llama-cpp)
+            SKIP_LLAMA_CPP=true
+            ;;
+        --skip-vllm)
+            SKIP_VLLM=true
+            ;;
         -h|--help)
             cat <<EOF
 Usage: ./deploy.sh [--refresh-models] [--skip-pull] [--migrate-models]
+                   [--skip-llama-cpp] [--skip-vllm]
 
 Deploy gguf-switchboard system-wide (Linux + systemd).
 
@@ -609,6 +730,8 @@ Options:
   --refresh-models   Regenerate models.toml from GGUF files on disk (merge)
   --skip-pull        Rebuild + reinstall without git fetch/checkout/pull
   --migrate-models   Copy legacy ~/models into $MODELS_DIR (never deletes)
+  --skip-llama-cpp   Do not build/update llama.cpp during this deployment
+  --skip-vllm        Do not install/update the isolated vLLM environment
 
 Environment:
   MODELS_DIR / DISCOVER_MODELS_DIR   Override discover scan dirs (comma-separated)
@@ -687,7 +810,7 @@ maybe_migrate_legacy_etc_config
 maybe_migrate_legacy_models "$MIGRATE_MODELS"
 
 if command -v apt-get >/dev/null 2>&1; then
-    APT_PKGS=(libssl-dev pkg-config build-essential cmake curl git jq aria2)
+    APT_PKGS=(libssl-dev pkg-config build-essential cmake curl git jq aria2 patchelf)
     NEED_APT=false
     for pkg in "${APT_PKGS[@]}"; do
         if ! dpkg -s "$pkg" >/dev/null 2>&1; then
@@ -702,6 +825,15 @@ if command -v apt-get >/dev/null 2>&1; then
     else
         echo "==> Build dependencies already installed."
     fi
+fi
+
+if [[ "$SKIP_LLAMA_CPP" != "true" ]]; then
+    echo "==> Installing/updating CUDA llama.cpp..."
+    llama_skip_pull=0
+    [[ "$SKIP_PULL" == "true" ]] && llama_skip_pull=1
+    SKIP_SERVICE=1 SKIP_PULL="$llama_skip_pull" "$SOURCE_DIR/scripts/update-llama-cpp.sh"
+else
+    echo "==> Skipping llama.cpp setup (--skip-llama-cpp)."
 fi
 
 if ! command -v cargo >/dev/null 2>&1; then
@@ -719,26 +851,34 @@ cargo build --release
 sync_project_to_install "$SOURCE_DIR"
 write_system_config
 
+if [[ "$SKIP_VLLM" != "true" ]]; then
+    setup_vllm "$VLLM_PROJECT_DIR"
+else
+    echo "==> Skipping vLLM setup (--skip-vllm)."
+fi
+
 echo "==> Installing binary → $BIN..."
 sudo install -o root -g root -m 755 \
     "${SOURCE_DIR}/target/release/gguf-switchboard" \
     "$BIN"
 
-if [[ ! -x "$LLAMA_SERVER" ]]; then
-    echo "ERROR: $LLAMA_SERVER not found or not executable." >&2
-    llama_setup_help
-    exit 1
-fi
-if ! llama_server_ready; then
-    echo "ERROR: $LLAMA_SERVER failed --version (missing libs?)." >&2
-    llama_setup_help
-    exit 1
-fi
-
 if [[ "$MODELS_CREATED" == "true" ]] || ! sudo test -f "$MODELS_FILE"; then
     generate_models_toml true
 else
     generate_models_toml "$REFRESH_MODELS"
+fi
+
+configure_vllm_defaults "$MODELS_FILE"
+
+if registry_requires_llama_cpp "$MODELS_FILE" && ! llama_server_ready; then
+    echo "ERROR: registered GGUF models require a working $LLAMA_SERVER." >&2
+    llama_setup_help
+    exit 1
+fi
+if registry_requires_vllm "$MODELS_FILE" && ! registry_vllm_ready "$MODELS_FILE"; then
+    echo "ERROR: registered Safetensors models require a working vLLM runtime." >&2
+    echo "       Re-run ./deploy.sh without --skip-vllm." >&2
+    exit 1
 fi
 
 write_systemd_unit
@@ -748,7 +888,7 @@ if ! registry_has_model_candidates "$MODELS_FILE"; then
     echo ""
     model_setup_help "$MODELS_DIR"
     echo ""
-    echo "==> Service unit installed but not started (no GGUF models yet)."
+    echo "==> Service unit installed but not started (no models yet)."
     echo "    After pulling models: ./deploy.sh --refresh-models"
     exit 0
 fi
