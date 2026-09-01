@@ -652,6 +652,82 @@ print_deploy_checklist() {
     echo "$spawn_ok model files present under $MODELS_DIR"
 }
 
+print_deployment_summary() {
+    local llama_version="$1"
+    local llama_status="$2"
+    local switchboard_version="$3"
+    local vllm_version="$4"
+    local vllm_status="$5"
+    local model_count="$6"
+    local service_status="$7"
+
+    cat <<EOF
+
+Deployment summary
+  llama.cpp:         ${llama_version:-unknown} (${llama_status})
+  gguf-switchboard:  ${switchboard_version:-unknown}
+  vLLM:              ${vllm_version:-unknown} (${vllm_status})
+  Models indexed:    ${model_count}
+  Service:           ${service_status}
+
+Available commands
+  ggs status
+  ggs logs
+  ggs logs watch
+  ggs logs --tail 100
+  ggs models search <query>
+  ggs models search vllm <query>
+  ggs models files <repo-id>
+  ggs models pull <repo-id> --quant Q4_K_M
+  ggs models pull vllm <repo-id>
+  ggs stop
+  ggs restart
+  ggs help
+EOF
+}
+
+installed_llama_release() {
+    local marker="/usr/local/share/gguf-switchboard/llama-cpp-release"
+    if [[ -r "$marker" ]]; then
+        tr -d '[:space:]' <"$marker"
+        return
+    fi
+    if [[ -x "$LLAMA_SERVER" ]]; then
+        local build
+        build="$("$LLAMA_SERVER" --version 2>&1 | sed -nE 's/.*version:[[:space:]]*([0-9]+).*/\1/p' | head -n 1)"
+        [[ -n "$build" ]] && printf 'b%s\n' "$build"
+    fi
+}
+
+indexed_model_count() {
+    local registry="$1"
+    if [[ ! -r "$registry" ]] && ! sudo test -r "$registry"; then
+        printf '0\n'
+        return
+    fi
+    read_config "$registry" | awk '
+        /^\[\[models\]\]$/ || /^\[models\.[^]]+\]$/ { count++ }
+        END { print count + 0 }
+    '
+}
+
+switchboard_package_version() {
+    awk -F'"' '/^version[[:space:]]*=/ { print "v" $2; exit }' "$SOURCE_DIR/Cargo.toml"
+}
+
+print_current_deployment_summary() {
+    local service_status="$1"
+    local llama_version vllm_version model_count
+    llama_version="$(installed_llama_release)"
+    vllm_version="$(installed_vllm_version "$VLLM_PROJECT_DIR" 2>/dev/null || true)"
+    model_count="$(indexed_model_count "$MODELS_FILE")"
+    print_deployment_summary \
+        "${llama_version:-unavailable}" "$LLAMA_DEPLOY_STATUS" \
+        "$(switchboard_package_version)" \
+        "${vllm_version:-unavailable}" "$VLLM_DEPLOY_STATUS" \
+        "$model_count" "$service_status"
+}
+
 in_repo() {
     [[ -f "$1/Cargo.toml" ]] && grep -q 'name = "gguf-switchboard"' "$1/Cargo.toml" 2>/dev/null
 }
@@ -828,12 +904,23 @@ if command -v apt-get >/dev/null 2>&1; then
 fi
 
 if [[ "$SKIP_LLAMA_CPP" != "true" ]]; then
-    echo "==> Installing/updating CUDA llama.cpp..."
+    echo "==> Checking CUDA llama.cpp release..."
     llama_skip_pull=0
     [[ "$SKIP_PULL" == "true" ]] && llama_skip_pull=1
-    SKIP_SERVICE=1 SKIP_PULL="$llama_skip_pull" "$SOURCE_DIR/scripts/update-llama-cpp.sh"
+    LLAMA_DEPLOY_LOG="$(mktemp)"
+    SKIP_SERVICE=1 SKIP_PULL="$llama_skip_pull" \
+        "$SOURCE_DIR/scripts/update-llama-cpp.sh" 2>&1 | tee "$LLAMA_DEPLOY_LOG"
+    if grep -q 'already current' "$LLAMA_DEPLOY_LOG"; then
+        LLAMA_DEPLOY_STATUS="current; no rebuild"
+    elif grep -q 'release check failed; keeping' "$LLAMA_DEPLOY_LOG"; then
+        LLAMA_DEPLOY_STATUS="retained; update check unavailable"
+    else
+        LLAMA_DEPLOY_STATUS="updated"
+    fi
+    rm -f "$LLAMA_DEPLOY_LOG"
 else
     echo "==> Skipping llama.cpp setup (--skip-llama-cpp)."
+    LLAMA_DEPLOY_STATUS="skipped"
 fi
 
 if ! command -v cargo >/dev/null 2>&1; then
@@ -852,9 +939,21 @@ sync_project_to_install "$SOURCE_DIR"
 write_system_config
 
 if [[ "$SKIP_VLLM" != "true" ]]; then
-    setup_vllm "$VLLM_PROJECT_DIR"
+    VLLM_DEPLOY_LOG="$(mktemp)"
+    ensure_vllm_current "$VLLM_PROJECT_DIR" 2>&1 | tee "$VLLM_DEPLOY_LOG"
+    if grep -q 'already current' "$VLLM_DEPLOY_LOG"; then
+        VLLM_DEPLOY_STATUS="current; no sync"
+    elif grep -q 'release check failed; keeping' "$VLLM_DEPLOY_LOG"; then
+        VLLM_DEPLOY_STATUS="retained; update check unavailable"
+    elif grep -q 'Updating vLLM' "$VLLM_DEPLOY_LOG"; then
+        VLLM_DEPLOY_STATUS="updated"
+    else
+        VLLM_DEPLOY_STATUS="installed"
+    fi
+    rm -f "$VLLM_DEPLOY_LOG"
 else
     echo "==> Skipping vLLM setup (--skip-vllm)."
+    VLLM_DEPLOY_STATUS="skipped"
 fi
 
 echo "==> Installing binary → $BIN..."
@@ -890,6 +989,7 @@ if ! registry_has_model_candidates "$MODELS_FILE"; then
     echo ""
     echo "==> Service unit installed but not started (no models yet)."
     echo "    After pulling models: ./deploy.sh --refresh-models"
+    print_current_deployment_summary "stopped; no models indexed"
     exit 0
 fi
 
@@ -974,6 +1074,7 @@ for i in {1..30}; do
             echo "    Edit aliases / priority in $MODELS_FILE as needed, then:"
             echo "    ggs restart   (or: sudo systemctl restart gguf-switchboard)"
         fi
+        print_current_deployment_summary "running"
         exit 0
     fi
     echo "    waiting... ($i/30)"

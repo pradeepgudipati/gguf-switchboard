@@ -167,21 +167,21 @@ cd gguf-switchboard
 ./deploy.sh
 ```
 
-`deploy.sh` calls `scripts/update-llama-cpp.sh` with service management disabled. The helper checks CUDA, clones or updates `~/llama.cpp`, builds a CUDA Release, verifies GPU discovery, installs under `/usr/local`, fixes runtime library paths, and refreshes the linker cache.
+`deploy.sh` calls `scripts/update-llama-cpp.sh` with service management disabled. The helper checks the latest numbered upstream `bNNNNN` release and rebuilds only when that release differs from the last successfully installed marker, or when `llama-server` is missing or broken. A required rebuild checks CUDA, builds a CUDA Release, verifies GPU discovery, installs under `/usr/local`, fixes runtime library paths, and refreshes the linker cache. If the release check is unavailable while the installed runtime remains healthy, deploy retains it and prints a warning.
 
-Overrides: `LLAMA_DIR` (default `~/llama.cpp`), `PREFIX` (default `/usr/local`), `SERVICE` (default `gguf-switchboard`), `SKIP_PULL=1`, `SKIP_SERVICE=1`.
+Overrides: `LLAMA_DIR` (default `~/llama.cpp`), `PREFIX` (default `/usr/local`), `SERVICE` (default `gguf-switchboard`), `SKIP_PULL=1`, `SKIP_SERVICE=1`, `FORCE_REBUILD=1`.
 
-The same deployment installs `uv` when needed, synchronizes the repository-approved vLLM environment, and verifies vLLM before the service can use a Safetensors entry. Use `--skip-llama-cpp` or `--skip-vllm` only when retaining an already-installed engine during an update.
+The same deployment installs `uv` when needed, checks PyPI for the latest stable vLLM release allowed by `vllm-runtime/pyproject.toml`, and runs `uv sync` only when that version changed or the environment is missing or broken. Use `--skip-llama-cpp` or `--skip-vllm` to bypass even the corresponding update check.
 
 What `deploy.sh` does when ready:
 
 1. Pulls latest `main` (stashes dirty working tree first — see [Updating](#updating))
 2. Creates system user `ggs` and directories under `/opt/gguf-switchboard` + `/var/lib/gguf-switchboard`
 3. Installs build dependencies and Rust if needed
-4. Builds and installs CUDA llama.cpp unless `--skip-llama-cpp` is set
+4. Checks the latest numbered llama.cpp release and rebuilds only when required
 5. Builds the release switchboard binary → `/usr/local/bin/gguf-switchboard`
 6. Syncs the project into `/opt/gguf-switchboard`
-7. Installs the isolated vLLM runtime unless `--skip-vllm` is set
+7. Checks the latest compatible vLLM release and synchronizes only when required
 8. Writes runtime configuration without replacing user-owned values
 9. Installs the systemd unit, validates the required engines as `ggs`, and checks `/health`
 
@@ -358,6 +358,7 @@ cd ~/gguf-switchboard   # or wherever you cloned
 - Live config lives under `/opt/gguf-switchboard/` (`config.toml`, `models.toml`); models and `usage.db` under `/var/lib/gguf-switchboard/`. Tracked defaults live in `config.example.toml` and `models.example.toml`.
 - After editing aliases / `priority` / `extra_args`, restart: `sudo systemctl restart gguf-switchboard`.
 - `deploy.sh` leaves the unit stopped when no GGUF or Safetensors models are registered. Pull either format, then re-run deploy with the backend skip flags if no engine update is needed.
+- Every successful run ends with a summary of llama.cpp, gguf-switchboard, vLLM, indexed models, service state, and the available `ggs` operational commands.
 
 ```bash
 # Background service status and logs
