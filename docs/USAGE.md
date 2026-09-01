@@ -113,10 +113,16 @@ Native install is recommended: the runtime spawns `llama-server` or vLLM as a ch
 **Install or upgrade:** see [Installation](../README.md#installation) and [Updating](../README.md#updating) in the README. Day-to-day:
 
 ```bash
-sudo systemctl status gguf-switchboard
-sudo journalctl -u gguf-switchboard -f
-sudo systemctl restart gguf-switchboard
+ggs status
+ggs logs
+ggs logs watch
+ggs logs --tail 250
+ggs restart
 ```
+
+`ggs status` reports whether the background systemd service is `running` or
+`stopped`. `ggs logs` prints the latest 100 journal entries, `watch` follows new
+entries, and `--tail N` prints the latest positive number `N` without a pager.
 
 ## API Examples
 

@@ -25,14 +25,37 @@ fn assert_complete_help(text: &str) {
         "ggs discover-models <models-dir>",
         "ggs sync-hf-metadata",
         "ggs export-registry <models.toml>",
+        "ggs status",
         "ggs stop",
         "ggs restart",
+        "ggs logs",
+        "ggs logs watch",
+        "ggs logs --tail 250",
         "ggs <config.toml>",
     ] {
         assert!(
             text.contains(sample),
             "missing sample `{sample}` in:\n{text}"
         );
+    }
+}
+
+#[test]
+fn invalid_logs_arguments_show_correct_examples() {
+    for args in [
+        &["logs", "--tail"][..],
+        &["logs", "--tail", "0"][..],
+        &["logs", "--tail", "abc"][..],
+        &["logs", "follow"][..],
+    ] {
+        let output = run(args);
+        assert!(!output.status.success(), "unexpected success for {args:?}");
+
+        let error = stderr(&output);
+        assert!(error.contains("Examples:"), "{error}");
+        assert!(error.contains("ggs logs"), "{error}");
+        assert!(error.contains("ggs logs watch"), "{error}");
+        assert!(error.contains("ggs logs --tail 100"), "{error}");
     }
 }
 
