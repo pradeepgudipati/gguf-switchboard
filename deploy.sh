@@ -33,6 +33,7 @@ CONFIG_FILE="${INSTALL_DIR}/config.toml"
 MODELS_FILE="${INSTALL_DIR}/models.toml"
 BIN="/usr/local/bin/gguf-switchboard"
 LLAMA_SERVER="/usr/local/bin/llama-server"
+LLAMA_RELEASE_CHANNEL="${LLAMA_RELEASE_CHANNEL:-stable}"
 SERVICE_FILE="/etc/systemd/system/gguf-switchboard.service"
 ETC_DIR="/etc/gguf-switchboard"
 
@@ -822,6 +823,7 @@ Options:
 Environment:
   MODELS_DIR / DISCOVER_MODELS_DIR   Override discover scan dirs (comma-separated)
   GGUF_SWITCHBOARD_DIR               Source checkout for clone/bootstrap only
+  LLAMA_RELEASE_CHANNEL              stable (default) or nightly
 
 Post-install:
   Adds a 'ggs' alias to your shell rc file (bash/zsh) when accepted.
@@ -918,19 +920,19 @@ if [[ "$SKIP_LLAMA_CPP" != "true" ]]; then
     llama_skip_pull=0
     [[ "$SKIP_PULL" == "true" ]] && llama_skip_pull=1
     LLAMA_DEPLOY_LOG="$(mktemp)"
-    SKIP_SERVICE=1 SKIP_PULL="$llama_skip_pull" \
+    SKIP_SERVICE=1 SKIP_PULL="$llama_skip_pull" LLAMA_RELEASE_CHANNEL="$LLAMA_RELEASE_CHANNEL" \
         "$SOURCE_DIR/scripts/update-llama-cpp.sh" 2>&1 | tee "$LLAMA_DEPLOY_LOG"
     if grep -q 'already current' "$LLAMA_DEPLOY_LOG"; then
-        LLAMA_DEPLOY_STATUS="current; no rebuild"
+        LLAMA_DEPLOY_STATUS="current; no rebuild; $LLAMA_RELEASE_CHANNEL"
     elif grep -q 'release check failed; keeping' "$LLAMA_DEPLOY_LOG"; then
-        LLAMA_DEPLOY_STATUS="retained; update check unavailable"
+        LLAMA_DEPLOY_STATUS="retained; update check unavailable; $LLAMA_RELEASE_CHANNEL"
     else
-        LLAMA_DEPLOY_STATUS="updated"
+        LLAMA_DEPLOY_STATUS="updated; $LLAMA_RELEASE_CHANNEL"
     fi
     rm -f "$LLAMA_DEPLOY_LOG"
 else
     echo "==> Skipping llama.cpp setup (--skip-llama-cpp)."
-    LLAMA_DEPLOY_STATUS="skipped"
+    LLAMA_DEPLOY_STATUS="skipped; $LLAMA_RELEASE_CHANNEL"
 fi
 
 if ! command -v cargo >/dev/null 2>&1; then

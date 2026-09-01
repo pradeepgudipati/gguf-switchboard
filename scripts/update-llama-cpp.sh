@@ -12,6 +12,8 @@
 #   SKIP_PULL=1 Skip git pull
 #   SKIP_SERVICE=1  Never touch systemd
 #   FORCE_REBUILD=1 Rebuild even when the installed release is current
+#   LLAMA_RELEASE_CHANNEL=stable  Track manual vMAJOR.MINOR.PATCH releases (default)
+#   LLAMA_RELEASE_CHANNEL=nightly Track automated bNNNNN snapshots
 set -euo pipefail
 
 # If invoked via sudo, keep the invoking user's home for LLAMA_DIR defaults.
@@ -27,6 +29,7 @@ PREFIX="${PREFIX:-/usr/local}"
 SERVICE="${SERVICE:-gguf-switchboard}"
 INSTALLED_BIN="${PREFIX}/bin/llama-server"
 RELEASE_MARKER="${LLAMA_RELEASE_MARKER:-${PREFIX}/share/gguf-switchboard/llama-cpp-release}"
+LLAMA_RELEASE_CHANNEL="${LLAMA_RELEASE_CHANNEL:-stable}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=runtime-update-lib.sh
 source "$SCRIPT_DIR/runtime-update-lib.sh"
@@ -44,7 +47,28 @@ service_installed() {
 
 need git
 
-echo "==> Checking llama.cpp release at ${LLAMA_DIR}"
+case "$LLAMA_RELEASE_CHANNEL" in
+  stable)
+    release_pattern='v[0-9]*'
+    ;;
+  nightly)
+    release_pattern='b[0-9]*'
+    ;;
+  *)
+    echo "ERROR: LLAMA_RELEASE_CHANNEL must be 'stable' or 'nightly'." >&2
+    exit 2
+    ;;
+esac
+
+select_latest_release() {
+  if [[ "$LLAMA_RELEASE_CHANNEL" == "stable" ]]; then
+    latest_semver_llama_tag
+  else
+    latest_numbered_llama_tag
+  fi
+}
+
+echo "==> Checking llama.cpp ${LLAMA_RELEASE_CHANNEL} release at ${LLAMA_DIR}"
 if [[ ! -d "${LLAMA_DIR}/.git" ]]; then
   mkdir -p "$(dirname "$LLAMA_DIR")"
   git clone --depth 1 --single-branch https://github.com/ggml-org/llama.cpp.git "$LLAMA_DIR"
@@ -52,14 +76,14 @@ fi
 cd "$LLAMA_DIR"
 release_check_failed=false
 if [[ "${SKIP_PULL:-0}" != "1" ]]; then
-  if ! remote_tags="$(git ls-remote --tags --refs origin 'b[0-9]*')"; then
+  if ! remote_tags="$(git ls-remote --tags --refs origin "$release_pattern")"; then
     release_check_failed=true
     latest_release=""
   else
-    latest_release="$(printf '%s\n' "$remote_tags" | awk -F/ '{ print $3 }' | latest_numbered_llama_tag)"
+    latest_release="$(printf '%s\n' "$remote_tags" | awk -F/ '{ print $3 }' | select_latest_release)"
   fi
 else
-  latest_release="$(git tag --list 'b[0-9]*' | latest_numbered_llama_tag)"
+  latest_release="$(git tag --list "$release_pattern" | select_latest_release)"
 fi
 
 runtime_ready=false
@@ -86,10 +110,10 @@ fi
 
 if [[ -z "$latest_release" ]]; then
   if [[ "$runtime_ready" == "true" ]]; then
-    echo "WARNING: Could not determine the latest numbered llama.cpp release; keeping ${installed_release:-installed runtime}." >&2
+    echo "WARNING: Could not determine the latest llama.cpp ${LLAMA_RELEASE_CHANNEL} release; keeping ${installed_release:-installed runtime}." >&2
     exit 0
   fi
-  echo "ERROR: Could not determine the latest numbered llama.cpp release and no working runtime is installed." >&2
+  echo "ERROR: Could not determine the latest llama.cpp ${LLAMA_RELEASE_CHANNEL} release and no working runtime is installed." >&2
   exit 1
 fi
 
@@ -101,7 +125,7 @@ if [[ "${FORCE_REBUILD:-0}" != "1" ]] && ! llama_update_required "$installed_rel
     sudo install -o root -g root -m 644 "$marker_tmp" "$RELEASE_MARKER"
     rm -f "$marker_tmp"
   fi
-  echo "==> llama.cpp already current ($latest_release); skipping rebuild."
+  echo "==> llama.cpp already current ($latest_release, ${LLAMA_RELEASE_CHANNEL} channel); skipping rebuild."
   exit 0
 fi
 

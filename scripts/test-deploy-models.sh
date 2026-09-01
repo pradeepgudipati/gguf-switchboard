@@ -300,11 +300,13 @@ llama_help="$(
 grep -q './scripts/update-llama-cpp.sh' <<<"$llama_help"
 grep -q '/usr/local/bin/llama-server' <<<"$llama_help"
 
-# llama.cpp bootstrap is shallow, while existing checkouts inspect numbered releases.
+# llama.cpp bootstrap is shallow; stable semver is the default with nightly opt-in.
 grep -Eq 'git clone .*--depth 1 .*--single-branch .*llama\.cpp\.git' scripts/update-llama-cpp.sh
-grep -q "git ls-remote --tags --refs origin 'b\[0-9\]\*'" scripts/update-llama-cpp.sh
+grep -q "LLAMA_RELEASE_CHANNEL=\"\${LLAMA_RELEASE_CHANNEL:-stable}\"" scripts/update-llama-cpp.sh
+grep -q "release_pattern='v\[0-9\]\*'" scripts/update-llama-cpp.sh
+grep -q "release_pattern='b\[0-9\]\*'" scripts/update-llama-cpp.sh
 grep -q 'git fetch --depth 1 origin' scripts/update-llama-cpp.sh
-grep -q "git tag --list 'b\[0-9\]\*'" scripts/update-llama-cpp.sh
+grep -q 'git tag --list "$release_pattern"' scripts/update-llama-cpp.sh
 
 # Ordering: stop → build → install binary → enable --now
 stop_line="$(grep -n 'systemctl stop gguf-switchboard' deploy.sh | head -1 | cut -d: -f1)"
@@ -320,11 +322,11 @@ test "$install_line" -lt "$enable_line"
 ! grep -E 'MODELS_DIR=.*\$HOME/models|chown.*whoami.*/var/lib|User=\$\(whoami\)|WorkingDirectory=\$\(pwd\)' deploy.sh
 
 deployment_summary="$(print_deployment_summary \
-    "b10731" "current; no rebuild" \
+    "v0.1.2" "current; no rebuild; stable" \
     "v0.1.6" \
     "0.28.0" "current; no sync" \
     "12" "running")"
-grep -q 'llama.cpp:.*b10731.*current; no rebuild' <<<"$deployment_summary"
+grep -q 'llama.cpp:.*v0.1.2.*current; no rebuild; stable' <<<"$deployment_summary"
 grep -q 'gguf-switchboard:.*v0.1.6' <<<"$deployment_summary"
 grep -q 'vLLM:.*0.28.0.*current; no sync' <<<"$deployment_summary"
 grep -q 'Models indexed:.*12' <<<"$deployment_summary"

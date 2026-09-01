@@ -4,6 +4,10 @@ latest_numbered_llama_tag() {
     grep -E '^b[0-9]+$' | sort -Vu | tail -n 1
 }
 
+latest_semver_llama_tag() {
+    grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -Vu | tail -n 1
+}
+
 llama_update_required() {
     local installed_tag="${1:-}"
     local latest_tag="${2:-}"

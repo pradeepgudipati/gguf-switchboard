@@ -17,7 +17,7 @@ Default runtime paths after `deploy.sh`:
 | `/opt/gguf-switchboard/models.toml` | Model registry |
 | `/var/lib/gguf-switchboard/models/` | GGUF files |
 | `/opt/gguf-switchboard/vllm-runtime/` | Managed uv/vLLM environment |
-| `/usr/local/share/gguf-switchboard/llama-cpp-release` | Last successfully installed numbered llama.cpp release |
+| `/usr/local/share/gguf-switchboard/llama-cpp-release` | Last successfully installed llama.cpp release tag; deploy defaults to semantic `vMAJOR.MINOR.PATCH` releases |
 | `/var/lib/gguf-switchboard/usage.db` | Token usage SQLite |
 | `/usr/local/bin/gguf-switchboard` | Binary (root-owned) |
 

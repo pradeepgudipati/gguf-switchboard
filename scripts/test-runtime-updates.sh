@@ -20,6 +20,11 @@ latest_llama="$({
 } | latest_numbered_llama_tag)"
 assert_eq "b1001" "$latest_llama" "latest numbered llama.cpp tag"
 
+latest_stable_llama="$({
+    printf '%s\n' v0.1.2 v0.1.10 v0.2.0-rc1 b1001 invalid v0.1.9
+} | latest_semver_llama_tag)"
+assert_eq "v0.1.10" "$latest_stable_llama" "latest semantic llama.cpp release"
+
 llama_update_required "b1000" "b1001" true
 ! llama_update_required "b1001" "b1001" true
 llama_update_required "b1001" "b1001" false
@@ -121,6 +126,8 @@ cat >"$TMP/bin/git" <<'EOF'
 if [ "${1:-}" = "ls-remote" ]; then
     printf '%s\trefs/tags/b1000\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
     printf '%s\trefs/tags/b1001\n' bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+    printf '%s\trefs/tags/v0.1.1\n' cccccccccccccccccccccccccccccccccccccccc
+    printf '%s\trefs/tags/v0.1.2\n' dddddddddddddddddddddddddddddddddddddddd
     exit 0
 fi
 exit 1
@@ -134,7 +141,7 @@ fi
 exit 0
 EOF
 chmod +x "$TMP/llama-prefix/bin/llama-server"
-printf '%s\n' b1001 >"$TMP/llama-prefix/share/gguf-switchboard/llama-cpp-release"
+printf '%s\n' v0.1.2 >"$TMP/llama-prefix/share/gguf-switchboard/llama-cpp-release"
 
 llama_output="$(
     PATH="$TMP/bin:$PATH" \
@@ -143,7 +150,19 @@ llama_output="$(
     SKIP_SERVICE=1 \
     "$ROOT/scripts/update-llama-cpp.sh"
 )"
-grep -q 'already current (b1001); skipping rebuild' <<<"$llama_output"
+grep -q 'already current (v0.1.2, stable channel); skipping rebuild' <<<"$llama_output"
 ! grep -q 'Configuring CUDA build' <<<"$llama_output"
+
+printf '%s\n' b1001 >"$TMP/llama-prefix/share/gguf-switchboard/llama-cpp-release"
+nightly_llama_output="$(
+    PATH="$TMP/bin:$PATH" \
+    LLAMA_DIR="$TMP/llama-source" \
+    PREFIX="$TMP/llama-prefix" \
+    LLAMA_RELEASE_CHANNEL=nightly \
+    SKIP_SERVICE=1 \
+    "$ROOT/scripts/update-llama-cpp.sh"
+)"
+grep -q 'already current (b1001, nightly channel); skipping rebuild' <<<"$nightly_llama_output"
+! grep -q 'Configuring CUDA build' <<<"$nightly_llama_output"
 
 echo "runtime update decision validation passed"

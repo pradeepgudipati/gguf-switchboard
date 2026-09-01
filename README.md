@@ -167,9 +167,9 @@ cd gguf-switchboard
 ./deploy.sh
 ```
 
-`deploy.sh` calls `scripts/update-llama-cpp.sh` with service management disabled. The helper checks the latest numbered upstream `bNNNNN` release and rebuilds only when that release differs from the last successfully installed marker, or when `llama-server` is missing or broken. A required rebuild checks CUDA, builds a CUDA Release, verifies GPU discovery, installs under `/usr/local`, fixes runtime library paths, and refreshes the linker cache. If the release check is unavailable while the installed runtime remains healthy, deploy retains it and prints a warning.
+`deploy.sh` calls `scripts/update-llama-cpp.sh` with service management disabled. The helper defaults to the latest manually cut upstream `vMAJOR.MINOR.PATCH` release and rebuilds only when that release differs from the last successfully installed marker, or when `llama-server` is missing or broken. Automated `bNNNNN` snapshots are available only through the explicit nightly channel. A required rebuild checks CUDA, builds a CUDA Release, verifies GPU discovery, installs under `/usr/local`, fixes runtime library paths, and refreshes the linker cache. If the release check is unavailable while the installed runtime remains healthy, deploy retains it and prints a warning.
 
-Overrides: `LLAMA_DIR` (default `~/llama.cpp`), `PREFIX` (default `/usr/local`), `SERVICE` (default `gguf-switchboard`), `SKIP_PULL=1`, `SKIP_SERVICE=1`, `FORCE_REBUILD=1`.
+Overrides: `LLAMA_DIR` (default `~/llama.cpp`), `PREFIX` (default `/usr/local`), `SERVICE` (default `gguf-switchboard`), `LLAMA_RELEASE_CHANNEL=stable|nightly` (default `stable`), `SKIP_PULL=1`, `SKIP_SERVICE=1`, `FORCE_REBUILD=1`.
 
 The same deployment installs `uv` when needed, checks PyPI for the latest stable vLLM release allowed by `vllm-runtime/pyproject.toml`, and runs `uv sync` only when that version changed or the environment is missing or broken. Use `--skip-llama-cpp` or `--skip-vllm` to bypass even the corresponding update check.
 
@@ -178,7 +178,7 @@ What `deploy.sh` does when ready:
 1. Pulls latest `main` (stashes dirty working tree first — see [Updating](#updating))
 2. Creates system user `ggs` and directories under `/opt/gguf-switchboard` + `/var/lib/gguf-switchboard`
 3. Installs build dependencies and Rust if needed
-4. Checks the latest numbered llama.cpp release and rebuilds only when required
+4. Checks the configured llama.cpp release channel and rebuilds only when required
 5. Builds the release switchboard binary → `/usr/local/bin/gguf-switchboard`
 6. Syncs the project into `/opt/gguf-switchboard`
 7. Checks the latest compatible vLLM release and synchronizes only when required
