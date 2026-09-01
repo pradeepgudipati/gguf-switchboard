@@ -118,7 +118,7 @@ mkdir -p "$test_vllm_project"
 cp vllm-runtime/pyproject.toml "$test_vllm_project/pyproject.toml"
 UV_TEST_LOG="$uv_log" UV_BIN="$fake_uv" setup_vllm "$test_vllm_project"
 grep -q "sync --project $test_vllm_project" "$uv_log"
-grep -q "run --project $test_vllm_project vllm --version" "$uv_log"
+grep -q "run --no-sync --project $test_vllm_project vllm --version" "$uv_log"
 
 # Deploy keeps tracked examples separate from runtime configuration.
 test -f config.example.toml
@@ -298,9 +298,11 @@ llama_help="$(
 grep -q './scripts/update-llama-cpp.sh' <<<"$llama_help"
 grep -q '/usr/local/bin/llama-server' <<<"$llama_help"
 
-# llama.cpp bootstrap is shallow, while existing checkouts still fast-forward update.
+# llama.cpp bootstrap is shallow, while existing checkouts inspect numbered releases.
 grep -Eq 'git clone .*--depth 1 .*--single-branch .*llama\.cpp\.git' scripts/update-llama-cpp.sh
-grep -q 'git pull --ff-only' scripts/update-llama-cpp.sh
+grep -q "git ls-remote --tags --refs origin 'b\[0-9\]\*'" scripts/update-llama-cpp.sh
+grep -q 'git fetch --depth 1 origin' scripts/update-llama-cpp.sh
+grep -q "git tag --list 'b\[0-9\]\*'" scripts/update-llama-cpp.sh
 
 # Ordering: stop → build → install binary → enable --now
 stop_line="$(grep -n 'systemctl stop gguf-switchboard' deploy.sh | head -1 | cut -d: -f1)"
@@ -314,5 +316,22 @@ test "$install_line" -lt "$enable_line"
 # Runtime paths must not be constructed from $HOME in the main deploy body.
 # (HOME is still ok for git clone bootstrap, rustup, and optional shell alias.)
 ! grep -E 'MODELS_DIR=.*\$HOME/models|chown.*whoami.*/var/lib|User=\$\(whoami\)|WorkingDirectory=\$\(pwd\)' deploy.sh
+
+deployment_summary="$(print_deployment_summary \
+    "b10731" "current; no rebuild" \
+    "v0.1.6" \
+    "0.28.0" "current; no sync" \
+    "12" "running")"
+grep -q 'llama.cpp:.*b10731.*current; no rebuild' <<<"$deployment_summary"
+grep -q 'gguf-switchboard:.*v0.1.6' <<<"$deployment_summary"
+grep -q 'vLLM:.*0.28.0.*current; no sync' <<<"$deployment_summary"
+grep -q 'Models indexed:.*12' <<<"$deployment_summary"
+grep -q 'Service:.*running' <<<"$deployment_summary"
+grep -q 'ggs status' <<<"$deployment_summary"
+grep -q 'ggs logs watch' <<<"$deployment_summary"
+grep -q 'ggs logs --tail 100' <<<"$deployment_summary"
+grep -q 'ggs models search <query>' <<<"$deployment_summary"
+grep -q 'ggs models pull vllm <repo-id>' <<<"$deployment_summary"
+grep -q 'ggs restart' <<<"$deployment_summary"
 
 echo "deploy models generation validation passed"

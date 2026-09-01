@@ -11,6 +11,7 @@
 #   SERVICE     systemd unit name (default: gguf-switchboard)
 #   SKIP_PULL=1 Skip git pull
 #   SKIP_SERVICE=1  Never touch systemd
+#   FORCE_REBUILD=1 Rebuild even when the installed release is current
 set -euo pipefail
 
 # If invoked via sudo, keep the invoking user's home for LLAMA_DIR defaults.
@@ -25,6 +26,10 @@ LLAMA_DIR="${LLAMA_DIR:-$HOME/llama.cpp}"
 PREFIX="${PREFIX:-/usr/local}"
 SERVICE="${SERVICE:-gguf-switchboard}"
 INSTALLED_BIN="${PREFIX}/bin/llama-server"
+RELEASE_MARKER="${LLAMA_RELEASE_MARKER:-${PREFIX}/share/gguf-switchboard/llama-cpp-release}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=runtime-update-lib.sh
+source "$SCRIPT_DIR/runtime-update-lib.sh"
 
 need() {
   command -v "$1" >/dev/null 2>&1 || {
@@ -37,26 +42,84 @@ service_installed() {
   systemctl cat "${SERVICE}.service" >/dev/null 2>&1
 }
 
-echo "==> Checking CUDA toolchain"
-need nvcc
-need nvidia-smi
-need cmake
 need git
-need nproc
-need readelf
-need ldd
-nvcc --version
-nvidia-smi
 
-echo "==> Updating llama.cpp at ${LLAMA_DIR}"
+echo "==> Checking llama.cpp release at ${LLAMA_DIR}"
 if [[ ! -d "${LLAMA_DIR}/.git" ]]; then
   mkdir -p "$(dirname "$LLAMA_DIR")"
   git clone --depth 1 --single-branch https://github.com/ggml-org/llama.cpp.git "$LLAMA_DIR"
 fi
 cd "$LLAMA_DIR"
+release_check_failed=false
 if [[ "${SKIP_PULL:-0}" != "1" ]]; then
-  git pull --ff-only
+  if ! remote_tags="$(git ls-remote --tags --refs origin 'b[0-9]*')"; then
+    release_check_failed=true
+    latest_release=""
+  else
+    latest_release="$(printf '%s\n' "$remote_tags" | awk -F/ '{ print $3 }' | latest_numbered_llama_tag)"
+  fi
+else
+  latest_release="$(git tag --list 'b[0-9]*' | latest_numbered_llama_tag)"
 fi
+
+runtime_ready=false
+if [[ -x "$INSTALLED_BIN" ]] && "$INSTALLED_BIN" --list-devices >/dev/null 2>&1; then
+  runtime_ready=true
+fi
+
+installed_release=""
+if [[ -r "$RELEASE_MARKER" ]]; then
+  installed_release="$(tr -d '[:space:]' <"$RELEASE_MARKER")"
+elif [[ "$runtime_ready" == "true" ]]; then
+  installed_build="$("$INSTALLED_BIN" --version 2>&1 | sed -nE 's/.*version:[[:space:]]*([0-9]+).*/\1/p' | head -n 1)"
+  [[ -n "$installed_build" ]] && installed_release="b${installed_build}"
+fi
+
+if [[ "$release_check_failed" == "true" ]]; then
+  if [[ "$runtime_ready" == "true" ]]; then
+    echo "WARNING: llama.cpp release check failed; keeping ${installed_release:-installed runtime}." >&2
+    exit 0
+  fi
+  echo "ERROR: llama.cpp release check failed and no working runtime is installed." >&2
+  exit 1
+fi
+
+if [[ -z "$latest_release" ]]; then
+  if [[ "$runtime_ready" == "true" ]]; then
+    echo "WARNING: Could not determine the latest numbered llama.cpp release; keeping ${installed_release:-installed runtime}." >&2
+    exit 0
+  fi
+  echo "ERROR: Could not determine the latest numbered llama.cpp release and no working runtime is installed." >&2
+  exit 1
+fi
+
+if [[ "${FORCE_REBUILD:-0}" != "1" ]] && ! llama_update_required "$installed_release" "$latest_release" "$runtime_ready"; then
+  if [[ ! -r "$RELEASE_MARKER" ]]; then
+    marker_tmp="$(mktemp)"
+    printf '%s\n' "$latest_release" >"$marker_tmp"
+    sudo mkdir -p "$(dirname "$RELEASE_MARKER")"
+    sudo install -o root -g root -m 644 "$marker_tmp" "$RELEASE_MARKER"
+    rm -f "$marker_tmp"
+  fi
+  echo "==> llama.cpp already current ($latest_release); skipping rebuild."
+  exit 0
+fi
+
+echo "==> Updating llama.cpp ${installed_release:-not installed} → $latest_release"
+if ! git rev-parse --verify --quiet "refs/tags/$latest_release" >/dev/null; then
+  git fetch --depth 1 origin "refs/tags/$latest_release:refs/tags/$latest_release"
+fi
+git checkout --detach "$latest_release"
+
+echo "==> Checking CUDA toolchain"
+need nvcc
+need nvidia-smi
+need cmake
+need nproc
+need readelf
+need ldd
+nvcc --version
+nvidia-smi
 
 echo "==> Configuring CUDA build"
 rm -rf build
@@ -112,6 +175,12 @@ fi
 
 echo "==> Verifying installed CUDA backend"
 "$INSTALLED_BIN" --list-devices
+
+marker_tmp="$(mktemp)"
+printf '%s\n' "$latest_release" >"$marker_tmp"
+sudo mkdir -p "$(dirname "$RELEASE_MARKER")"
+sudo install -o root -g root -m 644 "$marker_tmp" "$RELEASE_MARKER"
+rm -f "$marker_tmp"
 
 if [[ "${SKIP_SERVICE:-0}" != "1" ]] && service_installed; then
   echo "==> Starting ${SERVICE}"
