@@ -1686,11 +1686,11 @@ fn resolve_vllm_registry_path(
             return candidate.to_string_lossy().into_owned();
         }
     }
-    if Path::new("models.toml").is_file() {
-        return "models.toml".to_string();
-    }
     if deployed_registry.is_file() {
         return deployed_registry.to_string_lossy().into_owned();
+    }
+    if Path::new("models.toml").is_file() {
+        return "models.toml".to_string();
     }
     if let Ok(content) = std::fs::read_to_string(config_path)
         && let Ok(config) = toml::from_str::<toml::Value>(&content)

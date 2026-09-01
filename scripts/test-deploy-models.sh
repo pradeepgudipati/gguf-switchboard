@@ -308,6 +308,13 @@ grep -q "release_pattern='b\[0-9\]\*'" scripts/update-llama-cpp.sh
 grep -q 'git fetch --depth 1 origin' scripts/update-llama-cpp.sh
 grep -q 'git tag --list "$release_pattern"' scripts/update-llama-cpp.sh
 
+# A deployed install must not inherit stale runtime defaults from a source
+# checkout's generated models.toml.
+registry_resolver="$(sed -n '/^fn resolve_vllm_registry_path(/,/^}/p' src/config/models_cmd.rs)"
+deployed_registry_line="$(grep -n 'if deployed_registry.is_file()' <<<"$registry_resolver" | cut -d: -f1)"
+cwd_registry_line="$(grep -n 'if Path::new("models.toml").is_file()' <<<"$registry_resolver" | cut -d: -f1)"
+test "$deployed_registry_line" -lt "$cwd_registry_line"
+
 # Ordering: stop → build → install binary → enable --now
 stop_line="$(grep -n 'systemctl stop gguf-switchboard' deploy.sh | head -1 | cut -d: -f1)"
 build_line="$(grep -n '^cargo build --release$' deploy.sh | cut -d: -f1)"
