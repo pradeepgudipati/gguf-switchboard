@@ -25,6 +25,7 @@ SERVICE_USER="ggs"
 SERVICE_GROUP="ggs"
 INSTALL_DIR="/opt/gguf-switchboard"
 STATE_DIR="/var/lib/gguf-switchboard"
+VLLM_MODELS_DIR="${STATE_DIR}/vllm-models"
 # Canonical runtime models dir (never $HOME). Capture env override for discover only.
 DISCOVER_MODELS_DIR="${MODELS_DIR:-}"
 MODELS_DIR="${STATE_DIR}/models"
@@ -151,18 +152,19 @@ ensure_system_directories() {
     sudo mkdir -p \
         "$INSTALL_DIR" \
         "$MODELS_DIR" \
+        "$VLLM_MODELS_DIR" \
         "$ETC_DIR"
 
     # STATE_DIR (usage.db): owned by service user, writable by owner only.
     sudo chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$STATE_DIR"
     sudo chmod 755 "$STATE_DIR"
 
-    # MODELS_DIR: shared between service user and deploy user via ggs group.
+    # Model directories: shared between service user and deploy user via ggs group.
     #   2775 = rwxrwsr-x  (setgid ensures new files inherit the ggs group)
     #   664 for files     (group-writable so deploy user can download models)
-    sudo chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$MODELS_DIR"
-    sudo find "$MODELS_DIR" -type d -exec chmod 2775 {} \;
-    sudo find "$MODELS_DIR" -type f -exec chmod 664 {} \;
+    sudo chown -R "${SERVICE_USER}:${SERVICE_GROUP}" "$MODELS_DIR" "$VLLM_MODELS_DIR"
+    sudo find "$MODELS_DIR" "$VLLM_MODELS_DIR" -type d -exec chmod 2775 {} \;
+    sudo find "$MODELS_DIR" "$VLLM_MODELS_DIR" -type f -exec chmod 664 {} \;
 }
 
 # Shared project tree: deploy owner + ggs group (setgid dirs).
@@ -584,6 +586,10 @@ validate_runtime_access() {
         echo "ERROR: $SERVICE_USER cannot write $MODELS_DIR" >&2
         failed=1
     }
+    sudo -u "$SERVICE_USER" test -w "$VLLM_MODELS_DIR" || {
+        echo "ERROR: $SERVICE_USER cannot write $VLLM_MODELS_DIR" >&2
+        failed=1
+    }
     # usage.db parent must be writable for SQLite create/open
     sudo -u "$SERVICE_USER" test -w "$STATE_DIR" || {
         echo "ERROR: $SERVICE_USER cannot write $STATE_DIR (usage.db)" >&2
@@ -594,6 +600,10 @@ validate_runtime_access() {
     if [[ "$DEPLOY_OWNER" != "root" ]] && id "$DEPLOY_OWNER" >/dev/null 2>&1; then
         sudo -u "$DEPLOY_OWNER" test -w "$MODELS_DIR" || {
             echo "WARNING: $DEPLOY_OWNER cannot write $MODELS_DIR (interactive model pulls may fail)" >&2
+            echo "         Run: newgrp $SERVICE_GROUP  (or log out and back in)" >&2
+        }
+        sudo -u "$DEPLOY_OWNER" test -w "$VLLM_MODELS_DIR" || {
+            echo "WARNING: $DEPLOY_OWNER cannot write $VLLM_MODELS_DIR (interactive vLLM pulls may fail)" >&2
             echo "         Run: newgrp $SERVICE_GROUP  (or log out and back in)" >&2
         }
     fi
@@ -630,7 +640,7 @@ print_models_from_status() {
 print_deploy_checklist() {
     local models_ok="✗" db_ok="✗" svc_enabled="✗" svc_active="✗" http_ok="✗" spawn_ok="✗"
     id "$SERVICE_USER" >/dev/null 2>&1 && echo "✓ $SERVICE_USER service account exists" || echo "✗ $SERVICE_USER service account missing"
-    [[ -d "$INSTALL_DIR" && -d "$MODELS_DIR" ]] && echo "✓ shared directories created" || echo "✗ shared directories missing"
+    [[ -d "$INSTALL_DIR" && -d "$MODELS_DIR" && -d "$VLLM_MODELS_DIR" ]] && echo "✓ shared directories created" || echo "✗ shared directories missing"
     [[ -x "$BIN" ]] && echo "✓ binary installed ($BIN)" || echo "✗ binary missing"
     [[ -x "$LLAMA_SERVER" ]] && echo "✓ llama-server detected ($LLAMA_SERVER)" || echo "✗ llama-server missing"
     sudo test -f "$MODELS_FILE" && echo "✓ models registry generated" || echo "✗ models registry missing"
