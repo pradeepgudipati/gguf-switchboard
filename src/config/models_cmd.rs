@@ -1065,12 +1065,21 @@ async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     let repo =
         repo.ok_or("models pull vllm: missing repository id (e.g. Qwen/Qwen2.5-7B-Instruct)")?;
 
-    // 1. Deploy check up front — fail before downloading anything multi-GB.
-    let registry_path_hint = models_file
-        .clone()
-        .unwrap_or_else(|| "models.toml".to_string());
-    let (vllm_command, vllm_project) = if Path::new(&registry_path_hint).is_file() {
-        let existing = ModelsRegistry::load(&registry_path_hint)?;
+    // 1. Resolve the deployed registry before checking vLLM. `ggs` is commonly
+    // invoked from the source checkout, while deploy keeps the live registry in
+    // /opt/gguf-switchboard and points to it from config.toml.
+    let config_path = resolve_config_toml_path();
+    let registry_path = resolve_vllm_registry_path(
+        models_file.as_deref(),
+        dest_override.as_deref(),
+        config_path.as_path(),
+    );
+    let existing_registry = if Path::new(&registry_path).is_file() {
+        Some(ModelsRegistry::load(&registry_path)?)
+    } else {
+        None
+    };
+    let (vllm_command, vllm_project) = if let Some(existing) = existing_registry.as_ref() {
         (
             existing.defaults.vllm_command.clone(),
             existing.defaults.vllm_project.clone(),
@@ -1093,25 +1102,27 @@ async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     // registry rewrite on every re-run of an already-pulled model — wasted
     // work `--force` is what should trigger it again, not running the same
     // command twice.
-    let base_dest = match &dest_override {
-        Some(dir) => PathBuf::from(dir),
-        None => resolve_default_vllm_models_dir()?,
+    let base_dest = match (&dest_override, existing_registry.as_ref()) {
+        (Some(dir), _) => PathBuf::from(dir),
+        (None, Some(existing)) => {
+            let gguf_dir = existing
+                .defaults
+                .models_dir
+                .split(',')
+                .next()
+                .unwrap_or(existing.defaults.models_dir.as_str())
+                .trim();
+            Path::new(gguf_dir)
+                .parent()
+                .map(|parent| parent.join("vllm-models"))
+                .unwrap_or_else(|| PathBuf::from("vllm-models"))
+        }
+        (None, None) => resolve_default_vllm_models_dir()?,
     };
     let dest_dir = base_dest.join(sanitize_repo_dirname(&repo));
     let alias = alias_from_repo(&repo);
-    let registry_path = models_file
-        .clone()
-        .or_else(|| {
-            let candidate = base_dest.join("models.toml");
-            if candidate.is_file() {
-                Some(candidate.to_string_lossy().into_owned())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "models.toml".to_string());
-    let mut registry = if Path::new(&registry_path).is_file() {
-        ModelsRegistry::load(&registry_path)?
+    let mut registry = if let Some(existing) = existing_registry {
+        existing
     } else {
         ModelsRegistry {
             auto_discover: true,
@@ -1659,6 +1670,38 @@ fn resolve_config_toml_path() -> PathBuf {
     PathBuf::from("config.toml")
 }
 
+fn resolve_vllm_registry_path(
+    explicit: Option<&str>,
+    destination: Option<&str>,
+    config_path: &Path,
+) -> String {
+    if let Some(path) = explicit {
+        return path.to_string();
+    }
+    if let Some(destination) = destination {
+        let candidate = Path::new(destination).join("models.toml");
+        if candidate.is_file() {
+            return candidate.to_string_lossy().into_owned();
+        }
+    }
+    if Path::new("models.toml").is_file() {
+        return "models.toml".to_string();
+    }
+    if let Ok(content) = std::fs::read_to_string(config_path)
+        && let Ok(config) = toml::from_str::<toml::Value>(&content)
+        && let Some(path) = config.get("models_file").and_then(toml::Value::as_str)
+    {
+        let path = PathBuf::from(path);
+        let resolved = if path.is_absolute() {
+            path
+        } else {
+            config_path.parent().unwrap_or(Path::new(".")).join(path)
+        };
+        return resolved.to_string_lossy().into_owned();
+    }
+    "models.toml".to_string()
+}
+
 /// Default destination for vLLM safetensors pulls: a `vllm-models` directory
 /// *sibling* to wherever GGUF models live (not nested inside it), so the two
 /// backends' downloads stay clearly separated on disk.
@@ -2166,7 +2209,8 @@ mod tests {
         ModelOption, QuantRecommendation, SearchAssessment, assess_repository, balanced_quant,
         chat_url_from_config, complete_model_options, extract_quant, extract_speed_stats,
         format_hardware_summary, is_standalone_model, is_supported, parse_connections,
-        refresh_url_from_config, render_search_table, sample_pull_command, select_quant_entry,
+        refresh_url_from_config, render_search_table, resolve_vllm_registry_path,
+        sample_pull_command, select_quant_entry,
     };
     use crate::config::hf_download::HfTreeEntry;
     use crate::quant_profile;
@@ -2179,6 +2223,40 @@ mod tests {
             size,
             lfs: None,
         }
+    }
+
+    #[test]
+    fn vllm_registry_resolution_uses_deployed_config_when_cwd_registry_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = dir.path().join("models.toml");
+        std::fs::write(&registry, "version = 1\n").unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!("models_file = \"{}\"\n", registry.display()),
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_vllm_registry_path(None, None, &config),
+            registry.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn vllm_registry_resolution_preserves_dir_sibling_registry() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = dir.path().join("models.toml");
+        std::fs::write(&registry, "version = 1\n").unwrap();
+
+        assert_eq!(
+            resolve_vllm_registry_path(
+                None,
+                dir.path().to_str(),
+                std::path::Path::new("missing.toml"),
+            ),
+            registry.to_string_lossy()
+        );
     }
 
     #[test]
