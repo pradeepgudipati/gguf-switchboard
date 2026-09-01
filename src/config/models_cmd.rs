@@ -1073,6 +1073,7 @@ async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         models_file.as_deref(),
         dest_override.as_deref(),
         config_path.as_path(),
+        Path::new("/opt/gguf-switchboard/models.toml"),
     );
     let existing_registry = if Path::new(&registry_path).is_file() {
         Some(ModelsRegistry::load(&registry_path)?)
@@ -1674,6 +1675,7 @@ fn resolve_vllm_registry_path(
     explicit: Option<&str>,
     destination: Option<&str>,
     config_path: &Path,
+    deployed_registry: &Path,
 ) -> String {
     if let Some(path) = explicit {
         return path.to_string();
@@ -1686,6 +1688,9 @@ fn resolve_vllm_registry_path(
     }
     if Path::new("models.toml").is_file() {
         return "models.toml".to_string();
+    }
+    if deployed_registry.is_file() {
+        return deployed_registry.to_string_lossy().into_owned();
     }
     if let Ok(content) = std::fs::read_to_string(config_path)
         && let Ok(config) = toml::from_str::<toml::Value>(&content)
@@ -2238,7 +2243,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            resolve_vllm_registry_path(None, None, &config),
+            resolve_vllm_registry_path(None, None, &config, std::path::Path::new("missing.toml"),),
             registry.to_string_lossy()
         );
     }
@@ -2254,8 +2259,23 @@ mod tests {
                 None,
                 dir.path().to_str(),
                 std::path::Path::new("missing.toml"),
+                std::path::Path::new("missing-deployed.toml"),
             ),
             registry.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn vllm_registry_resolution_uses_canonical_deployed_registry_before_source_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let deployed_registry = dir.path().join("models.toml");
+        std::fs::write(&deployed_registry, "version = 1\n").unwrap();
+        let source_config = dir.path().join("source-config.toml");
+        std::fs::write(&source_config, "bind = \"127.0.0.1:9090\"\n").unwrap();
+
+        assert_eq!(
+            resolve_vllm_registry_path(None, None, &source_config, &deployed_registry),
+            deployed_registry.to_string_lossy()
         );
     }
 
