@@ -349,7 +349,8 @@ cd ~/gguf-switchboard   # or wherever you cloned
 | Pick up new GGUF files (merge registry) | `./deploy.sh --refresh-models` |
 | Copy legacy `~/models` into system models dir | `./deploy.sh --migrate-models` |
 | Live rescan while running | `curl -X POST http://localhost:9090/v1/models/refresh` (or Swagger **Rescan Models**) |
-| Restart without rebuild | `sudo systemctl restart gguf-switchboard` |
+| Check whether the background service is running | `ggs status` |
+| Restart without rebuild | `ggs restart` |
 
 **Important:**
 
@@ -359,9 +360,11 @@ cd ~/gguf-switchboard   # or wherever you cloned
 - `deploy.sh` leaves the unit stopped when no GGUF or Safetensors models are registered. Pull either format, then re-run deploy with the backend skip flags if no engine update is needed.
 
 ```bash
-# Logs
-sudo systemctl status gguf-switchboard
-sudo journalctl -u gguf-switchboard -f
+# Background service status and logs
+ggs status
+ggs logs
+ggs logs watch
+ggs logs --tail 250
 ```
 
 #### Shell alias (optional)
@@ -388,8 +391,12 @@ After that:
 ggs models search "Qwen3.5"
 ggs models pull lmstudio-community/Qwen3.5-9B-GGUF --quant Q4_K_M
 ggs config.toml
+ggs status    # prints whether the background systemd service is running or stopped
 ggs stop      # sudo systemctl stop gguf-switchboard
 ggs restart   # sudo systemctl restart gguf-switchboard
+ggs logs      # latest 100 journal entries
+ggs logs watch
+ggs logs --tail 250
 ```
 
 #### Troubleshooting first install

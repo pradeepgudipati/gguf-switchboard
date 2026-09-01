@@ -29,8 +29,12 @@ Commands and examples:
   ggs discover-models <models-dir>           Discover local GGUF models
   ggs sync-hf-metadata                       Refresh Hugging Face metadata
   ggs export-registry <models.toml>          Export a registry as JSON
+  ggs status                                 Show whether the system service is running
   ggs stop                                   Stop the system service
   ggs restart                                Restart the system service
+  ggs logs                                   Show the latest 100 service log entries
+  ggs logs watch                             Watch service logs
+  ggs logs --tail 250                        Show the latest 250 service log entries
   ggs <config.toml>                          Start the server with a config file
   ggs help                                   Show this help
 
@@ -43,8 +47,12 @@ Detailed examples:
   ggs discover-models ~/models -o models.toml
   ggs sync-hf-metadata models.toml
   ggs export-registry models.toml -o models.json
+  ggs status
   ggs stop
   ggs restart
+  ggs logs
+  ggs logs watch
+  ggs logs --tail 100
   ggs config.toml
 "#;
 
@@ -121,6 +129,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.len() >= 2 && args[1] == "restart" {
         return run_service_ctl("restart");
+    }
+
+    if args.len() >= 2 && args[1] == "status" {
+        return run_service_status();
+    }
+
+    if args.len() >= 2 && args[1] == "logs" {
+        let command = parse_logs_command(&args[2..])?;
+        return run_service_command(&command);
     }
 
     if let Some(command) = args.get(1)
@@ -237,6 +254,124 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Name of the systemd unit installed by deploy.sh.
 const SERVICE_NAME: &str = "gguf-switchboard";
+
+const LOGS_USAGE: &str = r#"Examples:
+  ggs logs
+  ggs logs watch
+  ggs logs --tail 100"#;
+
+#[derive(Debug, PartialEq, Eq)]
+struct ServiceCommand {
+    program: &'static str,
+    args: Vec<String>,
+}
+
+impl ServiceCommand {
+    #[cfg(any(target_os = "linux", test))]
+    fn command_line_for(&self, is_root: bool) -> Vec<&str> {
+        let command = std::iter::once(self.program)
+            .chain(self.args.iter().map(String::as_str))
+            .collect::<Vec<_>>();
+        if is_root {
+            command
+        } else {
+            std::iter::once("sudo").chain(command).collect()
+        }
+    }
+}
+
+fn parse_logs_command(args: &[String]) -> Result<ServiceCommand, Box<dyn std::error::Error>> {
+    let journal_args = match args {
+        [] => vec!["-u", SERVICE_NAME, "-n", "100", "--no-pager"],
+        [arg] if arg == "watch" => vec!["-u", SERVICE_NAME, "-f"],
+        [flag, value] if flag == "--tail" => {
+            let tail = value
+                .parse::<usize>()
+                .map_err(|_| format!("logs: --tail requires a positive integer\n\n{LOGS_USAGE}"))?;
+            if tail == 0 {
+                return Err(
+                    format!("logs: --tail requires a positive integer\n\n{LOGS_USAGE}").into(),
+                );
+            }
+            vec!["-u", SERVICE_NAME, "-n", value, "--no-pager"]
+        }
+        [flag] if flag == "--tail" => {
+            return Err(format!(
+                "logs: missing value for --tail; expected a positive integer\n\n{LOGS_USAGE}"
+            )
+            .into());
+        }
+        _ => {
+            return Err(format!("logs: invalid arguments\n\n{LOGS_USAGE}").into());
+        }
+    };
+
+    Ok(ServiceCommand {
+        program: "journalctl",
+        args: journal_args.into_iter().map(str::to_string).collect(),
+    })
+}
+
+fn run_service_status() -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err("'status' manages the systemd service and is only supported on Linux".into())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+
+        let status = Command::new("systemctl")
+            .args(["is-active", "--quiet", SERVICE_NAME])
+            .status()
+            .map_err(|error| format!("failed to invoke systemctl: {error}"))?;
+
+        let state = if status.success() {
+            "running"
+        } else {
+            "stopped"
+        };
+        println!("{SERVICE_NAME}: {state}");
+        Ok(())
+    }
+}
+
+fn run_service_command(command: &ServiceCommand) -> Result<(), Box<dyn std::error::Error>> {
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = command;
+        Err("'logs' reads the systemd journal and is only supported on Linux".into())
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        use std::process::Command;
+
+        let command_line = command.command_line_for(nix::unistd::Uid::effective().is_root());
+        let (program, args) = command_line
+            .split_first()
+            .expect("service command must include a program");
+        let status = Command::new(program)
+            .args(args)
+            .status()
+            .map_err(|error| format!("failed to invoke {program}: {error}"))?;
+
+        if !status.success() {
+            return Err(format!(
+                "{} failed (exit {})",
+                command_line.join(" "),
+                status
+                    .code()
+                    .map(|code| code.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            )
+            .into());
+        }
+
+        Ok(())
+    }
+}
 
 /// Handles `stop` / `restart`: shells out to `systemctl` to control the
 /// gguf-switchboard system service, prefixing with `sudo` when not already
@@ -531,4 +666,98 @@ fn is_cli_usage_error(message: &str) -> bool {
                 || message.contains("unknown flag")
                 || message.contains("must be")
                 || message.contains("is required")))
+}
+
+#[cfg(test)]
+mod service_command_tests {
+    use super::*;
+
+    #[test]
+    fn logs_defaults_to_the_latest_hundred_entries() {
+        let command = parse_logs_command(&[]).expect("default logs command should parse");
+        assert_eq!(
+            command.command_line_for(true),
+            [
+                "journalctl",
+                "-u",
+                "gguf-switchboard",
+                "-n",
+                "100",
+                "--no-pager"
+            ]
+        );
+    }
+
+    #[test]
+    fn logs_watch_follows_the_service_journal() {
+        let command =
+            parse_logs_command(&["watch".to_string()]).expect("watch logs command should parse");
+        assert_eq!(
+            command.command_line_for(true),
+            ["journalctl", "-u", "gguf-switchboard", "-f"]
+        );
+    }
+
+    #[test]
+    fn logs_use_sudo_for_non_root_callers() {
+        let command = parse_logs_command(&[]).expect("default logs command should parse");
+        assert_eq!(
+            command.command_line_for(false),
+            [
+                "sudo",
+                "journalctl",
+                "-u",
+                "gguf-switchboard",
+                "-n",
+                "100",
+                "--no-pager"
+            ]
+        );
+        assert_eq!(
+            command.command_line_for(true),
+            [
+                "journalctl",
+                "-u",
+                "gguf-switchboard",
+                "-n",
+                "100",
+                "--no-pager"
+            ]
+        );
+    }
+
+    #[test]
+    fn logs_tail_uses_the_requested_positive_line_count() {
+        let command = parse_logs_command(&["--tail".to_string(), "250".to_string()])
+            .expect("tail logs command should parse");
+        assert_eq!(
+            command.command_line_for(true),
+            [
+                "journalctl",
+                "-u",
+                "gguf-switchboard",
+                "-n",
+                "250",
+                "--no-pager"
+            ]
+        );
+    }
+
+    #[test]
+    fn logs_tail_rejects_missing_zero_non_numeric_and_unknown_arguments() {
+        for args in [
+            vec!["--tail"],
+            vec!["--tail", "0"],
+            vec!["--tail", "abc"],
+            vec!["follow"],
+        ] {
+            let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+            let error = parse_logs_command(&args)
+                .expect_err("invalid logs arguments should be rejected")
+                .to_string();
+            assert!(error.contains("Examples:"), "{error}");
+            assert!(error.contains("ggs logs watch"), "{error}");
+            assert!(error.contains("ggs logs --tail 100"), "{error}");
+        }
+    }
 }
