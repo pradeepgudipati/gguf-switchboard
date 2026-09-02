@@ -2,7 +2,17 @@
 
 > [← Back to README](../README.md)
 
-How gguf-switchboard fits next to Ollama, llama-swap, and related tools.
+How GGUF Switchboard fits next to Ollama, llama-swap, and related tools.
+
+## When to use each tool
+
+| Use case | Recommended tool |
+|----------|------------------|
+| Simple local model use with its own model library and CLI | **Ollama** |
+| Direct, low-level GGUF inference with full control | **llama.cpp** |
+| High-throughput serving of models that fit GPU resources | **vLLM** |
+| On-demand model swapping with any configured backend | **llama-swap** |
+| GGUF and SafeTensors models behind one OpenAI-compatible endpoint with hardware-aware runtime management | **GGUF Switchboard** |
 
 ## Why existing tools fall short
 

@@ -1,0 +1,85 @@
+name: Model Compatibility
+description: Report a model that doesn't work or has issues
+title: "[Model]: "
+labels: ["model-compatibility"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a model compatibility issue! Please provide details about the model and the problem.
+
+  - type: input
+    id: model-name
+    attributes:
+      label: Model Name
+      description: Full model name and repository
+      placeholder: "Qwen/Qwen2.5-7B-Instruct"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: format
+    attributes:
+      label: Model Format
+      options:
+        - GGUF
+        - SafeTensors
+        - Both
+    validations:
+      required: true
+
+  - type: input
+    id: quantization
+    attributes:
+      label: Quantization
+      description: Quantization level (if applicable)
+      placeholder: "Q4_K_M, AWQ, GPTQ, etc."
+    validations:
+      required: false
+
+  - type: input
+    id: model-size
+    attributes:
+      label: Model Size
+      description: Approximate model size
+      placeholder: "7B parameters, 4.5GB"
+    validations:
+      required: false
+
+  - type: textarea
+    id: issue
+    attributes:
+      label: Issue Description
+      description: What's wrong with the model?
+      placeholder: |
+        The model fails to load with error...
+        The model produces incorrect output...
+        The model is missing from search results...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs
+      description: Paste relevant log output
+      render: shell
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: GGUF Switchboard Version
+      placeholder: "0.1.7"
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU
+      description: GPU model and VRAM
+      placeholder: "NVIDIA RTX 4090 24GB"
+    validations:
+      required: false

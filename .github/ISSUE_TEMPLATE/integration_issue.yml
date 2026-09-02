@@ -1,0 +1,71 @@
+name: Integration Issue
+description: Report an issue with a client integration (OpenCode, Cursor, Cline, etc.)
+title: "[Integration]: "
+labels: ["integration"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an integration issue! Please provide details about the client and the problem.
+
+  - type: dropdown
+    id: client
+    attributes:
+      label: Client
+      options:
+        - OpenCode
+        - Cursor
+        - Cline
+        - Continue
+        - OpenAI SDK (Python)
+        - OpenAI SDK (Node.js)
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: client-version
+    attributes:
+      label: Client Version
+      description: Version of the client application
+      placeholder: "OpenCode 1.0.0"
+    validations:
+      required: false
+
+  - type: textarea
+    id: issue
+    attributes:
+      label: Issue Description
+      description: What's wrong with the integration?
+      placeholder: |
+        The client cannot connect to GGUF Switchboard...
+        The client shows an error when sending requests...
+        The client doesn't show available models...
+    validations:
+      required: true
+
+  - type: textarea
+    id: config
+    attributes:
+      label: Client Configuration
+      description: Your client configuration (redact any sensitive information)
+      render: json
+    validations:
+      required: false
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs
+      description: Paste relevant log output from the client or GGUF Switchboard
+      render: shell
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: GGUF Switchboard Version
+      placeholder: "0.1.7"
+    validations:
+      required: true

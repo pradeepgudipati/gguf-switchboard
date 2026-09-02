@@ -1,0 +1,75 @@
+name: Backend Issue
+description: Report an issue with llama.cpp or vLLM backend
+title: "[Backend]: "
+labels: ["backend"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting a backend issue! Please provide details about the backend and the problem.
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      options:
+        - llama.cpp
+        - vLLM
+        - Both
+    validations:
+      required: true
+
+  - type: input
+    id: backend-version
+    attributes:
+      label: Backend Version
+      description: llama.cpp or vLLM version
+      placeholder: "llama.cpp v1.0.0 or vLLM 0.28.0"
+    validations:
+      required: false
+
+  - type: textarea
+    id: issue
+    attributes:
+      label: Issue Description
+      description: What's wrong with the backend?
+      placeholder: |
+        The backend fails to start...
+        The backend crashes during inference...
+        The backend produces incorrect output...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant Logs
+      description: Paste relevant log output
+      render: shell
+    validations:
+      required: false
+
+  - type: input
+    id: version
+    attributes:
+      label: GGUF Switchboard Version
+      placeholder: "0.1.7"
+    validations:
+      required: true
+
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU
+      description: GPU model and VRAM
+      placeholder: "NVIDIA RTX 4090 24GB"
+    validations:
+      required: false
+
+  - type: input
+    id: os
+    attributes:
+      label: Operating System
+      placeholder: "Ubuntu 22.04"
+    validations:
+      required: false
