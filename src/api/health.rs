@@ -26,6 +26,18 @@ pub struct GpuInfo {
     pub temperature_c: u32,
 }
 
+/// Host CPU / RAM telemetry (cached briefly server-side).
+#[derive(Serialize, ToSchema)]
+pub struct HostInfo {
+    /// Aggregate CPU utilization across all logical cores, 0-100.
+    pub cpu_utilization_pct: u32,
+    pub cpu_count: usize,
+    pub memory_total_mb: u64,
+    pub memory_used_mb: u64,
+    /// `memory_used_mb / memory_total_mb`, rounded, 0-100.
+    pub memory_used_pct: u32,
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct HealthResponse {
     pub status: String,
@@ -49,6 +61,8 @@ pub struct StatusResponse {
     /// Per-GPU utilization / memory / temperature. Empty when `nvidia-smi`
     /// is unavailable (non-NVIDIA host or driver not installed).
     pub gpus: Vec<GpuInfo>,
+    /// Host CPU / RAM utilization.
+    pub host: HostInfo,
     /// Timing breakdown of the most recent model load/switch (ms per phase).
     /// The same data is exported to Prometheus as
     /// `gguf_switchboard_model_switch_seconds` / `..._switch_phase_seconds`.
@@ -106,10 +120,20 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> 
     let uptime_secs = state.started_at.elapsed().as_secs();
     let active_requests = state.scheduler.total_active_requests();
 
-    // `nvidia-smi` is a blocking subprocess; keep it off the async worker and
-    // cap fan-out with a short server-side cache.
-    let gpus = tokio::task::spawn_blocking(|| {
-        crate::gpu::probe_all_gpus_cached(Duration::from_millis(2000))
+    // `nvidia-smi` (subprocess) and the sysinfo refresh are both blocking; keep
+    // them off the async worker and cap fan-out with a short server-side cache.
+    let (gpus, host) = tokio::task::spawn_blocking(|| {
+        let host = {
+            let h = crate::sysmon::host_stats_cached(Duration::from_millis(2000));
+            HostInfo {
+                cpu_utilization_pct: h.cpu_util_pct,
+                cpu_count: h.cpu_count,
+                memory_total_mb: h.mem_total_mb,
+                memory_used_mb: h.mem_used_mb,
+                memory_used_pct: h.mem_used_pct,
+            }
+        };
+        let gpus = crate::gpu::probe_all_gpus_cached(Duration::from_millis(2000))
             .into_iter()
             .map(|g| GpuInfo {
                 index: g.index,
@@ -126,10 +150,11 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> 
                 },
                 temperature_c: g.temperature_c,
             })
-            .collect::<Vec<_>>()
+            .collect::<Vec<_>>();
+        (gpus, host)
     })
     .await
-    .unwrap_or_default();
+    .unwrap_or_else(|_| (Vec::new(), default_host_info()));
     let last_switch = state
         .scheduler
         .last_switch()
@@ -146,6 +171,17 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> 
         uptime_secs,
         active_requests,
         gpus,
+        host,
         last_switch,
     })
+}
+
+fn default_host_info() -> HostInfo {
+    HostInfo {
+        cpu_utilization_pct: 0,
+        cpu_count: 0,
+        memory_total_mb: 0,
+        memory_used_mb: 0,
+        memory_used_pct: 0,
+    }
 }

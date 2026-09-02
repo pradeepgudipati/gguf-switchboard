@@ -454,23 +454,44 @@ window.onload = function() {
     return (mb / 1024).toFixed(1);
   }
 
-  function renderGpuStats(gpus) {
-    const host = document.getElementById('gpu-stats');
-    if (!host) return;
-    host.innerHTML = '';
-    if (!gpus || !gpus.length) {
-      host.style.display = 'none';
+  function pressureClass(pct) {
+    return pct >= 90 ? 'gpu-pill-hot' : pct >= 60 ? 'gpu-pill-warm' : 'gpu-pill-cool';
+  }
+
+  function renderGpuStats(status) {
+    const container = document.getElementById('gpu-stats');
+    if (!container) return;
+    container.innerHTML = '';
+
+    const gpus = status && status.gpus;
+    const host = status && status.host;
+    if (!host && (!gpus || !gpus.length)) {
+      container.style.display = 'none';
       return;
     }
-    host.style.display = 'flex';
+    container.style.display = 'flex';
+
+    if (host && host.cpu_count) {
+      const cpu = host.cpu_utilization_pct || 0;
+      const memPct = host.memory_used_pct || 0;
+      const pill = document.createElement('span');
+      pill.className = 'gpu-pill ' + pressureClass(Math.max(cpu, memPct));
+      pill.textContent =
+        'CPU ' + cpu + '% (' + host.cpu_count + ' cores) · RAM ' +
+        fmtGb(host.memory_used_mb) + '/' + fmtGb(host.memory_total_mb) + ' GB (' + memPct + '%)';
+      pill.title =
+        'Host CPU load: ' + cpu + '% across ' + host.cpu_count + ' logical cores\n' +
+        'RAM: ' + host.memory_used_mb + ' MB used / ' + host.memory_total_mb + ' MB total';
+      container.appendChild(pill);
+    }
+
+    if (!gpus || !gpus.length) return;
     gpus.forEach(function(g) {
       const load = g.gpu_utilization_pct || 0;
       const memPct = g.memory_used_pct || 0;
       const pill = document.createElement('span');
-      pill.className = 'gpu-pill';
       // Tint by whichever pressure is higher.
-      const hot = Math.max(load, memPct);
-      pill.classList.add(hot >= 90 ? 'gpu-pill-hot' : hot >= 60 ? 'gpu-pill-warm' : 'gpu-pill-cool');
+      pill.className = 'gpu-pill ' + pressureClass(Math.max(load, memPct));
       pill.textContent =
         'GPU' + g.index + ' · ' + load + '% load · ' +
         fmtGb(g.memory_used_mb) + '/' + fmtGb(g.memory_total_mb) + ' GB (' + memPct + '%)' +
@@ -482,7 +503,7 @@ window.onload = function() {
         'VRAM: ' + g.memory_used_mb + ' MB used / ' + g.memory_total_mb + ' MB total (' +
         g.memory_free_mb + ' MB free)\n' +
         'Temperature: ' + (g.temperature_c || 0) + '°C';
-      host.appendChild(pill);
+      container.appendChild(pill);
     });
   }
 
@@ -491,7 +512,7 @@ window.onload = function() {
       .then(function(r) { return r.json(); })
       .then(function(data) {
         renderStatusBadge(data);
-        renderGpuStats(data && data.gpus);
+        renderGpuStats(data);
       })
       .catch(function(err) {
         console.warn('Failed to poll /status for Swagger UI badge:', err);

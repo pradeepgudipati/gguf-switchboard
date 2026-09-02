@@ -63,6 +63,7 @@ use crate::state::AppState;
         health::HealthResponse,
         health::StatusResponse,
         health::GpuInfo,
+        health::HostInfo,
         crate::types::ModelInfo,
         crate::types::ListModelsResponse,
         crate::types::RuntimeProfileInfo,
