@@ -106,11 +106,24 @@ ggs models pull vllm Qwen/Qwen2.5-7B-Instruct \
 
 When an alias has both source types and no explicit backend pin, startup prefers vLLM if the Safetensors weights fit detected VRAM; otherwise it uses the GGUF source through llama.cpp.
 
+### Model inventory and removal
+
+```bash
+# Numbered inventory of every GGUF file / Safetensors dir under the model dirs,
+# with the registered alias (if any). Add --json for machine output.
+ggs models list
+
+# Delete by alias/name or by the number from `models list` — prompts for
+# confirmation (add --yes to skip), removes the file/dir and the models.toml entry
+ggs models delete qwen3-embedding-4b
+ggs models delete 2 --yes
+```
+
 ## Systemd service
 
 Native install is recommended: the runtime spawns `llama-server` or vLLM as a child and needs direct GPU and model-file access. Plain `./deploy.sh` installs both engines; use `--skip-llama-cpp` or `--skip-vllm` only to retain an existing engine during an update.
 
-**Install or upgrade:** see [Installation](../README.md#installation) and [Updating](../README.md#updating) in the README. Day-to-day:
+**Install or upgrade:** see [Install on Linux](INSTALL-LINUX.md) for deployment and update instructions. Day-to-day:
 
 ```bash
 ggs status
@@ -381,7 +394,13 @@ curl http://localhost:9090/status
 
 # Prometheus metrics
 curl http://localhost:9090/metrics
+
+# NVIDIA processes with the loaded GGUF model name
+./scripts/nvidia-smi-models.sh
+./scripts/nvidia-smi-models.sh --watch 2
 ```
+
+The model-aware NVIDIA view prints the standard `nvidia-smi` dashboard, then adds a process table that joins GPU usage with each process's `-m` or `--model` argument from `/proc`. Run it as the same user as `llama-server`, or with sufficient permission to read that process's command line. Processes whose command line is inaccessible show `-` for the model.
 
 ## SDK Examples
 

@@ -29,10 +29,10 @@
     <!-- Inspect -->
     <section class="tab-panel active" id="panel-inspect">
       <p class="panel-help">
-        Run a chat request and see exactly where the tool call ended up: a proper structured
-        <code>tool_calls</code> entry, a JSON blob the model dumped as plain text, JSON that leaked
-        into <code>reasoning_content</code>, or nothing at all. Body shape matches
-        <code>/v1/chat/completions</code> — paste straight from Swagger.
+        Find out whether a model can actually produce a structured tool call, or whether it cheats by
+        dumping JSON as plain text or leaking it into its reasoning trace. Paste any
+        <code>/v1/chat/completions</code> request body (straight from Swagger works) — the console
+        tells you exactly where the tool call landed, or why it didn't.
       </p>
       <div class="field-row">
         <label for="inspect-model">Model</label>
@@ -55,9 +55,9 @@
     <!-- Resolved Template -->
     <section class="tab-panel" id="panel-template">
       <p class="panel-help">
-        Shows the actual prompt string a model's Jinja chat template resolves to for the given
-        messages/tools — the direct way to catch a broken or missing embedded template (GLM/DeepSeek-
-        style models are the recurring offenders) instead of guessing from garbled output.
+        See the actual prompt string that gets sent to the model after its Jinja chat template runs.
+        Use this when a model produces garbled output — the problem is often a broken or missing
+        embedded chat template, not the model itself. GLM and DeepSeek variants are common offenders.
       </p>
       <div class="field-row">
         <label for="template-model">Model</label>
@@ -80,9 +80,10 @@
     <!-- Battery -->
     <section class="tab-panel" id="panel-battery">
       <p class="panel-help">
-        Runs 4 fixed scenarios against one model — single tool call, parallel tool calls, tool call
-        with reasoning, and a multi-turn tool-result summary — and scores each pass/fail instead of
-        dumping raw JSON.
+        Quickly check whether a model handles the four most common tool-calling patterns. Instead of
+        crafting requests and reading raw JSON, run the battery and get a clear pass/fail table.
+        Covers: a single tool call, parallel calls, reasoning plus a call, and summarizing a tool
+        result. All four must pass.
       </p>
       <div class="field-row">
         <label for="battery-model">Model</label>
@@ -103,9 +104,10 @@
     <!-- Compare -->
     <section class="tab-panel" id="panel-compare">
       <p class="panel-help">
-        Fires the same request (or the same battery case) at two models, one after another. The
-        switchboard holds one model resident at a time, so this is two full model swaps back to
-        back — expect it to take as long as loading each model, not an instant response.
+        Put two models side by side on the exact same task and see which one handles tool calling
+        better. Pick a battery case or write a custom request — the console runs it against both
+        models and shows the results side by side. Useful for comparing quantizations, models of
+        similar size, or before/after a llama.cpp update. Takes two model swaps, so expect a wait.
       </p>
       <div class="field-row two-col">
         <div>
@@ -153,9 +155,10 @@
     <!-- History -->
     <section class="tab-panel" id="panel-history">
       <p class="panel-help">
-        Every Inspect / Resolved Template / Battery / Compare run is recorded to a local
-        <code>conformance.db</code> (SQLite, sibling of the token-usage DB). Click a row to expand
-        the full stored response.
+        Every run from the other tabs is saved here automatically. Track whether a model's tool
+        calling has changed across llama.cpp versions, audit which models have been tested, or find
+        a specific run you want to revisit. Filter by kind or model, click a row to see the full
+        stored response, or clear the history.
       </p>
       <div class="field-row">
         <label for="history-kind">Kind</label>
