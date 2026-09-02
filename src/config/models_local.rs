@@ -465,21 +465,12 @@ pub async fn cmd_delete_local(args: &[String]) -> Result<(), Box<dyn Error>> {
         report_sidecars(&entry.path);
     }
 
-    // Registry cleanup.
-    if let Some((path, mut reg)) = registry {
+    // Registry cleanup. `entry.alias` was resolved during the scan, while the
+    // file still existed, so match on that rather than re-resolving a path that
+    // no longer points at anything.
+    if let (Some((path, mut reg)), Some(alias)) = (registry, entry.alias.clone()) {
         let before = reg.models.len();
-        reg.models.retain(|m| {
-            let resolved_gguf = resolve_model_path(&dirs, &m.file).ok();
-            let resolved_vllm = m
-                .vllm_file
-                .as_deref()
-                .and_then(|f| resolve_model_path(&dirs, f).ok());
-            let matches = [resolved_gguf, resolved_vllm]
-                .into_iter()
-                .flatten()
-                .any(|p| canonical(Path::new(&p)) == canon);
-            !matches
-        });
+        reg.models.retain(|m| !m.alias.eq_ignore_ascii_case(&alias));
         if reg.models.len() != before {
             reg.write(&path)?;
             let json_path = json_sibling(&path);
