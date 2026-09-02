@@ -365,7 +365,6 @@ After starting the runtime, open the interactive API docs in your browser:
 - **Model registry JSON:** http://localhost:9090/v1/models/registry.json
 - **Root redirect:** http://localhost:9090/ → Swagger UI
 
-![Swagger UI with model dropdown](swagger-ui.png)
 
 All endpoints are listed and testable from the Swagger UI — health, models, chat completions, embeddings, usage, and more.
 

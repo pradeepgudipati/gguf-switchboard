@@ -66,7 +66,6 @@ docs/
   COMPARISON.md
   COMPATIBILITY.md
   CONFIGURATION.md
-  swagger-ui.png
   USAGE.md
 releases/
   v0.1.1.md
@@ -153,7 +152,6 @@ models.docker.toml
 models.toml
 precommit.sh
 README.md
-swagger-ui.png
 </directory_structure>
 
 <files>
@@ -1734,8 +1732,6 @@ After starting the runtime, open the interactive API docs in your browser:
 - **OpenAPI spec:** http://localhost:9090/api-docs/openapi.json
 - **Model registry JSON:** http://localhost:9090/v1/models/registry.json
 - **Root redirect:** http://localhost:9090/ → Swagger UI
-
-![Swagger UI with model dropdown](swagger-ui.png)
 
 All endpoints are listed and testable from the Swagger UI — health, models, chat completions, embeddings, usage, and more.
 
