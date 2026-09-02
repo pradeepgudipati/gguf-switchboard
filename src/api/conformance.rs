@@ -23,6 +23,7 @@ use crate::conformance::{ConformanceRunDetail, ConformanceRunSummary};
 use crate::errors::RuntimeError;
 use crate::kind_guard::{CHAT_KINDS, require_kind};
 use crate::sanitize::sanitize_chat_request;
+use crate::scheduler::{RequestGuard, Scheduler};
 use crate::state::AppState;
 use crate::types::chat::{ChatCompletionRequest, ChatCompletionResponse};
 
@@ -35,6 +36,17 @@ struct ConformanceTarget {
     base_url: Option<String>,
     api_key: Option<String>,
     model: Option<String>,
+}
+
+fn conformance_request_guard(
+    scheduler: &Arc<Scheduler>,
+    model_id: &str,
+    target: &ConformanceTarget,
+) -> Option<RequestGuard> {
+    target
+        .base_url
+        .is_none()
+        .then(|| scheduler.track_request(model_id))
 }
 
 fn target_from_headers(headers: &HeaderMap, suffix: &str) -> ConformanceTarget {
@@ -63,7 +75,7 @@ async fn resolve_conformance_backend(
     target: &ConformanceTarget,
     allowed_kinds: &[&str],
     endpoint: &str,
-) -> Result<(Arc<dyn Backend>, String), RuntimeError> {
+) -> Result<(Arc<dyn Backend>, String, Option<RequestGuard>), RuntimeError> {
     if let Some(base) = &target.base_url {
         let model = target
             .model
@@ -72,16 +84,19 @@ async fn resolve_conformance_backend(
             .unwrap_or_else(|| requested_model.to_string());
         let backend: Arc<dyn Backend> =
             Arc::new(ExternalOpenAiBackend::new(base, target.api_key.clone()));
-        return Ok((backend, model));
+        return Ok((backend, model, None));
     }
 
+    // Acquire the guard before waiting for the load lock. A priority-model
+    // switch may already be queued behind this load and must see the request.
+    let request_guard = conformance_request_guard(&state.scheduler, requested_model, target);
     let cfg = state
         .scheduler
         .model_config(requested_model)
         .ok_or_else(|| RuntimeError::ModelNotFound(requested_model.to_string()))?;
     require_kind(requested_model, &cfg, allowed_kinds, endpoint)?;
     let backend = state.scheduler.ensure_loaded(requested_model).await?;
-    Ok((backend, requested_model.to_string()))
+    Ok((backend, requested_model.to_string(), request_guard))
 }
 
 #[derive(Debug, Serialize, ToSchema)]
@@ -128,16 +143,30 @@ pub async fn inspect(
     let mut request = sanitize_chat_request(request);
 
     let target = target_from_headers(&headers, "");
-    let (backend, model_id) = resolve_conformance_backend(
+    let requested_model = request.model.clone();
+    let (backend, model_id, _request_guard) = match resolve_conformance_backend(
         &state,
         &request.model,
         &target,
         CHAT_KINDS,
         "/v1/conformance/inspect",
     )
-    .await?;
+    .await
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            record_error(&state, "inspect", Some(&requested_model), None, &e);
+            return Err(e);
+        }
+    };
     request.model = model_id.clone();
-    let mut raw_response = backend.chat(request).await?;
+    let mut raw_response = match backend.chat(request).await {
+        Ok(r) => r,
+        Err(e) => {
+            record_error(&state, "inspect", Some(&model_id), None, &e);
+            return Err(e);
+        }
+    };
     raw_response.model = model_id.clone();
 
     let classifications: Vec<ToolCallClassification> = raw_response
@@ -150,13 +179,14 @@ pub async fn inspect(
         raw_response,
         classifications,
     };
+    let passed = inspect_classifications_passed(&response.classifications);
     record_run(
         &state,
         "inspect",
         Some(&model_id),
         None,
         &summarize_classifications(&response.classifications),
-        None,
+        Some(passed),
         &response,
     );
     Ok(Json(response))
@@ -212,14 +242,22 @@ pub async fn resolve_template(
     Json(request): Json<ResolveTemplateRequest>,
 ) -> Result<Json<ResolveTemplateResponse>, RuntimeError> {
     let target = target_from_headers(&headers, "");
-    let (backend, model_id) = resolve_conformance_backend(
+    let requested_model = request.model.clone();
+    let (backend, model_id, _request_guard) = match resolve_conformance_backend(
         &state,
         &request.model,
         &target,
         CHAT_KINDS,
         "/v1/conformance/resolve-template",
     )
-    .await?;
+    .await
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            record_error(&state, "resolve_template", Some(&requested_model), None, &e);
+            return Err(e);
+        }
+    };
 
     let body = serde_json::json!({
         "messages": request.messages,
@@ -307,14 +345,22 @@ pub async fn run_battery(
     Path(model_id): Path<String>,
 ) -> Result<Json<BatteryReport>, RuntimeError> {
     let target = target_from_headers(&headers, "");
-    let (backend, model_id) = resolve_conformance_backend(
+    let requested_model = model_id.clone();
+    let (backend, model_id, _request_guard) = match resolve_conformance_backend(
         &state,
         &model_id,
         &target,
         CHAT_KINDS,
         "/v1/conformance/battery",
     )
-    .await?;
+    .await
+    {
+        Ok(pair) => pair,
+        Err(e) => {
+            record_error(&state, "battery", Some(&requested_model), None, &e);
+            return Err(e);
+        }
+    };
     let report = battery::run_battery(&backend, &model_id).await;
 
     let passed = report.cases.iter().filter(|c| c.pass).count();
@@ -416,13 +462,14 @@ pub async fn compare(
         result_a,
         result_b,
     };
+    let passed = compare_passed(&report.result_a, &report.result_b);
     record_run(
         &state,
         "compare",
         Some(&report.model_a),
         Some(&report.model_b),
         &format!("{} vs {}", report.model_a, report.model_b),
-        None,
+        Some(passed),
         &report,
     );
     Ok(Json(report))
@@ -434,7 +481,7 @@ async fn run_one(
     target: &ConformanceTarget,
     request: &CompareRequest,
 ) -> CompareResult {
-    let (backend, model_id) = match resolve_conformance_backend(
+    let (backend, model_id, _request_guard) = match resolve_conformance_backend(
         state,
         model_id,
         target,
@@ -521,6 +568,53 @@ fn record_run<T: Serialize>(
     {
         warn!(error = %e, kind, "failed to persist conformance run to history");
     }
+}
+
+/// Persist a failed conformance run so the History tab shows it as FAIL
+/// instead of the run vanishing on the error path.
+fn record_error(
+    state: &Arc<AppState>,
+    kind: &str,
+    model: Option<&str>,
+    model_b: Option<&str>,
+    err: &RuntimeError,
+) {
+    let msg = err.to_string();
+    record_run(
+        state,
+        kind,
+        model,
+        model_b,
+        &msg,
+        Some(false),
+        &serde_json::json!({ "error": msg }),
+    );
+}
+
+fn inspect_classifications_passed(classifications: &[ToolCallClassification]) -> bool {
+    !classifications.is_empty()
+        && classifications
+            .iter()
+            .all(|c| c.location == ToolCallLocation::StructuredToolCalls)
+}
+
+fn compare_result_passed(result: &CompareResult) -> bool {
+    result.error.is_none()
+        && result
+            .battery_case
+            .as_ref()
+            .map(|case| case.pass)
+            .or_else(|| {
+                result
+                    .inspect
+                    .as_ref()
+                    .map(|inspect| inspect_classifications_passed(&inspect.classifications))
+            })
+            .unwrap_or(false)
+}
+
+fn compare_passed(result_a: &CompareResult, result_b: &CompareResult) -> bool {
+    compare_result_passed(result_a) && compare_result_passed(result_b)
 }
 
 /// One-line summary of where the tool call(s) landed across all choices.
@@ -611,10 +705,7 @@ pub async fn history_get(
     params(("id" = i64, Path, description = "History row id")),
     responses((status = 204, description = "Deleted"), (status = 404, description = "No such run"))
 )]
-pub async fn history_delete(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<i64>,
-) -> StatusCode {
+pub async fn history_delete(State(state): State<Arc<AppState>>, Path(id): Path<i64>) -> StatusCode {
     match state.conformance_history.delete(id) {
         Ok(true) => StatusCode::NO_CONTENT,
         Ok(false) => StatusCode::NOT_FOUND,
@@ -634,4 +725,88 @@ pub async fn history_clear(
 ) -> Result<Json<HistoryClearResponse>, RuntimeError> {
     let deleted = state.conformance_history.clear()?;
     Ok(Json(HistoryClearResponse { deleted }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::conformance::classify::ToolCallLocation;
+    use crate::scheduler::Scheduler;
+
+    fn classification(location: ToolCallLocation) -> ToolCallClassification {
+        ToolCallClassification {
+            location,
+            structured_tool_calls: None,
+            detected_json_snippet: None,
+            content_present: false,
+            reasoning_present: false,
+            notes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn inspect_passes_only_when_all_choices_have_structured_tool_calls() {
+        let structured = vec![classification(ToolCallLocation::StructuredToolCalls)];
+        let mixed = vec![
+            classification(ToolCallLocation::StructuredToolCalls),
+            classification(ToolCallLocation::PlainTextJsonDump),
+        ];
+
+        assert!(inspect_classifications_passed(&structured));
+        assert!(!inspect_classifications_passed(&mixed));
+        assert!(!inspect_classifications_passed(&[]));
+    }
+
+    #[test]
+    fn compare_passes_only_when_both_results_pass() {
+        let passing = CompareResult {
+            model: "model-a".to_string(),
+            inspect: None,
+            battery_case: Some(battery::CaseVerdict {
+                case: battery::BatteryCase::SingleToolCall,
+                pass: true,
+                reason: None,
+                classification: classification(ToolCallLocation::StructuredToolCalls),
+            }),
+            error: None,
+        };
+        let failing = CompareResult {
+            model: "model-b".to_string(),
+            inspect: None,
+            battery_case: None,
+            error: Some("backend failed".to_string()),
+        };
+
+        assert!(compare_passed(&passing, &passing));
+        assert!(!compare_passed(&passing, &failing));
+    }
+
+    #[tokio::test]
+    async fn managed_conformance_guard_tracks_request_until_dropped() {
+        let config: Config = toml::from_str(r#"bind = "127.0.0.1:0""#).expect("config");
+        let scheduler = Arc::new(Scheduler::new(config).await.expect("scheduler"));
+        let target = ConformanceTarget::default();
+
+        let guard = conformance_request_guard(&scheduler, "model-a", &target);
+
+        assert_eq!(scheduler.active_requests_for("model-a"), 1);
+        drop(guard);
+        assert_eq!(scheduler.active_requests_for("model-a"), 0);
+    }
+
+    #[tokio::test]
+    async fn external_conformance_target_is_not_tracked_by_scheduler() {
+        let config: Config = toml::from_str(r#"bind = "127.0.0.1:0""#).expect("config");
+        let scheduler = Arc::new(Scheduler::new(config).await.expect("scheduler"));
+        let target = ConformanceTarget {
+            base_url: Some("https://example.test/v1".to_string()),
+            ..Default::default()
+        };
+
+        let guard = conformance_request_guard(&scheduler, "external-model", &target);
+
+        assert!(guard.is_none());
+        assert_eq!(scheduler.active_requests_for("external-model"), 0);
+    }
 }

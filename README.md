@@ -61,9 +61,15 @@ Name the model you want. GGUF Switchboard selects its registered backend, unload
 
 ## Details
 
-![gguf-switchboard demo](gguf-switchboard-demo.gif)
+![gguf-switchboard demo](docs/assets/gguf-switchboard-demo.gif)
 
-<sub>[▶ Watch with audio](demo.mp4)</sub>
+<sub>[▶ Watch with audio](docs/assets/demo.mp4)</sub>
+
+### Swagger status header
+
+![GGUF Switchboard Swagger header showing the idle priority model and live host and GPU telemetry](docs/assets/gguf-switchboard-header.png)
+
+![GGUF Switchboard Swagger header showing the loaded model, context size, VRAM estimate, and Conformance Console link](docs/assets/gguf-switchboard-header-loaded.png)
 
 ### Where it fits
 

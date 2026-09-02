@@ -7,6 +7,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Request, StatusCode, header};
 use gguf_switchboard::api;
 use gguf_switchboard::config::Config;
+use gguf_switchboard::conformance::ConformanceHistory;
 use gguf_switchboard::db::TokenDb;
 use gguf_switchboard::scheduler::Scheduler;
 use gguf_switchboard::state::AppState;
@@ -22,7 +23,15 @@ async fn response_server() -> (Router, Arc<Scheduler>, FakeLlamaServer, FakeLlam
     let scheduler = Arc::new(Scheduler::new(config.clone()).await.unwrap());
     let database = tempfile::NamedTempFile::new().unwrap();
     let token_db = Arc::new(TokenDb::open(database.path()).unwrap());
-    let state = Arc::new(AppState::new(config, Arc::clone(&scheduler), token_db));
+    let conformance_database = tempfile::NamedTempFile::new().unwrap();
+    let conformance_history =
+        Arc::new(ConformanceHistory::open(conformance_database.path()).unwrap());
+    let state = Arc::new(AppState::new(
+        config,
+        Arc::clone(&scheduler),
+        token_db,
+        conformance_history,
+    ));
     let server = api::create_router(state);
     (server, scheduler, fake_a, fake_b)
 }

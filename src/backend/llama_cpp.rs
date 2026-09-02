@@ -52,6 +52,17 @@ impl LlamaCppBackend {
         }
     }
 
+    /// Server root for llama-server's own (non-OpenAI) endpoints like
+    /// `/props` and `/apply-template`. `backend_url` is the OpenAI-compatible
+    /// base (`http://host:port/v1`); these diagnostics live at the bare root,
+    /// so strip a trailing `/v1`.
+    fn server_root(&self) -> &str {
+        self.config
+            .backend_url
+            .trim_end_matches('/')
+            .trim_end_matches("/v1")
+    }
+
     /// Forward a JSON POST request to the backend and return the raw response.
     async fn forward_json(
         &self,
@@ -394,7 +405,7 @@ impl Backend for LlamaCppBackend {
     /// server was started with `--jinja`). Used by the conformance console,
     /// not part of the OpenAI-compatible surface.
     async fn raw_get(&self, path: &str) -> Result<serde_json::Value, RuntimeError> {
-        let url = format!("{}{path}", self.config.backend_url);
+        let url = format!("{}{path}", self.server_root());
         let response = self
             .client
             .get(&url)
@@ -426,7 +437,25 @@ impl Backend for LlamaCppBackend {
         path: &str,
         body: serde_json::Value,
     ) -> Result<serde_json::Value, RuntimeError> {
-        let response = self.forward_json(path, body).await?;
+        let url = format!("{}{path}", self.server_root());
+        let response = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| RuntimeError::ProxyError(format!("Request to backend failed: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response
+                .text()
+                .await
+                .unwrap_or_else(|_| "<unreadable body>".to_string());
+            return Err(RuntimeError::BackendError(format!(
+                "Backend returned {status}: {text}"
+            )));
+        }
         response
             .json()
             .await
@@ -615,7 +644,27 @@ impl<T: serde::de::DeserializeOwned + Unpin> futures::Stream for SseLineParser<T
 
 #[cfg(test)]
 mod tool_call_normalization_tests {
+    use super::LlamaCppBackend;
+    use crate::config::ModelConfig;
     use serde_json::json;
+
+    #[test]
+    fn diagnostic_endpoints_use_server_root_without_v1_prefix() {
+        let config: ModelConfig = toml::from_str(
+            r#"
+backend = "llama.cpp"
+display_name = "test"
+command = "llama-server"
+args = []
+backend_url = "http://127.0.0.1:8087/v1"
+health_url = "http://127.0.0.1:8087/health"
+"#,
+        )
+        .expect("model config");
+        let backend = LlamaCppBackend::new("test", &config);
+
+        assert_eq!(backend.server_root(), "http://127.0.0.1:8087");
+    }
 
     // This test exercises the exact call shape `chat()` deserializes into
     // `ChatCompletionResponse`, proving normalization must run before
