@@ -452,6 +452,40 @@ EOF
     fi
 }
 
+# Warn about (and optionally fold in) stray models.toml files outside the install
+# dir. `ggs models pull` run from a source checkout or $HOME writes there, and the
+# running service never sees those entries. With --refresh-models we merge them
+# into the canonical registry; otherwise we just point them out.
+check_stray_registries() {
+    local canonical="$MODELS_FILE"
+    local -a candidates=(
+        "${REPO_DIR}/models.toml"
+        "${DEPLOY_OWNER:+/home/${DEPLOY_OWNER}/gguf-switchboard/models.toml}"
+        "${DEPLOY_OWNER:+/home/${DEPLOY_OWNER}/Projects/gguf-switchboard/models.toml}"
+        "${DEPLOY_OWNER:+/home/${DEPLOY_OWNER}/models/models.toml}"
+        "${DISCOVER_MODELS_DIR:+${DISCOVER_MODELS_DIR}/models.toml}"
+    )
+    local canon_real stray_real found=0
+    canon_real="$(readlink -f "$canonical" 2>/dev/null || echo "$canonical")"
+    for stray in "${candidates[@]}"; do
+        [[ -n "$stray" && -f "$stray" ]] || continue
+        stray_real="$(readlink -f "$stray" 2>/dev/null || echo "$stray")"
+        [[ "$stray_real" == "$canon_real" ]] && continue
+        found=1
+        echo "==> Stray registry: $stray (not read by the service)"
+        if [[ "${REFRESH_MODELS:-false}" == "true" ]]; then
+            echo "    Merging its pins into $canonical ..."
+            sudo -u "$SERVICE_USER" "$BIN" discover-models "$MODELS_DIR" \
+                -o "$MODELS_FILE" --merge "$stray" \
+                && sudo mv "$stray" "${stray}.merged-$(date +%Y%m%d%H%M%S)" \
+                && echo "    Merged; original moved aside."
+        fi
+    done
+    if [[ "$found" == "1" && "${REFRESH_MODELS:-false}" != "true" ]]; then
+        echo "    Re-run with --refresh-models to merge these in, or remove them."
+    fi
+}
+
 configure_vllm_defaults() {
     local file="$1"
     [[ -r "$file" ]] || sudo test -r "$file" || return 1
@@ -1079,6 +1113,7 @@ for i in {1..30}; do
         else
             print_models_from_config "$CONFIG_FILE"
         fi
+        check_stray_registries
         echo "==> Checklist:"
         print_deploy_checklist
         if [[ "$REFRESH_MODELS" == "true" ]]; then

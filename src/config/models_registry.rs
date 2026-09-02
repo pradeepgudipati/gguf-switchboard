@@ -1348,6 +1348,33 @@ impl ModelsRegistry {
         Ok(())
     }
 
+    /// Persist an OOM-reduced `ngl` (and optionally `context_size`) back to
+    /// `models.toml` without touching any other fields. Used by the legacy load
+    /// path after a fallback retry succeeds so the next start skips the ladder.
+    /// No-op when the alias is not in the registry.
+    pub fn persist_effective_ngl(
+        models_file: &str,
+        alias: &str,
+        ngl: Option<u32>,
+        context_size: Option<u32>,
+    ) -> Result<(), RuntimeError> {
+        let Some(ngl) = ngl else {
+            return Ok(());
+        };
+        let mut registry = Self::load(models_file)?;
+        let Some(entry) = registry.models.iter_mut().find(|e| e.alias == alias) else {
+            tracing::debug!(alias, "persist_effective_ngl: alias not found; skipping");
+            return Ok(());
+        };
+        entry.ngl = Some(ngl);
+        if let Some(ctx) = context_size {
+            entry.context_size = Some(ctx);
+        }
+        registry.write(models_file)?;
+        tracing::info!(alias, ngl, ?context_size, "Persisted reduced ngl to models registry");
+        Ok(())
+    }
+
     /// Scan configured model directories for `.gguf` files and build a registry with generated aliases.
     #[allow(dead_code)] // thin wrapper; used by tests and as the no-merge discover entry point
     pub fn discover(dirs: &str) -> Result<Self, RuntimeError> {

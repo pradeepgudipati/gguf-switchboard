@@ -1107,7 +1107,7 @@ impl SchedulerInner {
             return self.load_model_with_fit_planner(model_id).await;
         }
 
-        // Legacy path: auto_ngl + context halving.
+        // Legacy path: auto_ngl + on-OOM context/ngl reduction.
         let plan_started = Instant::now();
         self.apply_auto_ngl(model_id).await?;
         metrics::record_phase(
@@ -1115,6 +1115,24 @@ impl SchedulerInner {
             metrics::phase::PLAN,
             plan_started.elapsed().as_secs_f64(),
         );
+
+        // Model layer count (for ngl reduction) plus the pre-fallback profile, so a
+        // profile that only loads after reduction can be persisted to the registry.
+        let (block_count, orig_ctx, orig_ngl) = {
+            let args = self.effective_args(model_id).await?;
+            let block_count = self
+                .models
+                .read()
+                .get(model_id)
+                .and_then(|cfg| cfg.block_count);
+            (
+                block_count,
+                get_context_size(&args),
+                crate::ngl::get_ngl(&args),
+            )
+        };
+        let mut oom_attempts = 0u32;
+        const MAX_OOM_ATTEMPTS: u32 = 12;
 
         loop {
             let backend = self.get_or_create_backend(model_id).await?;
@@ -1131,21 +1149,33 @@ impl SchedulerInner {
                 warn!(model = %model_id, error = %message, "Model load failed");
                 let _ = backend.unload().await;
 
-                if self
-                    .should_reduce_context(model_id, &message, &stderr, current_ctx)
-                    .await?
+                if oom_attempts < MAX_OOM_ATTEMPTS
+                    && self
+                        .try_oom_recovery(
+                            model_id,
+                            &message,
+                            &stderr,
+                            current_ctx,
+                            current_ngl,
+                            block_count,
+                        )
+                        .await?
                 {
+                    oom_attempts += 1;
                     metrics::record_load_attempt(
                         model_id,
                         metrics::result::OOM_RETRY,
                         start.elapsed().as_secs_f64(),
                     );
-                    let next_ctx = get_context_size(&self.effective_args(model_id).await?);
+                    let next = self.effective_args(model_id).await?;
                     warn!(
                         model = %model_id,
-                        from = ?current_ctx,
-                        to = ?next_ctx,
-                        "Retrying model load with reduced context after OOM"
+                        ctx_from = ?current_ctx,
+                        ctx_to = ?get_context_size(&next),
+                        ngl_from = ?current_ngl,
+                        ngl_to = ?crate::ngl::get_ngl(&next),
+                        attempt = oom_attempts,
+                        "Retrying model load with reduced fit after OOM"
                     );
                     continue;
                 }
@@ -1178,6 +1208,10 @@ impl SchedulerInner {
                         elapsed_ms = elapsed.as_millis(),
                         "Model loaded and healthy"
                     );
+                    if oom_attempts > 0 {
+                        self.persist_reduced_profile(model_id, orig_ctx, orig_ngl)
+                            .await;
+                    }
                     return Ok(backend);
                 }
                 Err(e) => {
@@ -1185,21 +1219,33 @@ impl SchedulerInner {
                     let message = e.to_string();
                     warn!(model = %model_id, error = %message, "Model health check failed");
 
-                    if self
-                        .should_reduce_context(model_id, &message, &stderr, current_ctx)
-                        .await?
+                    if oom_attempts < MAX_OOM_ATTEMPTS
+                        && self
+                            .try_oom_recovery(
+                                model_id,
+                                &message,
+                                &stderr,
+                                current_ctx,
+                                current_ngl,
+                                block_count,
+                            )
+                            .await?
                     {
+                        oom_attempts += 1;
                         metrics::record_load_attempt(
                             model_id,
                             metrics::result::OOM_RETRY,
                             start.elapsed().as_secs_f64(),
                         );
-                        let next_ctx = get_context_size(&self.effective_args(model_id).await?);
+                        let next = self.effective_args(model_id).await?;
                         warn!(
                             model = %model_id,
-                            from = ?current_ctx,
-                            to = ?next_ctx,
-                            "Retrying model load with reduced context after OOM"
+                            ctx_from = ?current_ctx,
+                            ctx_to = ?get_context_size(&next),
+                            ngl_from = ?current_ngl,
+                            ngl_to = ?crate::ngl::get_ngl(&next),
+                            attempt = oom_attempts,
+                            "Retrying model load with reduced fit after OOM"
                         );
                         continue;
                     }
@@ -1716,22 +1762,112 @@ impl SchedulerInner {
         Ok(())
     }
 
-    async fn should_reduce_context(
+    /// OOM recovery for the legacy load path. Picks the right lever for the OOM
+    /// sub-kind — context for KV-cache OOM, `-ngl` for weight/generic OOM — and
+    /// falls back to the other lever if the first is exhausted. Mutates
+    /// `runtime_args` in place; returns `true` when a retry-worthy change was made.
+    async fn try_oom_recovery(
         &self,
         model_id: &str,
         message: &str,
         stderr: &str,
         current_ctx: Option<u32>,
+        current_ngl: Option<u32>,
+        block_count: Option<u32>,
     ) -> Result<bool, RuntimeError> {
         let kind = classify_load_failure(message, stderr);
         debug!(?kind, "Classified model load failure");
-        if kind != LoadFailureKind::Oom {
+        if !kind.is_oom() {
             return Ok(false);
         }
-        Ok(self
-            .try_reduce_context(model_id, current_ctx)
-            .await?
-            .is_some())
+        let ctx_first = matches!(kind, LoadFailureKind::GpuOomKvCache);
+        let levers: [bool; 2] = if ctx_first { [true, false] } else { [false, true] };
+        for use_ctx in levers {
+            let changed = if use_ctx {
+                self.try_reduce_context(model_id, current_ctx).await?.is_some()
+            } else {
+                self.try_reduce_ngl(model_id, current_ngl, block_count)
+                    .await?
+                    .is_some()
+            };
+            if changed {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Step `-ngl` down toward CPU offload after a weight-allocation OOM. An unset
+    /// or full-offload value is treated as the model's layer count, so the first
+    /// reduction produces a real partial-offload number. Steps by ~a quarter of
+    /// the layers (min 4), flooring at 0. Returns the new value, or `None` when
+    /// no further reduction is possible.
+    async fn try_reduce_ngl(
+        &self,
+        model_id: &str,
+        current_ngl: Option<u32>,
+        block_count: Option<u32>,
+    ) -> Result<Option<u32>, RuntimeError> {
+        let effective = match (current_ngl, block_count) {
+            (Some(n), Some(l)) => n.min(l),
+            (Some(n), None) => n,
+            (None, Some(l)) => l,
+            (None, None) => return Ok(None),
+        };
+        if effective == 0 {
+            return Ok(None);
+        }
+        let step = block_count
+            .map(|l| (l / 4).max(4))
+            .unwrap_or_else(|| (effective / 4).max(4));
+        let next = effective.saturating_sub(step);
+
+        let args = self.effective_args(model_id).await?;
+        let reduced = with_ngl(&args, next);
+        self.backends.write().await.remove(model_id);
+        self.runtime_args
+            .write()
+            .await
+            .insert(model_id.to_string(), reduced);
+        Ok(Some(next))
+    }
+
+    /// Persist a post-OOM reduced context/ngl back to `models.toml` so the next
+    /// start skips the fallback loop. No-op when the registry path is unknown or
+    /// nothing actually changed.
+    async fn persist_reduced_profile(
+        &self,
+        model_id: &str,
+        orig_ctx: Option<u32>,
+        orig_ngl: Option<u32>,
+    ) {
+        let Some(models_file) = self.config.models_file.clone() else {
+            return;
+        };
+        let Ok(args) = self.effective_args(model_id).await else {
+            return;
+        };
+        let final_ctx = get_context_size(&args);
+        let final_ngl = crate::ngl::get_ngl(&args);
+        if final_ctx == orig_ctx && final_ngl == orig_ngl {
+            return;
+        }
+        match crate::config::ModelsRegistry::persist_effective_ngl(
+            &models_file,
+            model_id,
+            final_ngl,
+            final_ctx,
+        ) {
+            Ok(()) => info!(
+                model = %model_id,
+                ctx = ?final_ctx,
+                ngl = ?final_ngl,
+                "Persisted post-OOM fit profile to registry"
+            ),
+            Err(e) => {
+                warn!(model = %model_id, error = %e, "Failed to persist reduced fit profile")
+            }
+        }
     }
 
     async fn try_reduce_context(

@@ -808,15 +808,31 @@ fn build_fallback_ladder(
                 Some(t) => (Some(t.clone()), Some(t.clone())),
             };
 
-            // Last attempt: try reduced GPU offload if we have layers to spare.
+            // Reduced GPU offload. Triggered on the final attempt always, and
+            // earlier when the weights can't fit VRAM at full offload (the only
+            // fix then is CPU offload). A pinned `ngl` is a starting hint, not a
+            // floor — a pinned value that OOMs is useless, so we still step it
+            // down, computing the target from the real layer count rather than
+            // the (often 999) sentinel.
+            let layers = model.block_count.map(|l| l.max(1));
+            let weights_dont_fit = model.file_size_mb > usable && model.block_count.is_some();
+            let reduce_this_attempt = default_ngl > 1
+                && (plans.len() == max_attempts - 1
+                    || (weights_dont_fit && plans.len() >= max_attempts.saturating_sub(3)));
             let (ngl, split_mode, tensor_split) =
-                if plans.len() == max_attempts - 1 && default_ngl > 1 && !model.ngl_pinned {
-                    let reduced = (default_ngl * 3) / 4; // 75% of layers
+                if reduce_this_attempt {
+                    // Fraction of the layer budget, decreasing monotonically as
+                    // attempts progress (roughly 0.7x → 0.15x by the last rung).
+                    let base = layers.unwrap_or(default_ngl).max(1);
+                    let steps = max_attempts as u32;
+                    let numer = steps.saturating_sub(plans.len() as u32).max(1);
+                    let reduced = (u64::from(base) * u64::from(numer) / u64::from(steps + 1)) as u32;
+                    let reduced = reduced.min(default_ngl.saturating_sub(1)).max(1);
                     let reason_extra = "reduced GPU offload";
                     debug!(
                         ngl = reduced,
                         reason = reason_extra,
-                        "Reducing ngl for final attempt"
+                        "Reducing ngl for fallback attempt"
                     );
                     (
                         reduced,
@@ -1208,6 +1224,29 @@ mod tests {
 
         let plan = planner.current_plan();
         assert_eq!(plan.ngl, 24);
+    }
+
+    #[test]
+    fn pinned_ngl_still_steps_down_on_oom_when_weights_do_not_fit() {
+        // A pinned ngl is a starting hint, not a floor: a large model that OOMs
+        // at full offload must still get reduced-offload fallback rungs.
+        let hw = single_gpu_hardware();
+        let mut model = large_model();
+        model.ngl_pinned = true;
+        model.pinned_ngl = Some(999);
+        let config = FitConfig {
+            max_attempts: 5,
+            ..FitConfig::default()
+        };
+        let planner = FitPlanner::new(hw, model, config);
+
+        let plans = planner.all_plans();
+        assert_eq!(plans[0].ngl, 999, "attempt 1 keeps the pinned value");
+        let min_ngl = plans.iter().map(|p| p.ngl).min().unwrap();
+        assert!(
+            min_ngl < 80,
+            "expected a rung with ngl below the 80-layer count, got min {min_ngl}"
+        );
     }
 
     #[test]

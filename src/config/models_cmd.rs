@@ -888,17 +888,19 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| selected.path.clone());
 
-    let registry_path = models_file
-        .clone()
-        .or_else(|| {
-            let candidate = dest_dir.join("models.toml");
-            if candidate.is_file() {
-                Some(candidate.to_string_lossy().into_owned())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "models.toml".to_string());
+    // Resolve the same way `models pull vllm` does: an explicit --registry wins,
+    // then a models.toml beside the download dir, then the canonical deployed
+    // registry, then config.toml's `models_file`. `ggs` is commonly run from a
+    // source checkout while the running server reads /opt/gguf-switchboard.
+    let config_path = resolve_config_toml_path();
+    let dest_dir_str = dest_dir.to_string_lossy().into_owned();
+    let registry_path = resolve_vllm_registry_path(
+        models_file.as_deref(),
+        Some(dest_dir_str.as_str()),
+        config_path.as_path(),
+        Path::new("/opt/gguf-switchboard/models.toml"),
+    );
+    warn_on_stray_registries(&registry_path, config_path.as_path());
 
     let mut registry = if Path::new(&registry_path).is_file() {
         ModelsRegistry::load(&registry_path)?
@@ -1652,6 +1654,76 @@ fn resolve_default_models_dir() -> Result<PathBuf, RuntimeError> {
 /// path per `deploy.sh` and `gguf-switchboard.service`. Falls back to the
 /// literal `"config.toml"` (today's behavior) so a legitimately custom,
 /// undetectable layout still gets the same error message as before.
+/// The registry path the *running server* actually reads: `models_file` from
+/// config.toml (resolved relative to the config when not absolute), falling back
+/// to the canonical deployed registry.
+fn server_registry_path(config_path: &Path) -> PathBuf {
+    if let Ok(content) = std::fs::read_to_string(config_path)
+        && let Ok(config) = toml::from_str::<toml::Value>(&content)
+        && let Some(path) = config.get("models_file").and_then(toml::Value::as_str)
+    {
+        let path = PathBuf::from(path);
+        return if path.is_absolute() {
+            path
+        } else {
+            config_path.parent().unwrap_or(Path::new(".")).join(path)
+        };
+    }
+    PathBuf::from("/opt/gguf-switchboard/models.toml")
+}
+
+/// Warn when the registry we're about to write is not the one the running server
+/// reads, and list any other stray `models.toml` files found in common spots so
+/// the user can consolidate. Deploy-time consolidation lives in `deploy.sh`.
+fn warn_on_stray_registries(resolved: &str, config_path: &Path) {
+    let canonical = server_registry_path(config_path);
+    let resolved_abs = std::fs::canonicalize(resolved)
+        .unwrap_or_else(|_| PathBuf::from(resolved));
+    let canonical_abs = std::fs::canonicalize(&canonical).unwrap_or_else(|_| canonical.clone());
+
+    if resolved_abs != canonical_abs {
+        eprintln!(
+            "⚠  Writing registry '{resolved}', but the running server reads '{}'.\n   \
+             This model will NOT appear until you consolidate. Re-run from the deploy\n   \
+             directory, or pass --registry '{}'.",
+            canonical.display(),
+            canonical.display(),
+        );
+    }
+
+    let mut strays: Vec<String> = Vec::new();
+    let mut candidates: Vec<PathBuf> = vec![PathBuf::from("models.toml")];
+    if let Ok(home) = std::env::var("HOME") {
+        candidates.push(PathBuf::from(&home).join("gguf-switchboard/models.toml"));
+        candidates.push(PathBuf::from(&home).join("Projects/gguf-switchboard/models.toml"));
+        candidates.push(PathBuf::from(&home).join("models/models.toml"));
+    }
+    for cand in candidates {
+        let Ok(abs) = std::fs::canonicalize(&cand) else {
+            continue;
+        };
+        if abs != canonical_abs && abs != resolved_abs && !strays.contains(&abs.display().to_string())
+        {
+            strays.push(abs.display().to_string());
+        }
+    }
+    if !strays.is_empty() {
+        eprintln!(
+            "⚠  Other stray models.toml files found (not used by the server):\n{}",
+            strays
+                .iter()
+                .map(|s| format!("     {s}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        eprintln!(
+            "   Consolidate with: sudo -u ggs ggs discover-models <models-dir> \
+             -o {} --merge <stray>",
+            canonical.display()
+        );
+    }
+}
+
 fn resolve_config_toml_path() -> PathBuf {
     if let Ok(dir) = std::env::var("GGUF_SWITCHBOARD_CONFIG_DIR") {
         let path = PathBuf::from(dir).join("config.toml");
