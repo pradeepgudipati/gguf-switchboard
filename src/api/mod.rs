@@ -62,6 +62,7 @@ use crate::state::AppState;
     components(schemas(
         health::HealthResponse,
         health::StatusResponse,
+        health::GpuInfo,
         crate::types::ModelInfo,
         crate::types::ListModelsResponse,
         crate::types::RuntimeProfileInfo,

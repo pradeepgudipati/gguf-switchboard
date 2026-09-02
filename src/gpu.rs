@@ -1,15 +1,23 @@
 //! Best-effort free VRAM probe (NVIDIA via nvidia-smi).
 
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tracing::debug;
 
 /// Per-GPU device information from nvidia-smi.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct GpuDeviceInfo {
     pub index: usize,
     pub name: String,
     pub total_mb: u64,
     pub free_mb: u64,
     pub used_mb: u64,
+    /// Compute ("core") utilization percent, 0 when unavailable.
+    pub gpu_util_pct: u32,
+    /// Memory-controller bandwidth utilization percent, 0 when unavailable.
+    pub mem_util_pct: u32,
+    /// Core temperature in Celsius, 0 when unavailable.
+    pub temperature_c: u32,
 }
 
 /// Free VRAM on the first GPU in megabytes, if queryable.
@@ -38,10 +46,31 @@ pub fn probe_all_gpus() -> Vec<GpuDeviceInfo> {
     probe_all_gpus_from_nvidia_smi().unwrap_or_default()
 }
 
+/// Like [`probe_all_gpus`] but memoised for `ttl`, so a burst of `/status`
+/// polls from the Swagger UI does not spawn an `nvidia-smi` per request.
+pub fn probe_all_gpus_cached(ttl: Duration) -> Vec<GpuDeviceInfo> {
+    static CACHE: OnceLock<Mutex<Option<(Instant, Vec<GpuDeviceInfo>)>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(None));
+
+    if let Ok(guard) = cache.lock() {
+        if let Some((at, data)) = guard.as_ref() {
+            if at.elapsed() < ttl {
+                return data.clone();
+            }
+        }
+    }
+    let fresh = probe_all_gpus();
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((Instant::now(), fresh.clone()));
+    }
+    fresh
+}
+
 fn probe_all_gpus_from_nvidia_smi() -> Option<Vec<GpuDeviceInfo>> {
     let output = std::process::Command::new("nvidia-smi")
         .args([
-            "--query-gpu=index,name,memory.total,memory.free,memory.used",
+            "--query-gpu=index,name,memory.total,memory.free,memory.used,\
+             utilization.gpu,utilization.memory,temperature.gpu",
             "--format=csv,noheader,nounits",
         ])
         .output()
@@ -56,8 +85,9 @@ fn probe_all_gpus_from_nvidia_smi() -> Option<Vec<GpuDeviceInfo>> {
 fn parse_nvidia_smi_all_gpus(stdout: &str) -> Option<Vec<GpuDeviceInfo>> {
     let mut gpus = Vec::new();
     for line in stdout.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        // Expected format: "0, NVIDIA GeForce RTX 4090, 24564, 22000, 2564"
-        // Tolerate spaces around commas and extra whitespace.
+        // Expected: "0, NVIDIA GeForce RTX 4090, 24564, 22000, 2564, 37, 12, 54"
+        // Older drivers omit the trailing util/temp columns; tolerate that and
+        // spaces around commas. "[N/A]" tokens parse as 0.
         let parts: Vec<&str> = line.split(',').map(str::trim).collect();
         if parts.len() < 5 {
             continue;
@@ -67,18 +97,30 @@ fn parse_nvidia_smi_all_gpus(stdout: &str) -> Option<Vec<GpuDeviceInfo>> {
         let total_mb = parse_csv_u64(parts[2])?;
         let free_mb = parse_csv_u64(parts[3]).unwrap_or(0);
         let used_mb = parse_csv_u64(parts[4]).unwrap_or(0);
+        let gpu_util_pct = parts.get(5).and_then(|t| parse_csv_pct(t)).unwrap_or(0);
+        let mem_util_pct = parts.get(6).and_then(|t| parse_csv_pct(t)).unwrap_or(0);
+        let temperature_c = parts.get(7).and_then(|t| parse_csv_pct(t)).unwrap_or(0);
         gpus.push(GpuDeviceInfo {
             index,
             name,
             total_mb,
             free_mb,
             used_mb,
+            gpu_util_pct,
+            mem_util_pct,
+            temperature_c,
         });
     }
     if gpus.is_empty() {
         return None;
     }
     Some(gpus)
+}
+
+/// Parse a non-negative integer token (utilization / temperature). Unlike
+/// [`parse_csv_u64`] a value of `0` is valid; `[N/A]` and junk yield `None`.
+fn parse_csv_pct(token: &str) -> Option<u32> {
+    token.split_whitespace().next()?.parse::<u32>().ok()
 }
 
 /// Parse a single CSV token that may contain trailing units (e.g. "24564 MiB" → 24564).
@@ -198,6 +240,30 @@ mod tests {
         assert_eq!(gpus[0].index, 0);
         assert_eq!(gpus[1].index, 1);
         assert_eq!(gpus[1].free_mb, 11000);
+    }
+
+    #[test]
+    fn parse_all_gpus_reads_utilization_and_temp() {
+        let stdout = "0, RTX 4090, 24564, 12000, 12564, 87, 41, 63\n";
+        let gpus = parse_nvidia_smi_all_gpus(stdout).unwrap();
+        assert_eq!(gpus[0].gpu_util_pct, 87);
+        assert_eq!(gpus[0].mem_util_pct, 41);
+        assert_eq!(gpus[0].temperature_c, 63);
+    }
+
+    #[test]
+    fn parse_all_gpus_tolerates_missing_util_columns() {
+        let stdout = "0, RTX 4090, 24564, 22000, 2564\n";
+        let gpus = parse_nvidia_smi_all_gpus(stdout).unwrap();
+        assert_eq!(gpus[0].gpu_util_pct, 0);
+        assert_eq!(gpus[0].temperature_c, 0);
+    }
+
+    #[test]
+    fn parse_all_gpus_na_utilization_is_zero() {
+        let stdout = "0, RTX 4090, 24564, 22000, 2564, [N/A], [N/A], [N/A]\n";
+        let gpus = parse_nvidia_smi_all_gpus(stdout).unwrap();
+        assert_eq!(gpus[0].gpu_util_pct, 0);
     }
 
     #[test]

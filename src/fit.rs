@@ -1065,6 +1065,7 @@ mod tests {
             total_mb: total,
             free_mb: free,
             used_mb: total - free,
+            ..Default::default()
         }
     }
 
@@ -1088,6 +1089,7 @@ mod tests {
                     total_mb: 24564,
                     free_mb: 22000,
                     used_mb: 2564,
+                    ..Default::default()
                 },
             ],
             total_vram_mb: 49128,
@@ -1299,6 +1301,7 @@ mod tests {
                 total_mb: 24564,
                 free_mb: 22000,
                 used_mb: 2564,
+                ..Default::default()
             },
         ];
         let fp = compute_hardware_fingerprint(&gpus, 49128);

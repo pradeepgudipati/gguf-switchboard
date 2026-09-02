@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::Json;
 use axum::extract::State;
@@ -6,6 +7,24 @@ use serde::Serialize;
 use utoipa::ToSchema;
 
 use crate::state::AppState;
+
+/// Per-GPU telemetry sampled from `nvidia-smi` (cached briefly server-side).
+#[derive(Serialize, ToSchema)]
+pub struct GpuInfo {
+    pub index: usize,
+    pub name: String,
+    /// Compute / core utilization ("load"), 0-100.
+    pub gpu_utilization_pct: u32,
+    /// Memory-controller bandwidth utilization, 0-100.
+    pub memory_utilization_pct: u32,
+    pub memory_total_mb: u64,
+    pub memory_used_mb: u64,
+    pub memory_free_mb: u64,
+    /// `memory_used_mb / memory_total_mb`, rounded, 0-100.
+    pub memory_used_pct: u32,
+    /// Core temperature in Celsius (0 when the driver does not report it).
+    pub temperature_c: u32,
+}
 
 #[derive(Serialize, ToSchema)]
 pub struct HealthResponse {
@@ -27,6 +46,9 @@ pub struct StatusResponse {
     /// In-flight requests across all models right now (backs the "processing"
     /// indicator on the Swagger UI badge). 0 means the loaded model is idle.
     pub active_requests: u32,
+    /// Per-GPU utilization / memory / temperature. Empty when `nvidia-smi`
+    /// is unavailable (non-NVIDIA host or driver not installed).
+    pub gpus: Vec<GpuInfo>,
     /// Timing breakdown of the most recent model load/switch (ms per phase).
     /// The same data is exported to Prometheus as
     /// `gguf_switchboard_model_switch_seconds` / `..._switch_phase_seconds`.
@@ -83,6 +105,31 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> 
 
     let uptime_secs = state.started_at.elapsed().as_secs();
     let active_requests = state.scheduler.total_active_requests();
+
+    // `nvidia-smi` is a blocking subprocess; keep it off the async worker and
+    // cap fan-out with a short server-side cache.
+    let gpus = tokio::task::spawn_blocking(|| {
+        crate::gpu::probe_all_gpus_cached(Duration::from_millis(2000))
+            .into_iter()
+            .map(|g| GpuInfo {
+                index: g.index,
+                name: g.name,
+                gpu_utilization_pct: g.gpu_util_pct,
+                memory_utilization_pct: g.mem_util_pct,
+                memory_total_mb: g.total_mb,
+                memory_used_mb: g.used_mb,
+                memory_free_mb: g.free_mb,
+                memory_used_pct: if g.total_mb > 0 {
+                    ((g.used_mb as f64 / g.total_mb as f64) * 100.0).round() as u32
+                } else {
+                    0
+                },
+                temperature_c: g.temperature_c,
+            })
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default();
     let last_switch = state
         .scheduler
         .last_switch()
@@ -98,6 +145,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> 
         configured_models: models,
         uptime_secs,
         active_requests,
+        gpus,
         last_switch,
     })
 }

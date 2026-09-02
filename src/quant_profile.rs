@@ -421,6 +421,7 @@ mod tests {
             total_mb: free_mb,
             free_mb,
             used_mb: 0,
+            ..Default::default()
         }
     }
 

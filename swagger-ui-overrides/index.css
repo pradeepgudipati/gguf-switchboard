@@ -58,6 +58,67 @@
   white-space: nowrap;
 }
 
+.gpu-stats {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding-right: 10px;
+  border-right: 1px solid rgba(255, 255, 255, 0.25);
+}
+
+.gpu-pill {
+  font-size: 12px;
+  font-weight: 600;
+  color: #fff;
+  padding: 3px 8px;
+  border-radius: 999px;
+  white-space: nowrap;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.gpu-pill-cool {
+  background: rgba(73, 204, 144, 0.25);
+  border-color: rgba(73, 204, 144, 0.5);
+}
+
+.gpu-pill-warm {
+  background: rgba(245, 166, 35, 0.25);
+  border-color: rgba(245, 166, 35, 0.55);
+}
+
+.gpu-pill-hot {
+  background: rgba(249, 62, 62, 0.3);
+  border-color: rgba(249, 62, 62, 0.6);
+}
+
+.ggs-brand {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+
+.ggs-brand-mark {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: 0.5px;
+  color: #fff;
+  background: #49cc90;
+  padding: 2px 8px;
+  border-radius: 5px;
+}
+
+.ggs-brand-word {
+  font-size: 20px;
+  font-weight: 600;
+  color: #49cc90;
+}
+
+.topbar a.link {
+  cursor: default;
+}
+
 .model-selector-bar label {
   color: #fff;
   font-size: 13px;

@@ -450,16 +450,57 @@ window.onload = function() {
       : 'Status unavailable';
   }
 
+  function fmtGb(mb) {
+    return (mb / 1024).toFixed(1);
+  }
+
+  function renderGpuStats(gpus) {
+    const host = document.getElementById('gpu-stats');
+    if (!host) return;
+    host.innerHTML = '';
+    if (!gpus || !gpus.length) {
+      host.style.display = 'none';
+      return;
+    }
+    host.style.display = 'flex';
+    gpus.forEach(function(g) {
+      const load = g.gpu_utilization_pct || 0;
+      const memPct = g.memory_used_pct || 0;
+      const pill = document.createElement('span');
+      pill.className = 'gpu-pill';
+      // Tint by whichever pressure is higher.
+      const hot = Math.max(load, memPct);
+      pill.classList.add(hot >= 90 ? 'gpu-pill-hot' : hot >= 60 ? 'gpu-pill-warm' : 'gpu-pill-cool');
+      pill.textContent =
+        'GPU' + g.index + ' · ' + load + '% load · ' +
+        fmtGb(g.memory_used_mb) + '/' + fmtGb(g.memory_total_mb) + ' GB (' + memPct + '%)' +
+        (g.temperature_c ? ' · ' + g.temperature_c + '°C' : '');
+      pill.title =
+        g.name + '\n' +
+        'Core load: ' + load + '%\n' +
+        'Memory bandwidth: ' + (g.memory_utilization_pct || 0) + '%\n' +
+        'VRAM: ' + g.memory_used_mb + ' MB used / ' + g.memory_total_mb + ' MB total (' +
+        g.memory_free_mb + ' MB free)\n' +
+        'Temperature: ' + (g.temperature_c || 0) + '°C';
+      host.appendChild(pill);
+    });
+  }
+
   function pollStatus() {
     fetch('/status')
       .then(function(r) { return r.json(); })
-      .then(function(data) { renderStatusBadge(data); })
+      .then(function(data) {
+        renderStatusBadge(data);
+        renderGpuStats(data && data.gpus);
+      })
       .catch(function(err) {
         console.warn('Failed to poll /status for Swagger UI badge:', err);
         const badge = document.getElementById('model-status-badge');
-        if (!badge) return;
-        badge.querySelector('.status-dot').className = 'status-dot status-dot-gray';
-        badge.querySelector('.status-label').textContent = 'Status unavailable';
+        if (badge) {
+          badge.querySelector('.status-dot').className = 'status-dot status-dot-gray';
+          badge.querySelector('.status-label').textContent = 'Status unavailable';
+        }
+        renderGpuStats(null);
       });
   }
 
@@ -484,6 +525,12 @@ window.onload = function() {
     badge.appendChild(label);
     bar.appendChild(badge);
 
+    const gpuStats = document.createElement('span');
+    gpuStats.id = 'gpu-stats';
+    gpuStats.className = 'gpu-stats';
+    gpuStats.style.display = 'none';
+    bar.appendChild(gpuStats);
+
     if (statusPollHandle) {
       pollStatus();
     } else {
@@ -492,12 +539,36 @@ window.onload = function() {
     }
   }
 
+  // Swap Swagger UI's stock logo/link in the top bar for GGUF Switchboard
+  // branding. Safe to call repeatedly (guarded by a data attribute).
+  function applyBranding(wrapper) {
+    document.title = 'GGUF Switchboard — API console';
+    const link = wrapper.querySelector('a.link');
+    if (!link || link.dataset.ggsBranded) return;
+    link.dataset.ggsBranded = '1';
+    link.removeAttribute('href');
+    link.textContent = '';
+    const brand = document.createElement('span');
+    brand.className = 'ggs-brand';
+    const mark = document.createElement('span');
+    mark.className = 'ggs-brand-mark';
+    mark.textContent = 'GGUF';
+    const word = document.createElement('span');
+    word.className = 'ggs-brand-word';
+    word.textContent = 'Switchboard';
+    brand.appendChild(mark);
+    brand.appendChild(word);
+    link.appendChild(brand);
+  }
+
   function injectModelSelector(models) {
     if (document.getElementById('global-model-select')) return;
     allModels = models;
 
     const wrapper = document.querySelector('.topbar-wrapper');
     if (!wrapper) return;
+
+    applyBranding(wrapper);
 
     const bar = document.createElement('div');
     bar.className = 'model-selector-bar';
