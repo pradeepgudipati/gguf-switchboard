@@ -10,11 +10,13 @@ use std::sync::Arc;
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use serde::{Deserialize, Serialize};
 use tracing::{instrument, warn};
 use utoipa::ToSchema;
 
+use crate::backend::Backend;
+use crate::backend::external_openai::ExternalOpenAiBackend;
 use crate::conformance::battery::{self, BatteryReport};
 use crate::conformance::classify::{self, ToolCallClassification, ToolCallLocation};
 use crate::conformance::{ConformanceRunDetail, ConformanceRunSummary};
@@ -23,6 +25,64 @@ use crate::kind_guard::{CHAT_KINDS, require_kind};
 use crate::sanitize::sanitize_chat_request;
 use crate::state::AppState;
 use crate::types::chat::{ChatCompletionRequest, ChatCompletionResponse};
+
+/// Per-request "run this against something other than a managed model" target
+/// for the conformance console. Read from `X-Conformance-*` headers (optionally
+/// with an `-a` / `-b` suffix for Compare) so no endpoint URL or API key ever
+/// touches a request body, a log line, or the history DB.
+#[derive(Default)]
+struct ConformanceTarget {
+    base_url: Option<String>,
+    api_key: Option<String>,
+    model: Option<String>,
+}
+
+fn target_from_headers(headers: &HeaderMap, suffix: &str) -> ConformanceTarget {
+    let get = |name: String| -> Option<String> {
+        headers
+            .get(&name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    };
+    ConformanceTarget {
+        base_url: get(format!("x-conformance-base-url{suffix}")),
+        api_key: get(format!("x-conformance-api-key{suffix}")),
+        model: get(format!("x-conformance-model{suffix}")),
+    }
+}
+
+/// Resolve the backend to run a conformance case against: either an external
+/// OpenAI-compatible endpoint (when `target` carries a base URL) or the
+/// switchboard-managed model named by `requested_model`. Returns the backend
+/// plus the effective model id to send / record.
+async fn resolve_conformance_backend(
+    state: &Arc<AppState>,
+    requested_model: &str,
+    target: &ConformanceTarget,
+    allowed_kinds: &[&str],
+    endpoint: &str,
+) -> Result<(Arc<dyn Backend>, String), RuntimeError> {
+    if let Some(base) = &target.base_url {
+        let model = target
+            .model
+            .clone()
+            .filter(|m| !m.is_empty())
+            .unwrap_or_else(|| requested_model.to_string());
+        let backend: Arc<dyn Backend> =
+            Arc::new(ExternalOpenAiBackend::new(base, target.api_key.clone()));
+        return Ok((backend, model));
+    }
+
+    let cfg = state
+        .scheduler
+        .model_config(requested_model)
+        .ok_or_else(|| RuntimeError::ModelNotFound(requested_model.to_string()))?;
+    require_kind(requested_model, &cfg, allowed_kinds, endpoint)?;
+    let backend = state.scheduler.ensure_loaded(requested_model).await?;
+    Ok((backend, requested_model.to_string()))
+}
 
 #[derive(Debug, Serialize, ToSchema)]
 pub struct InspectResponse {
@@ -58,22 +118,25 @@ pub struct InspectResponse {
         (status = 502, description = "Backend error")
     )
 )]
-#[instrument(skip(state, request), fields(model = %request.model))]
+#[instrument(skip(state, request, headers), fields(model = %request.model))]
 pub async fn inspect(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(mut request): Json<ChatCompletionRequest>,
 ) -> Result<Json<InspectResponse>, RuntimeError> {
     request.stream = Some(false);
-    let request = sanitize_chat_request(request);
+    let mut request = sanitize_chat_request(request);
 
-    let cfg = state
-        .scheduler
-        .model_config(&request.model)
-        .ok_or_else(|| RuntimeError::ModelNotFound(request.model.clone()))?;
-    require_kind(&request.model, &cfg, CHAT_KINDS, "/v1/conformance/inspect")?;
-
-    let backend = state.scheduler.ensure_loaded(&request.model).await?;
-    let model_id = request.model.clone();
+    let target = target_from_headers(&headers, "");
+    let (backend, model_id) = resolve_conformance_backend(
+        &state,
+        &request.model,
+        &target,
+        CHAT_KINDS,
+        "/v1/conformance/inspect",
+    )
+    .await?;
+    request.model = model_id.clone();
     let mut raw_response = backend.chat(request).await?;
     raw_response.model = model_id.clone();
 
@@ -142,16 +205,21 @@ pub struct ResolveTemplateResponse {
         (status = 404, description = "Model not found"),
     )
 )]
-#[instrument(skip(state, request), fields(model = %request.model))]
+#[instrument(skip(state, request, headers), fields(model = %request.model))]
 pub async fn resolve_template(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(request): Json<ResolveTemplateRequest>,
 ) -> Result<Json<ResolveTemplateResponse>, RuntimeError> {
-    state
-        .scheduler
-        .model_config(&request.model)
-        .ok_or_else(|| RuntimeError::ModelNotFound(request.model.clone()))?;
-    let backend = state.scheduler.ensure_loaded(&request.model).await?;
+    let target = target_from_headers(&headers, "");
+    let (backend, model_id) = resolve_conformance_backend(
+        &state,
+        &request.model,
+        &target,
+        CHAT_KINDS,
+        "/v1/conformance/resolve-template",
+    )
+    .await?;
 
     let body = serde_json::json!({
         "messages": request.messages,
@@ -209,7 +277,7 @@ pub async fn resolve_template(
     record_run(
         &state,
         "resolve_template",
-        Some(&request.model),
+        Some(&model_id),
         None,
         summary,
         Some(response.resolved),
@@ -232,16 +300,21 @@ pub async fn resolve_template(
         (status = 404, description = "Model not found"),
     )
 )]
-#[instrument(skip(state), fields(model = %model_id))]
+#[instrument(skip(state, headers), fields(model = %model_id))]
 pub async fn run_battery(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Path(model_id): Path<String>,
 ) -> Result<Json<BatteryReport>, RuntimeError> {
-    state
-        .scheduler
-        .model_config(&model_id)
-        .ok_or_else(|| RuntimeError::ModelNotFound(model_id.clone()))?;
-    let backend = state.scheduler.ensure_loaded(&model_id).await?;
+    let target = target_from_headers(&headers, "");
+    let (backend, model_id) = resolve_conformance_backend(
+        &state,
+        &model_id,
+        &target,
+        CHAT_KINDS,
+        "/v1/conformance/battery",
+    )
+    .await?;
     let report = battery::run_battery(&backend, &model_id).await;
 
     let passed = report.cases.iter().filter(|c| c.pass).count();
@@ -311,9 +384,10 @@ pub struct CompareReport {
         (status = 404, description = "Model not found"),
     )
 )]
-#[instrument(skip(state, request), fields(model_a = %request.model_a, model_b = %request.model_b))]
+#[instrument(skip(state, request, headers), fields(model_a = %request.model_a, model_b = %request.model_b))]
 pub async fn compare(
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(request): Json<CompareRequest>,
 ) -> Result<Json<CompareReport>, RuntimeError> {
     match request.mode {
@@ -330,39 +404,46 @@ pub async fn compare(
         _ => {}
     }
 
-    let result_a = run_one(&state, &request.model_a, &request).await;
-    let result_b = run_one(&state, &request.model_b, &request).await;
+    let target_a = target_from_headers(&headers, "-a");
+    let target_b = target_from_headers(&headers, "-b");
+
+    let result_a = run_one(&state, &request.model_a, &target_a, &request).await;
+    let result_b = run_one(&state, &request.model_b, &target_b, &request).await;
 
     let report = CompareReport {
-        model_a: request.model_a.clone(),
-        model_b: request.model_b.clone(),
+        model_a: result_a.model.clone(),
+        model_b: result_b.model.clone(),
         result_a,
         result_b,
     };
     record_run(
         &state,
         "compare",
-        Some(&request.model_a),
-        Some(&request.model_b),
-        &format!("{} vs {}", request.model_a, request.model_b),
+        Some(&report.model_a),
+        Some(&report.model_b),
+        &format!("{} vs {}", report.model_a, report.model_b),
         None,
         &report,
     );
     Ok(Json(report))
 }
 
-async fn run_one(state: &Arc<AppState>, model_id: &str, request: &CompareRequest) -> CompareResult {
-    if state.scheduler.model_config(model_id).is_none() {
-        return CompareResult {
-            model: model_id.to_string(),
-            inspect: None,
-            battery_case: None,
-            error: Some("model not found".to_string()),
-        };
-    }
-
-    let backend = match state.scheduler.ensure_loaded(model_id).await {
-        Ok(backend) => backend,
+async fn run_one(
+    state: &Arc<AppState>,
+    model_id: &str,
+    target: &ConformanceTarget,
+    request: &CompareRequest,
+) -> CompareResult {
+    let (backend, model_id) = match resolve_conformance_backend(
+        state,
+        model_id,
+        target,
+        CHAT_KINDS,
+        "/v1/conformance/compare",
+    )
+    .await
+    {
+        Ok(pair) => pair,
         Err(e) => {
             return CompareResult {
                 model: model_id.to_string(),
@@ -372,6 +453,7 @@ async fn run_one(state: &Arc<AppState>, model_id: &str, request: &CompareRequest
             };
         }
     };
+    let model_id = model_id.as_str();
 
     match request.mode {
         CompareMode::BatteryCase => {

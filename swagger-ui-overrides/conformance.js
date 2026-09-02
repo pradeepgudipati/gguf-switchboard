@@ -112,10 +112,14 @@
     el.classList.toggle('error', !!isError);
   }
 
-  async function postJson(path, body) {
+  async function postJson(path, body, extraHeaders) {
+    var headers = { 'Content-Type': 'application/json' };
+    if (extraHeaders) {
+      Object.keys(extraHeaders).forEach(function (k) { headers[k] = extraHeaders[k]; });
+    }
     var res = await fetch(path, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: headers,
       body: JSON.stringify(body)
     });
     var text = await res.text();
@@ -247,13 +251,25 @@
 
   function initInspectTab() {
     $('inspect-body').value = JSON.stringify(defaultInspectBody(), null, 2);
+    var tgt = makeTargetWidget('inspect', 'Target');
+    $('inspect-target').appendChild(tgt.el);
+    var recent = mountRecentRuns($('inspect-recent-body'), 'inspect');
+    onTabActivated('inspect', recent.refresh);
 
     $('inspect-run').addEventListener('click', async function () {
       var statusEl = $('inspect-status');
       var resultEl = $('inspect-result');
-      var model = $('inspect-model').value;
+      var target, headers;
+      try {
+        target = tgt.getTarget();
+        headers = targetHeaders(target);
+      } catch (e) {
+        setStatus(statusEl, e.message, true);
+        return;
+      }
+      var model = (target && target.model) || $('inspect-model').value;
       if (!model) {
-        setStatus(statusEl, 'Select a model first.', true);
+        setStatus(statusEl, target ? 'Enter the model name for the custom endpoint.' : 'Select a model first.', true);
         return;
       }
       var body;
@@ -270,9 +286,10 @@
       setStatus(statusEl, 'Running…');
       resultEl.innerHTML = '';
       try {
-        var data = await postJson('/v1/conformance/inspect', body);
+        var data = await postJson('/v1/conformance/inspect', body, headers);
         setStatus(statusEl, 'Done.');
         renderInspectResult(resultEl, data);
+        recent.refresh();
       } catch (e) {
         setStatus(statusEl, e.message, true);
       } finally {
@@ -340,13 +357,25 @@
 
   function initTemplateTab() {
     $('template-body').value = JSON.stringify(defaultTemplateBody(), null, 2);
+    var tgt = makeTargetWidget('template', 'Target');
+    $('template-target').appendChild(tgt.el);
+    var recent = mountRecentRuns($('template-recent-body'), 'resolve_template');
+    onTabActivated('template', recent.refresh);
 
     $('template-run').addEventListener('click', async function () {
       var statusEl = $('template-status');
       var resultEl = $('template-result');
-      var model = $('template-model').value;
+      var target, headers;
+      try {
+        target = tgt.getTarget();
+        headers = targetHeaders(target);
+      } catch (e) {
+        setStatus(statusEl, e.message, true);
+        return;
+      }
+      var model = (target && target.model) || $('template-model').value;
       if (!model) {
-        setStatus(statusEl, 'Select a model first.', true);
+        setStatus(statusEl, target ? 'Enter the model name for the custom endpoint.' : 'Select a model first.', true);
         return;
       }
       var body;
@@ -363,9 +392,10 @@
       setStatus(statusEl, 'Resolving…');
       resultEl.innerHTML = '';
       try {
-        var data = await postJson('/v1/conformance/resolve-template', body);
+        var data = await postJson('/v1/conformance/resolve-template', body, headers);
         setStatus(statusEl, data.resolved ? 'Resolved.' : 'Fallback (see below).');
         renderTemplateResult(resultEl, data);
+        recent.refresh();
       } catch (e) {
         setStatus(statusEl, e.message, true);
       } finally {
@@ -420,12 +450,25 @@
   }
 
   function initBatteryTab() {
+    var tgt = makeTargetWidget('battery', 'Target');
+    $('battery-target').appendChild(tgt.el);
+    var recent = mountRecentRuns($('battery-recent-body'), 'battery');
+    onTabActivated('battery', recent.refresh);
+
     $('battery-run').addEventListener('click', async function () {
       var statusEl = $('battery-status');
       var resultEl = $('battery-result');
-      var model = $('battery-model').value;
+      var target, headers;
+      try {
+        target = tgt.getTarget();
+        headers = targetHeaders(target);
+      } catch (e) {
+        setStatus(statusEl, e.message, true);
+        return;
+      }
+      var model = (target && target.model) || $('battery-model').value;
       if (!model) {
-        setStatus(statusEl, 'Select a model first.', true);
+        setStatus(statusEl, target ? 'Enter the model name for the custom endpoint.' : 'Select a model first.', true);
         return;
       }
       var btn = $('battery-run');
@@ -435,10 +478,12 @@
       try {
         var data = await postJson(
           '/v1/conformance/battery/' + encodeURIComponent(model),
-          {}
+          {},
+          headers
         );
         setStatus(statusEl, 'Done.');
         renderBatteryResult(resultEl, data);
+        recent.refresh();
       } catch (e) {
         setStatus(statusEl, e.message, true);
       } finally {
@@ -537,13 +582,33 @@
     $('compare-mode').addEventListener('change', updateCompareModeUi);
     updateCompareModeUi();
 
+    var tgtA = makeTargetWidget('compare-a', 'Target A');
+    var tgtB = makeTargetWidget('compare-b', 'Target B');
+    $('compare-target-a').appendChild(tgtA.el);
+    $('compare-target-b').appendChild(tgtB.el);
+    var recent = mountRecentRuns($('compare-recent-body'), 'compare');
+    onTabActivated('compare', recent.refresh);
+
     $('compare-run').addEventListener('click', async function () {
       var statusEl = $('compare-status');
       var resultEl = $('compare-result');
-      var modelA = $('compare-model-a').value;
-      var modelB = $('compare-model-b').value;
+      var targetA, targetB, headers;
+      try {
+        targetA = tgtA.getTarget();
+        targetB = tgtB.getTarget();
+        headers = Object.assign(
+          {},
+          targetHeaders(targetA, '-a'),
+          targetHeaders(targetB, '-b')
+        );
+      } catch (e) {
+        setStatus(statusEl, e.message, true);
+        return;
+      }
+      var modelA = (targetA && targetA.model) || $('compare-model-a').value;
+      var modelB = (targetB && targetB.model) || $('compare-model-b').value;
       if (!modelA || !modelB) {
-        setStatus(statusEl, 'Select both models first.', true);
+        setStatus(statusEl, 'Both sides need a model (select one, or enter it for a custom endpoint).', true);
         return;
       }
 
@@ -572,9 +637,10 @@
       setStatus(statusEl, 'Swapping models and running — this can take a while…');
       resultEl.innerHTML = '';
       try {
-        var data = await postJson('/v1/conformance/compare', payload);
+        var data = await postJson('/v1/conformance/compare', payload, headers);
         setStatus(statusEl, 'Done.');
         renderCompareResult(resultEl, data);
+        recent.refresh();
       } catch (e) {
         setStatus(statusEl, e.message, true);
       } finally {
@@ -631,11 +697,20 @@
       container.textContent = 'No runs recorded yet.';
       return;
     }
+    container.appendChild(buildHistoryTable(rows, true));
+  }
+
+  // Shared table builder for the History tab and the per-tab "Recent runs"
+  // panels. `showKind` hides the Kind column when every row is the same kind.
+  function buildHistoryTable(rows, showKind) {
     var table = document.createElement('table');
     table.className = 'battery-table';
+    var cols = showKind
+      ? '<th>When</th><th>Kind</th><th>Model</th><th>Summary</th><th>Result</th>'
+      : '<th>When</th><th>Model</th><th>Summary</th><th>Result</th>';
+    var span = showKind ? 5 : 4;
     var thead = document.createElement('thead');
-    thead.innerHTML =
-      '<tr><th>When</th><th>Kind</th><th>Model</th><th>Summary</th><th>Result</th></tr>';
+    thead.innerHTML = '<tr>' + cols + '</tr>';
     table.appendChild(thead);
     var tbody = document.createElement('tbody');
 
@@ -649,9 +724,11 @@
       when.textContent = isNaN(d.getTime()) ? row.run_at : d.toLocaleString();
       tr.appendChild(when);
 
-      var kind = document.createElement('td');
-      kind.textContent = row.kind;
-      tr.appendChild(kind);
+      if (showKind) {
+        var kind = document.createElement('td');
+        kind.textContent = row.kind;
+        tr.appendChild(kind);
+      }
 
       var model = document.createElement('td');
       model.textContent = row.model_b ? row.model + ' ↔ ' + row.model_b : (row.model || '—');
@@ -667,7 +744,7 @@
 
       var detailRow = document.createElement('tr');
       var detailCell = document.createElement('td');
-      detailCell.colSpan = 5;
+      detailCell.colSpan = span;
       detailCell.style.display = 'none';
       detailRow.appendChild(detailCell);
 
@@ -697,7 +774,130 @@
     });
 
     table.appendChild(tbody);
-    container.appendChild(table);
+    return table;
+  }
+
+  // A compact, self-contained "Recent runs" panel scoped to one run kind,
+  // for embedding under a tab's result area.
+  function mountRecentRuns(container, kind) {
+    container.innerHTML = '';
+    var body = document.createElement('div');
+    container.appendChild(body);
+
+    async function refresh() {
+      try {
+        var res = await fetch(
+          '/v1/conformance/history?limit=20&kind=' + encodeURIComponent(kind)
+        );
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        var rows = await res.json();
+        body.innerHTML = '';
+        if (!rows.length) {
+          body.textContent = 'No ' + kind + ' runs recorded yet.';
+          return;
+        }
+        body.appendChild(buildHistoryTable(rows, false));
+      } catch (e) {
+        body.textContent = 'Could not load history: ' + e.message;
+      }
+    }
+
+    return { refresh: refresh };
+  }
+
+  // ---------- test-target (custom endpoint) widget ----------
+
+  // In-memory only — API keys are never written to localStorage or sent
+  // anywhere except the outbound X-Conformance-Api-Key header.
+  var apiKeyMemory = {};
+
+  function makeTargetWidget(idPrefix, label) {
+    var wrap = document.createElement('div');
+    wrap.className = 'target-widget';
+
+    var lsKey = 'ggs-conformance-target-' + idPrefix;
+    var saved = {};
+    try { saved = JSON.parse(localStorage.getItem(lsKey) || '{}'); } catch (e) { saved = {}; }
+
+    var row = document.createElement('div');
+    row.className = 'field-row';
+
+    var legend = document.createElement('label');
+    legend.textContent = label;
+    row.appendChild(legend);
+
+    var modeSel = document.createElement('select');
+    modeSel.innerHTML =
+      '<option value="local">GGUF Switchboard (local)</option>' +
+      '<option value="custom">Custom OpenAI-compatible endpoint</option>';
+    modeSel.value = saved.mode === 'custom' ? 'custom' : 'local';
+    row.appendChild(modeSel);
+    wrap.appendChild(row);
+
+    var custom = document.createElement('div');
+    custom.className = 'field-row target-custom';
+
+    var baseUrl = document.createElement('input');
+    baseUrl.type = 'text';
+    baseUrl.placeholder = 'Base URL, e.g. https://api.openai.com/v1';
+    baseUrl.value = saved.baseUrl || '';
+    baseUrl.style.minWidth = '260px';
+
+    var modelName = document.createElement('input');
+    modelName.type = 'text';
+    modelName.placeholder = 'Model name (as the endpoint expects)';
+    modelName.value = saved.model || '';
+
+    var apiKey = document.createElement('input');
+    apiKey.type = 'password';
+    apiKey.placeholder = 'API key (not stored)';
+    apiKey.value = apiKeyMemory[idPrefix] || '';
+    apiKey.autocomplete = 'off';
+
+    custom.appendChild(baseUrl);
+    custom.appendChild(modelName);
+    custom.appendChild(apiKey);
+    wrap.appendChild(custom);
+
+    function sync() {
+      custom.style.display = modeSel.value === 'custom' ? 'flex' : 'none';
+    }
+    function persist() {
+      try {
+        localStorage.setItem(lsKey, JSON.stringify({
+          mode: modeSel.value,
+          baseUrl: baseUrl.value.trim(),
+          model: modelName.value.trim()
+        }));
+      } catch (e) { /* ignore */ }
+      apiKeyMemory[idPrefix] = apiKey.value;
+    }
+    modeSel.addEventListener('change', function () { sync(); persist(); });
+    [baseUrl, modelName, apiKey].forEach(function (el) {
+      el.addEventListener('change', persist);
+    });
+    sync();
+
+    return {
+      el: wrap,
+      // null => local; otherwise {baseUrl, model, apiKey}
+      getTarget: function () {
+        if (modeSel.value !== 'custom') return null;
+        var b = baseUrl.value.trim();
+        if (!b) throw new Error('Custom endpoint selected but Base URL is empty');
+        return { baseUrl: b, model: modelName.value.trim(), apiKey: apiKey.value };
+      }
+    };
+  }
+
+  function targetHeaders(target, suffix) {
+    if (!target) return {};
+    suffix = suffix || '';
+    var h = {};
+    h['X-Conformance-Base-Url' + suffix] = target.baseUrl;
+    if (target.model) h['X-Conformance-Model' + suffix] = target.model;
+    if (target.apiKey) h['X-Conformance-Api-Key' + suffix] = target.apiKey;
+    return h;
   }
 
   function initHistoryTab() {

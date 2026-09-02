@@ -1,3 +1,4 @@
+pub mod external_openai;
 pub mod llama_cpp;
 pub mod tool_probe;
 pub mod vllm;

@@ -379,3 +379,54 @@ table.battery-table th {
   font-size: 13px;
   margin-bottom: 4px;
 }
+
+/* ── custom-endpoint target widget ─────────────────────────────────────── */
+.target-widget {
+  margin: 6px 0 10px;
+  padding: 8px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  background: var(--neutral-bg);
+}
+
+.target-widget .field-row {
+  margin: 4px 0;
+}
+
+.target-widget input,
+.target-widget select {
+  padding: 5px 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font: inherit;
+  font-size: 13px;
+}
+
+.target-custom {
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+/* ── per-tab "Recent runs" panel ───────────────────────────────────────── */
+.recent-runs {
+  margin-top: 14px;
+  border-top: 1px solid var(--border);
+  padding-top: 8px;
+}
+
+.recent-runs > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--text-muted);
+  font-size: 13px;
+  user-select: none;
+}
+
+.recent-runs > div {
+  margin-top: 8px;
+  font-size: 13px;
+}
+
+.history-row:hover {
+  background: var(--neutral-bg);
+}

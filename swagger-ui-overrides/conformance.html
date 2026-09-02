@@ -38,6 +38,7 @@
         <label for="inspect-model">Model</label>
         <select id="inspect-model"></select>
       </div>
+      <div id="inspect-target"></div>
       <label class="field-label" for="inspect-body">Request body</label>
       <textarea id="inspect-body" class="code-input" spellcheck="false"></textarea>
       <div class="actions">
@@ -45,6 +46,10 @@
         <span id="inspect-status" class="status"></span>
       </div>
       <div id="inspect-result" class="result"></div>
+      <details class="recent-runs">
+        <summary>Recent runs</summary>
+        <div id="inspect-recent-body"></div>
+      </details>
     </section>
 
     <!-- Resolved Template -->
@@ -58,6 +63,7 @@
         <label for="template-model">Model</label>
         <select id="template-model"></select>
       </div>
+      <div id="template-target"></div>
       <label class="field-label" for="template-body">Messages / tools</label>
       <textarea id="template-body" class="code-input" spellcheck="false"></textarea>
       <div class="actions">
@@ -65,6 +71,10 @@
         <span id="template-status" class="status"></span>
       </div>
       <div id="template-result" class="result"></div>
+      <details class="recent-runs">
+        <summary>Recent runs</summary>
+        <div id="template-recent-body"></div>
+      </details>
     </section>
 
     <!-- Battery -->
@@ -78,11 +88,16 @@
         <label for="battery-model">Model</label>
         <select id="battery-model"></select>
       </div>
+      <div id="battery-target"></div>
       <div class="actions">
         <button id="battery-run" class="run-btn">Run battery</button>
         <span id="battery-status" class="status"></span>
       </div>
       <div id="battery-result" class="result"></div>
+      <details class="recent-runs">
+        <summary>Recent runs</summary>
+        <div id="battery-recent-body"></div>
+      </details>
     </section>
 
     <!-- Compare -->
@@ -96,10 +111,12 @@
         <div>
           <label for="compare-model-a">Model A</label>
           <select id="compare-model-a"></select>
+          <div id="compare-target-a"></div>
         </div>
         <div>
           <label for="compare-model-b">Model B</label>
           <select id="compare-model-b"></select>
+          <div id="compare-target-b"></div>
         </div>
       </div>
       <div class="field-row">
@@ -127,6 +144,10 @@
         <span id="compare-status" class="status"></span>
       </div>
       <div id="compare-result" class="result compare-grid"></div>
+      <details class="recent-runs">
+        <summary>Recent runs</summary>
+        <div id="compare-recent-body"></div>
+      </details>
     </section>
 
     <!-- History -->
