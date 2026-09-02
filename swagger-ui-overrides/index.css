@@ -7,6 +7,7 @@
 
 .model-selector-bar {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   margin-left: auto;
@@ -127,7 +128,8 @@
 }
 
 .model-selector-bar select {
-  min-width: 280px;
+  flex: 1 1 240px;
+  min-width: 200px;
   max-width: 520px;
   padding: 5px 8px;
   border-radius: 4px;
@@ -164,10 +166,16 @@
 }
 
 .conformance-console-link {
+  /* Own full-width row inside the selector bar (= 3rd header row) so it
+     never gets pushed off-screen next to the model dropdown. */
+  flex: 1 0 100%;
+  box-sizing: border-box;
+  margin-top: 6px;
+  text-align: center;
   color: #fff;
   font-size: 13px;
   font-weight: 700;
-  padding: 5px 10px;
+  padding: 6px 10px;
   border-radius: 4px;
   border: 1px solid rgba(73, 204, 144, 0.4);
   background: #49cc90;
