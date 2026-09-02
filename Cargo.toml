@@ -45,7 +45,7 @@ mime = "0.3"
 rusqlite = { version = "0.32", features = ["bundled"] }
 utoipa = { version = "5", features = ["axum_extras"] }
 utoipa-swagger-ui = { version = "9", features = ["axum"] }
-sysinfo = "0.39.6"
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
