@@ -13,11 +13,37 @@
   function formatModelLabel(m) {
     if (!m || !m.id) return '';
     var parts = [m.id];
-    if (m.kind) parts.push(m.kind);
     var ctx = m.context_size || m.max_context_length;
     if (ctx) parts.push('ctx ' + ctx);
     if (m.min_vram_gb) parts.push('~' + m.min_vram_gb + 'GB');
     return parts.join(' · ');
+  }
+
+  var MODEL_GROUPS = [
+    { label: 'Chat', kinds: ['chat', 'coder'] },
+    { label: 'Vision', kinds: ['vision'] },
+    { label: 'Embedding', kinds: ['embedding'] },
+    { label: 'Reranker', kinds: ['reranker'] },
+    { label: 'Audio', kinds: ['audio'] }
+  ];
+
+  function groupModels(models) {
+    var groups = MODEL_GROUPS.map(function (g) { return { label: g.label, items: [] }; });
+    var other = { label: 'Other', items: [] };
+    (models || []).forEach(function (m) {
+      var kind = (m && m.kind ? String(m.kind) : '').toLowerCase();
+      var target = other;
+      for (var i = 0; i < MODEL_GROUPS.length; i++) {
+        if (MODEL_GROUPS[i].kinds.indexOf(kind) !== -1) { target = groups[i]; break; }
+      }
+      target.items.push(m);
+    });
+    return groups.concat([other])
+      .filter(function (g) { return g.items.length > 0; })
+      .map(function (g) {
+        g.items.sort(function (a, b) { return String(a.id).localeCompare(String(b.id)); });
+        return g;
+      });
   }
 
   function badgeClassForLocation(location) {
@@ -113,11 +139,16 @@
 
   function populateSelect(select, models, selected) {
     select.innerHTML = '';
-    models.forEach(function (m) {
-      var opt = document.createElement('option');
-      opt.value = m.id;
-      opt.textContent = formatModelLabel(m);
-      select.appendChild(opt);
+    groupModels(models).forEach(function (group) {
+      var og = document.createElement('optgroup');
+      og.label = group.label;
+      group.items.forEach(function (m) {
+        var opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = formatModelLabel(m);
+        og.appendChild(opt);
+      });
+      select.appendChild(og);
     });
     if (selected && models.some(function (m) { return m.id === selected; })) {
       select.value = selected;
@@ -146,6 +177,12 @@
 
   // ---------- tabs ----------
 
+  var tabActivationHandlers = {};
+
+  function onTabActivated(tab, fn) {
+    tabActivationHandlers[tab] = fn;
+  }
+
   function initTabs() {
     var buttons = document.querySelectorAll('.tab-btn');
     buttons.forEach(function (btn) {
@@ -156,6 +193,8 @@
         });
         btn.classList.add('active');
         $('panel-' + btn.dataset.tab).classList.add('active');
+        var handler = tabActivationHandlers[btn.dataset.tab];
+        if (handler) handler();
       });
     });
   }
@@ -544,6 +583,142 @@
     });
   }
 
+  // ---------- History tab ----------
+
+  function passBadge(passed) {
+    var span = document.createElement('span');
+    if (passed === true) {
+      span.className = 'badge badge-pass';
+      span.textContent = 'Pass';
+    } else if (passed === false) {
+      span.className = 'badge badge-fail';
+      span.textContent = 'Fail';
+    } else {
+      span.className = 'badge';
+      span.textContent = '—';
+    }
+    return span;
+  }
+
+  function historyQueryString() {
+    var params = [];
+    var kind = $('history-kind').value;
+    var model = $('history-model').value.trim();
+    if (kind) params.push('kind=' + encodeURIComponent(kind));
+    if (model) params.push('model=' + encodeURIComponent(model));
+    params.push('limit=200');
+    return '?' + params.join('&');
+  }
+
+  async function refreshHistory() {
+    var statusEl = $('history-status');
+    var resultEl = $('history-result');
+    setStatus(statusEl, 'Loading…');
+    try {
+      var res = await fetch('/v1/conformance/history' + historyQueryString());
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      var rows = await res.json();
+      setStatus(statusEl, rows.length + ' run' + (rows.length === 1 ? '' : 's'));
+      renderHistory(resultEl, rows);
+    } catch (e) {
+      setStatus(statusEl, e.message, true);
+    }
+  }
+
+  function renderHistory(container, rows) {
+    container.innerHTML = '';
+    if (!rows.length) {
+      container.textContent = 'No runs recorded yet.';
+      return;
+    }
+    var table = document.createElement('table');
+    table.className = 'battery-table';
+    var thead = document.createElement('thead');
+    thead.innerHTML =
+      '<tr><th>When</th><th>Kind</th><th>Model</th><th>Summary</th><th>Result</th></tr>';
+    table.appendChild(thead);
+    var tbody = document.createElement('tbody');
+
+    rows.forEach(function (row) {
+      var tr = document.createElement('tr');
+      tr.className = 'history-row';
+      tr.style.cursor = 'pointer';
+
+      var when = document.createElement('td');
+      var d = new Date(row.run_at);
+      when.textContent = isNaN(d.getTime()) ? row.run_at : d.toLocaleString();
+      tr.appendChild(when);
+
+      var kind = document.createElement('td');
+      kind.textContent = row.kind;
+      tr.appendChild(kind);
+
+      var model = document.createElement('td');
+      model.textContent = row.model_b ? row.model + ' ↔ ' + row.model_b : (row.model || '—');
+      tr.appendChild(model);
+
+      var summary = document.createElement('td');
+      summary.textContent = row.summary;
+      tr.appendChild(summary);
+
+      var result = document.createElement('td');
+      result.appendChild(passBadge(row.passed));
+      tr.appendChild(result);
+
+      var detailRow = document.createElement('tr');
+      var detailCell = document.createElement('td');
+      detailCell.colSpan = 5;
+      detailCell.style.display = 'none';
+      detailRow.appendChild(detailCell);
+
+      tr.addEventListener('click', async function () {
+        if (detailCell.style.display === 'none') {
+          detailCell.style.display = '';
+          if (!detailCell.dataset.loaded) {
+            detailCell.textContent = 'Loading…';
+            try {
+              var res = await fetch('/v1/conformance/history/' + row.id);
+              if (!res.ok) throw new Error('HTTP ' + res.status);
+              var full = await res.json();
+              detailCell.textContent = '';
+              detailCell.appendChild(jsonPre(full.detail));
+              detailCell.dataset.loaded = '1';
+            } catch (e) {
+              detailCell.textContent = 'Failed to load detail: ' + e.message;
+            }
+          }
+        } else {
+          detailCell.style.display = 'none';
+        }
+      });
+
+      tbody.appendChild(tr);
+      tbody.appendChild(detailRow);
+    });
+
+    table.appendChild(tbody);
+    container.appendChild(table);
+  }
+
+  function initHistoryTab() {
+    $('history-refresh').addEventListener('click', refreshHistory);
+    $('history-kind').addEventListener('change', refreshHistory);
+    $('history-model').addEventListener('keydown', function (e) {
+      if (e.key === 'Enter') refreshHistory();
+    });
+    $('history-clear').addEventListener('click', async function () {
+      if (!window.confirm('Delete the entire conformance run history?')) return;
+      try {
+        var res = await fetch('/v1/conformance/history', { method: 'DELETE' });
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        refreshHistory();
+      } catch (e) {
+        setStatus($('history-status'), e.message, true);
+      }
+    });
+    onTabActivated('history', refreshHistory);
+  }
+
   // ---------- boot ----------
 
   document.addEventListener('DOMContentLoaded', async function () {
@@ -552,6 +727,7 @@
     initTemplateTab();
     initBatteryTab();
     initCompareTab();
+    initHistoryTab();
     try {
       await loadModels();
     } catch (e) {

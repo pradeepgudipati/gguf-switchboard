@@ -22,6 +22,7 @@
     <button class="tab-btn" data-tab="template">Resolved Template</button>
     <button class="tab-btn" data-tab="battery">Battery</button>
     <button class="tab-btn" data-tab="compare">Compare</button>
+    <button class="tab-btn" data-tab="history">History</button>
   </nav>
 
   <main id="app">
@@ -126,6 +127,31 @@
         <span id="compare-status" class="status"></span>
       </div>
       <div id="compare-result" class="result compare-grid"></div>
+    </section>
+
+    <!-- History -->
+    <section class="tab-panel" id="panel-history">
+      <p class="panel-help">
+        Every Inspect / Resolved Template / Battery / Compare run is recorded to a local
+        <code>conformance.db</code> (SQLite, sibling of the token-usage DB). Click a row to expand
+        the full stored response.
+      </p>
+      <div class="field-row">
+        <label for="history-kind">Kind</label>
+        <select id="history-kind">
+          <option value="">all</option>
+          <option value="battery">battery</option>
+          <option value="compare">compare</option>
+          <option value="inspect">inspect</option>
+          <option value="resolve_template">resolve_template</option>
+        </select>
+        <label for="history-model">Model</label>
+        <input id="history-model" type="text" placeholder="filter by model id" />
+        <button id="history-refresh" class="run-btn">Refresh</button>
+        <button id="history-clear" class="run-btn">Clear all</button>
+        <span id="history-status" class="status"></span>
+      </div>
+      <div id="history-result" class="result"></div>
     </section>
   </main>
 

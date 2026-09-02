@@ -394,12 +394,41 @@ window.onload = function() {
 
   function formatModelLabel(m) {
     if (!m || !m.id) return '';
+    // Kind is omitted here — it's the <optgroup> the option lives under.
     var parts = [m.id];
-    if (m.kind) parts.push(m.kind);
     var ctx = m.context_size || m.max_context_length;
     if (ctx) parts.push('ctx ' + ctx);
     if (m.min_vram_gb) parts.push('~' + m.min_vram_gb + 'GB');
     return parts.join(' · ');
+  }
+
+  // Fixed capability order for the model dropdown; anything with an
+  // unrecognised (or missing) kind falls into a trailing "Other" group.
+  var MODEL_GROUPS = [
+    { label: 'Chat', kinds: ['chat', 'coder'] },
+    { label: 'Vision', kinds: ['vision'] },
+    { label: 'Embedding', kinds: ['embedding'] },
+    { label: 'Reranker', kinds: ['reranker'] },
+    { label: 'Audio', kinds: ['audio'] }
+  ];
+
+  function groupModels(models) {
+    var groups = MODEL_GROUPS.map(function(g) { return { label: g.label, items: [] }; });
+    var other = { label: 'Other', items: [] };
+    (models || []).forEach(function(m) {
+      var kind = (m && m.kind ? String(m.kind) : '').toLowerCase();
+      var target = other;
+      for (var i = 0; i < MODEL_GROUPS.length; i++) {
+        if (MODEL_GROUPS[i].kinds.indexOf(kind) !== -1) { target = groups[i]; break; }
+      }
+      target.items.push(m);
+    });
+    return groups.concat([other])
+      .filter(function(g) { return g.items.length > 0; })
+      .map(function(g) {
+        g.items.sort(function(a, b) { return String(a.id).localeCompare(String(b.id)); });
+        return g;
+      });
   }
 
   function formatModelCard(m) {
@@ -609,18 +638,26 @@ window.onload = function() {
     empty.textContent = '(select a model)';
     select.appendChild(empty);
 
-    models.forEach(function(m) {
-      const opt = document.createElement('option');
-      opt.value = m.id;
-      opt.textContent = formatModelLabel(m);
-      opt.title = formatModelCard(m);
-      select.appendChild(opt);
+    const grouped = groupModels(models);
+    const orderedModels = [];
+    grouped.forEach(function(group) {
+      const og = document.createElement('optgroup');
+      og.label = group.label;
+      group.items.forEach(function(m) {
+        orderedModels.push(m);
+        const opt = document.createElement('option');
+        opt.value = m.id;
+        opt.textContent = formatModelLabel(m);
+        opt.title = formatModelCard(m);
+        og.appendChild(opt);
+      });
+      select.appendChild(og);
     });
 
     if (selectedModel && models.some(function(m) { return m.id === selectedModel; })) {
       select.value = selectedModel;
-    } else if (models.length > 0) {
-      selectedModel = models[0].id;
+    } else if (orderedModels.length > 0) {
+      selectedModel = orderedModels[0].id;
       select.value = selectedModel;
       localStorage.setItem(MODEL_STORAGE_KEY, selectedModel);
     }
