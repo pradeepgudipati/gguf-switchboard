@@ -16,7 +16,7 @@ GGUF Switchboard uses [llama.cpp](https://github.com/ggml-org/llama.cpp) for GGU
 - **Automatic model lifecycle:** request-driven single-slot switching, in-flight request draining, failed-switch rollback, and idle priority warm-up.
 - **Hardware-aware model management:** Hugging Face search and pull, GGUF quant scoring, vLLM quantization detection, VRAM fit checks, and bounded llama.cpp OOM fallback.
 - **Broad client compatibility:** OpenAI Chat Completions, Completions, Embeddings, Responses, Rerank and Audio APIs, plus Anthropic Messages.
-- **Built for operation:** Swagger UI, Prometheus metrics, usage history, memory-pressure eviction, model rescans, and capability probing.
+- **Built for operation:** Swagger UI with live GPU/CPU status, Prometheus metrics, usage history, a tool-calling conformance console with persisted run history, memory-pressure eviction, model rescans, and capability probing.
 
 ## Installation
 
@@ -106,11 +106,13 @@ Also included:
 - **Anthropic Messages API** — `POST /v1/messages` (stream + non-stream); translated onto the selected backend's OpenAI-compatible API; tool calling and content blocks supported
 - **Tool calling** — Chat Completions forwards `tools` / `tool_choice` / `tool_calls`; the Responses API translates function tools, function calls, and strict streaming events to/from the selected backend; Anthropic Messages translates tool definitions and calls bidirectionally. Actual behavior depends on the model and backend build (see [COMPATIBILITY](docs/COMPATIBILITY.md))
 - **Tool-call capability probe** — `tools`-tagged models are probed with a real tool call at load time; verdict exposed as `tools_verified` on `/v1/models`
-- **Swagger UI** — Try-it-out at `http://localhost:9090/swagger-ui/` (live model dropdown, Rescan Models, hides chat vs embedding endpoints by selected model kind)
+- **Swagger UI** — Try-it-out at `http://localhost:9090/swagger-ui/` (model dropdown grouped by kind, Rescan Models, hides chat vs embedding endpoints by selected model kind, live status badge, CPU/GPU utilization pills)
+- **Live status telemetry** — `/status` reports `active_requests` plus per-GPU load / VRAM / temperature (`gpus[]`, via `nvidia-smi`) and host `cpu`/`memory` usage; surfaced on the Swagger topbar
+- **Conformance console** — `/swagger-ui/conformance.html`: Inspect (where did the tool call land), Resolved Template, Battery (4 fixed tool-calling cases, pass/fail), and A/B Compare. Every run is persisted to a self-contained `conformance.db` (SQLite) with a History tab and per-tab recent-run tables; each surface can target a **custom OpenAI-compatible endpoint** (base URL + model + API key, key held in-browser only) to diagnose models outside the switchboard
 - **Auto-discovery** — Scans GGUF dirs with a cheap validation ladder (filename → header → metadata); sidecars skipped
 - **Live model rescan** — `POST /v1/models/refresh` plus a configurable daily watcher (`models_rescan_interval_secs`); merges new GGUFs without a full redeploy
 - **HF metadata enrichment** — fills empty `description` / context / VRAM / `capabilities` / `hf_repo` from Hugging Face on launch and rescan (`sync-hf-metadata` CLI also available)
-- **Model management** — `models search`, `models files`, and `models pull` for GGUF/llama.cpp; `models search vllm` and `models pull vllm` for Safetensors/vLLM
+- **Model management** — `models search`, `models files`, and `models pull` for GGUF/llama.cpp; `models search vllm` and `models pull vllm` for Safetensors/vLLM; `models list` for an on-disk inventory and `models delete <name|#>` to remove a GGUF/Safetensors model plus its registry entry
 - **Quant scoring** — `models search`/`models files` score every discovered quant against your detected hardware: a 0–100 FIT score, an estimated tok/s from a memory-bandwidth model, and a precision-retention % from published per-quant perplexity data, then recommend the fastest, most balanced, and least-lossy quant separately with `Try:` pull commands (see [docs/QUANT_SCORING.md](docs/QUANT_SCORING.md))
 - **Kind-aware routing** — chat / completions / messages / responses require chat-like kinds; embeddings require `embedding` (and pass `--embeddings` to `llama-server`)
 - **Single-slot hot-swap** — One resident model; switches drain in-flight requests; failed switches roll back
@@ -119,7 +121,7 @@ Also included:
 - **ModelFitPlanner** — Opt-in `[fit]` section: inspects GPU topology and free VRAM before every load to produce a safe launch profile; bounded fallback ladder on OOM; caches known-good profiles to skip the ladder on subsequent loads
 - **Idle priority model** — Preferred model auto-loads after a configurable idle timeout
 - **llama.cpp and vLLM backends** — Spawns the registered engine while preserving one public API and one scheduler slot
-- **SSE streaming**, **Prometheus** (`/metrics`), **usage history** (`/v1/usage`), **portable `models.json`**
+- **SSE streaming**, **Prometheus** (`/metrics`), **usage history** (`/v1/usage`), **conformance run history** (`/v1/conformance/history`), **portable `models.json`**
 
 #### How it works
 
@@ -302,6 +304,19 @@ Or download manually — any `.gguf` file in `/var/lib/gguf-switchboard/models` 
 
 If you downloaded models manually, run `./deploy.sh --refresh-models` so discovery registers them.
 
+List what is on disk and remove models you no longer want:
+
+```bash
+# Numbered inventory of every GGUF file / Safetensors dir under the model dirs,
+# with the registered alias (if any). Add --json for machine output.
+gguf-switchboard models list
+
+# Delete by alias/name or by the number from `models list` — prompts for
+# confirmation (add --yes to skip), removes the file/dir and the models.toml entry
+gguf-switchboard models delete qwen3-embedding-4b
+gguf-switchboard models delete 2 --yes
+```
+
 For Safetensors models, use the vLLM search and pull lane. The pull validates that the repository contains `config.json` and Safetensors weights, downloads the tokenizer/configuration files, detects supported quantization metadata, and registers the isolated vLLM backend:
 
 ```bash
@@ -317,7 +332,7 @@ One alias may contain both a GGUF and a Safetensors source. Unless the registry 
 
 ```bash
 curl -s http://localhost:9090/health
-curl -s http://localhost:9090/status | jq .
+curl -s http://localhost:9090/status | jq .   # includes gpus[] and host CPU/RAM usage
 curl -s http://localhost:9090/v1/models | jq '.data[].id'
 
 # NVIDIA processes with the loaded GGUF model name
@@ -349,13 +364,15 @@ cd ~/gguf-switchboard   # or wherever you cloned
 | Pick up new GGUF files (merge registry) | `./deploy.sh --refresh-models` |
 | Copy legacy `~/models` into system models dir | `./deploy.sh --migrate-models` |
 | Live rescan while running | `curl -X POST http://localhost:9090/v1/models/refresh` (or Swagger **Rescan Models**) |
+| List models on disk | `ggs models list` |
+| Delete a model (files + registry entry) | `ggs models delete <name\|#>` |
 | Check whether the background service is running | `ggs status` |
 | Restart without rebuild | `ggs restart` |
 
 **Important:**
 
 - Deploy **stashes uncommitted changes** (including untracked files) before `git pull`. Recover with `git stash list` / `git stash pop`.
-- Live config lives under `/opt/gguf-switchboard/` (`config.toml`, `models.toml`); models and `usage.db` under `/var/lib/gguf-switchboard/`. Tracked defaults live in `config.example.toml` and `models.example.toml`.
+- Live config lives under `/opt/gguf-switchboard/` (`config.toml`, `models.toml`); models, `usage.db`, and `conformance.db` (conformance-console run history) under `/var/lib/gguf-switchboard/`. Tracked defaults live in `config.example.toml` and `models.example.toml`.
 - After editing aliases / `priority` / `extra_args`, restart: `sudo systemctl restart gguf-switchboard`.
 - `deploy.sh` leaves the unit stopped when no GGUF or Safetensors models are registered. Pull either format, then re-run deploy with the backend skip flags if no engine update is needed.
 - Every successful run ends with a summary of llama.cpp, gguf-switchboard, vLLM, indexed models, service state, and the available `ggs` operational commands.
@@ -450,6 +467,7 @@ curl http://localhost:9090/v1/messages \
 ```
 
 Swagger UI: **http://localhost:9090/swagger-ui/** — more examples in [docs/USAGE.md](docs/USAGE.md).
+Conformance console: **http://localhost:9090/swagger-ui/conformance.html** — diagnose tool-calling / chat-template behavior of a local or external OpenAI-compatible model; runs are saved to `conformance.db`.
 
 ## License
 
