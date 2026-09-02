@@ -7,7 +7,8 @@ use std::path::PathBuf;
 
 use gguf_switchboard::api;
 use gguf_switchboard::config::{
-    Config, ModelsRegistry, cmd_files, cmd_pull, cmd_search, sync_registry_from_hf,
+    Config, ModelsRegistry, cmd_delete_local, cmd_files, cmd_list_local, cmd_pull, cmd_search,
+    sync_registry_from_hf,
 };
 use gguf_switchboard::conformance::ConformanceHistory;
 use gguf_switchboard::db::TokenDb;
@@ -25,6 +26,8 @@ Commands and examples:
   ggs models search <query>                 Search GGUF/llama.cpp models
   ggs models search vllm <query>            Search safetensors/vLLM models
   ggs models files <repo-id>                List files in a Hugging Face repository
+  ggs models list                           List GGUF/safetensors models on disk
+  ggs models delete <name|#>                Delete a model (file + registry entry)
   ggs models pull <repo-id> --quant Q4_K_M  Download and register a GGUF model
   ggs models pull vllm <repo-id>             Download and register a vLLM model
   ggs discover-models <models-dir>           Discover local GGUF models
@@ -43,6 +46,9 @@ Detailed examples:
   ggs models search "Qwen 7B"
   ggs models search vllm "Muse"
   ggs models files bartowski/Qwen2.5-7B-Instruct-GGUF
+  ggs models list --json
+  ggs models delete qwen3-embedding-4b
+  ggs models delete 2 --yes
   ggs models pull bartowski/Qwen2.5-7B-Instruct-GGUF --quant Q4_K_M
   ggs models pull vllm Qwen/Qwen2.5-7B-Instruct
   ggs discover-models ~/models -o models.toml
@@ -604,8 +610,10 @@ async fn run_models_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error
         "search" => cmd_search(&sub_args).await,
         "files" => cmd_files(&sub_args).await,
         "pull" => cmd_pull(&sub_args).await,
+        "list" => cmd_list_local(&sub_args).await,
+        "delete" => cmd_delete_local(&sub_args).await,
         other => Err(format!(
-            "models: unknown subcommand '{other}'\n\nUsage:\n  gguf-switchboard models search <query> [--limit N]\n  gguf-switchboard models search vllm <query> [--limit N]\n  gguf-switchboard models files <repo-id>\n  gguf-switchboard models pull <repo-id> [--quant QUANT] [--dir PATH] [--connections N] [--no-bench]\n  gguf-switchboard models pull vllm <repo-id> [--dir PATH] [--draft <repo>] [--num-speculative-tokens N] [--attention-backend NAME] [--tensor-parallel-size N] [--gpu-memory-utilization F] [--served-model-name NAME] [--force]"
+            "models: unknown subcommand '{other}'\n\nUsage:\n  gguf-switchboard models search <query> [--limit N]\n  gguf-switchboard models search vllm <query> [--limit N]\n  gguf-switchboard models files <repo-id>\n  gguf-switchboard models list [--dir PATH] [--registry models.toml] [--json]\n  gguf-switchboard models delete <name|#> [--yes] [--dir PATH] [--registry models.toml]\n  gguf-switchboard models pull <repo-id> [--quant QUANT] [--dir PATH] [--connections N] [--no-bench]\n  gguf-switchboard models pull vllm <repo-id> [--dir PATH] [--draft <repo>] [--num-speculative-tokens N] [--attention-backend NAME] [--tensor-parallel-size N] [--gpu-memory-utilization F] [--served-model-name NAME] [--force]"
         ).into()),
     }
 }
@@ -670,6 +678,8 @@ fn is_cli_usage_error(message: &str) -> bool {
                 || message.contains("invalid value")
                 || message.contains("unknown flag")))
         || (message.starts_with("models files") && message.contains("missing"))
+        || message.starts_with("models list:")
+        || message.starts_with("models delete:")
         || (message.starts_with("models pull")
             && (message.contains("missing")
                 || message.contains("unknown flag")

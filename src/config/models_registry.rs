@@ -2261,7 +2261,7 @@ fn display_name_from_alias(alias: &str) -> String {
         .join(" ")
 }
 
-fn discover_gguf_files(dirs: &[PathBuf]) -> Result<Vec<PathBuf>, RuntimeError> {
+pub(crate) fn discover_gguf_files(dirs: &[PathBuf]) -> Result<Vec<PathBuf>, RuntimeError> {
     let mut files = Vec::new();
     for dir in dirs {
         collect_gguf_files(dir, &mut files)?;
