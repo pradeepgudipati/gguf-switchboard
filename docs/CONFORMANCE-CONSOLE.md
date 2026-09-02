@@ -4,6 +4,10 @@
 
 The Conformance Console is a built-in diagnostic surface at **http://localhost:9090/swagger-ui/conformance.html**. It answers two questions that standard chat UIs cannot:
 
+![Conformance Console main view](assets/ggs-conformance-console.png)
+
+![Conformance Console results view](assets/ggs-conformance-console-results.png)
+
 1. **"Did this model actually call the tool, or did it just talk about calling it?"** — Local models frequently fail to produce OpenAI-compatible structured `tool_calls` and instead dump JSON as plain text, leak tool-call JSON into `reasoning_content`, or produce nothing at all.
 
 2. **"What does this model's embedded Jinja chat template actually resolve to?"** — Some models ship broken or missing chat templates. The only way to catch it is to inspect the rendered prompt directly.

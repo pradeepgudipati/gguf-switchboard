@@ -454,8 +454,8 @@ EOF
 
 # Warn about (and optionally fold in) stray models.toml files outside the install
 # dir. `ggs models pull` run from a source checkout or $HOME writes there, and the
-# running service never sees those entries. With --refresh-models we merge them
-# into the canonical registry; otherwise we just point them out.
+# running service never sees those entries. We merge them into the canonical registry
+# during deploy so they are always read by the service.
 check_stray_registries() {
     local canonical="$MODELS_FILE"
     local -a candidates=(
@@ -473,18 +473,19 @@ check_stray_registries() {
         [[ "$stray_real" == "$canon_real" ]] && continue
         found=1
         echo "==> Stray registry: $stray (not read by the service)"
-        if [[ "${REFRESH_MODELS:-false}" == "true" ]]; then
-            echo "    Merging its pins into $canonical ..."
-            sudo -u "$SERVICE_USER" "$BIN" discover-models "$MODELS_DIR" \
-                -o "$MODELS_FILE" --merge "$stray" \
-                && sudo mv "$stray" "${stray}.merged-$(date +%Y%m%d%H%M%S)" \
-                && echo "    Merged; original moved aside."
-        fi
+        echo "    Merging its pins into $canonical ..."
+        sudo -u "$SERVICE_USER" "$BIN" discover-models "$MODELS_DIR" \
+            -o "$MODELS_FILE" --merge "$stray" \
+            && sudo mv "$stray" "${stray}.merged-$(date +%Y%m%d%H%M%S)" \
+            && echo "    Merged; original moved aside."
     done
-    if [[ "$found" == "1" && "${REFRESH_MODELS:-false}" != "true" ]]; then
-        echo "    Re-run with --refresh-models to merge these in, or remove them."
+    if [[ "$found" == "1" ]]; then
+        echo "    Stray registries merged into $canonical."
     fi
 }
+
+# Shared project tree: deploy owner + ggs group (setgid dirs).
+fix_install_ownership() {
 
 configure_vllm_defaults() {
     local file="$1"
@@ -882,6 +883,7 @@ echo "==> State:   $STATE_DIR"
 echo "==> Models:  $MODELS_DIR"
 echo "==> Service user: $SERVICE_USER"
 
+git_pull_has_changes=false
 if [[ "$SKIP_PULL" != "true" ]]; then
     if [[ -d "$SOURCE_DIR/.git" ]]; then
         # Avoid "dubious ownership" errors when the deploy user differs from
@@ -901,11 +903,21 @@ if [[ "$SKIP_PULL" != "true" ]]; then
 
         echo "==> Pulling latest changes..."
         git pull origin "$BRANCH"
+        if [[ -n "$(git status --porcelain)" ]]; then
+            git_pull_has_changes=true
+        fi
     else
         echo "==> No .git in source tree; skipping pull."
     fi
 else
     echo "==> Skipping git pull (--skip-pull)."
+fi
+
+if [[ "$git_pull_has_changes" != "true" && "$SKIP_PULL" != "true" ]]; then
+    echo "==> No changes in git pull; skipping ggs installation."
+    SKIP_GGS_INSTALL=true
+else
+    SKIP_GGS_INSTALL=false
 fi
 
 CONFIG_CREATED=false
