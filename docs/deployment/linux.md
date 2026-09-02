@@ -1,6 +1,6 @@
 # Install on Linux
 
-> [← Back to README](../README.md)
+> [← Back to README](../../README.md)
 
 Linux with NVIDIA/CUDA is the primary deployment target. The default installer sets up CUDA llama.cpp, an isolated vLLM environment, gguf-switchboard, and its systemd service.
 

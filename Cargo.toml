@@ -2,7 +2,7 @@
 name = "gguf-switchboard"
 version = "0.1.7"
 edition = "2024"
-description = "llama-swap alternative in Rust — OpenAI-compatible GGUF runtime with memory-pressure eviction, OOM context fallback, and usage tracking"
+description = "Hardware-aware local LLM runtime. Run GGUF via llama.cpp and SafeTensors via vLLM behind one OpenAI-compatible API."
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/pradeepgudipati/gguf-switchboard"

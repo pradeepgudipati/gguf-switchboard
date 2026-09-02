@@ -1,6 +1,6 @@
 # Install on Windows
 
-> [← Back to README](../README.md)
+> [← Back to README](../../README.md)
 
 GGUF Switchboard does not currently provide a native Windows deployment. Use WSL2 with an Ubuntu distribution so the Linux build, CUDA tooling, and systemd workflow remain consistent with the primary deployment target.
 

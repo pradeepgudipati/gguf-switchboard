@@ -18,11 +18,14 @@ use gguf_switchboard::state::AppState;
 
 const CLI_HELP: &str = r#"GGUF Switchboard
 
+One machine. Many local models. One API.
+GGUF via llama.cpp, SafeTensors via vLLM.
+
 Usage:
   ggs [<config.toml>]
   ggs <command> [arguments]
 
-Commands and examples:
+Commands:
   ggs models search <query>                 Search GGUF/llama.cpp models
   ggs models search vllm <query>            Search safetensors/vLLM models
   ggs models files <repo-id>                List files in a Hugging Face repository
@@ -39,27 +42,41 @@ Commands and examples:
   ggs logs                                   Show the latest 100 service log entries
   ggs logs watch                             Watch service logs
   ggs logs --tail 250                        Show the latest 250 service log entries
+  ggs version                                Show version information
   ggs <config.toml>                          Start the server with a config file
   ggs help                                   Show this help
 
-Detailed examples:
+Examples:
+
+  # Search for GGUF models that fit your hardware
   ggs models search "Qwen 7B"
+  ggs models search nemotron
+
+  # Search for SafeTensors/vLLM models
+  ggs models search vllm "Qwen3.5-9B-AWQ"
   ggs models search vllm "Muse"
-  ggs models files bartowski/Qwen2.5-7B-Instruct-GGUF
+
+  # Download and register models
+  ggs models pull bartowski/Qwen2.5-7B-Instruct-GGUF --quant Q4_K_M
+  ggs models pull vllm Qwen/Qwen2.5-7B-Instruct
+
+  # List and manage models
+  ggs models list
   ggs models list --json
   ggs models delete qwen3-embedding-4b
   ggs models delete 2 --yes
-  ggs models pull bartowski/Qwen2.5-7B-Instruct-GGUF --quant Q4_K_M
-  ggs models pull vllm Qwen/Qwen2.5-7B-Instruct
+
+  # Discover local models
   ggs discover-models ~/models -o models.toml
-  ggs sync-hf-metadata models.toml
-  ggs export-registry models.toml -o models.json
+
+  # Service management
   ggs status
-  ggs stop
-  ggs restart
   ggs logs
   ggs logs watch
   ggs logs --tail 100
+  ggs restart
+
+  # Start the server
   ggs config.toml
 "#;
 
@@ -100,6 +117,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .is_some_and(|arg| matches!(arg.as_str(), "help" | "--help" | "-h"))
     {
         print!("{CLI_HELP}");
+        return Ok(());
+    }
+
+    if args
+        .get(1)
+        .is_some_and(|arg| matches!(arg.as_str(), "version" | "--version" | "-V"))
+    {
+        println!("gguf-switchboard {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 

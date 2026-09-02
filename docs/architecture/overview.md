@@ -1,6 +1,6 @@
 # Architecture
 
-> [← Back to README](../README.md)
+> [← Back to README](../../README.md)
 
 Scheduler, llama.cpp and vLLM backends, ModelFitPlanner, and repository layout.
 
@@ -93,12 +93,11 @@ One registry alias may contain both sources. An explicit `backend` pin wins. Oth
 .
 ├── Cargo.toml              # Dependencies and build config
 ├── config.example.toml     # Tracked default for runtime config.toml
-├── config.docker.toml      # Docker server configuration
 ├── models.example.toml     # Tracked default for runtime models.toml
-├── models.docker.toml      # Docker model registry
 ├── deploy.sh               # Install both engines, build switchboard, configure systemd
 ├── vllm-runtime/           # Isolated uv project for the managed vLLM runtime
 ├── banner.png              # README hero banner
+├── llms.txt                # AI assistant project summary
 ├── docs/                   # Configuration, usage, architecture, comparison
 ├── CHANGELOG.md            # Version index (details in releases/)
 ├── releases/               # Per-tag release notes (published to GitHub Releases by CI)

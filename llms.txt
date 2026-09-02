@@ -1,0 +1,87 @@
+# GGUF Switchboard
+
+> Hardware-aware local model runtime supporting GGUF via llama.cpp and SafeTensors via vLLM.
+
+## Overview
+
+GGUF Switchboard exposes local models through one OpenAI-compatible API and dynamically manages model runtimes according to model format and hardware constraints.
+
+## Key Concepts
+
+- **One machine, many models, one API** — run multiple local AI models through a single OpenAI-compatible endpoint
+- **GGUF via llama.cpp** — quantized models for constrained VRAM, CPU/GPU offloading, broad hardware compatibility
+- **SafeTensors via vLLM** — Hugging Face models for higher-throughput GPU inference, modern architectures
+- **Automatic model switching** — request-driven single-slot switching with drain, rollback, and idle priority warm-up
+- **Hardware-aware search** — `ggs models search` scores every quant against detected hardware
+
+## Model Runtimes
+
+- GGUF → llama.cpp
+- SafeTensors → vLLM
+- vLLM environment managed through uv
+
+## CLI Commands
+
+```bash
+ggs serve                              # Start the server
+ggs models search <query>              # Search GGUF/llama.cpp models
+ggs models search vllm <query>         Search SafeTensors/vLLM models
+ggs models pull <repo-id> --quant Q4_K_M  # Download and register a GGUF model
+ggs models pull vllm <repo-id>         # Download and register a vLLM model
+ggs models list                        # List models on disk
+ggs status                             # Show service status
+ggs logs                               # Show service logs
+```
+
+## API Endpoints
+
+- `/v1/chat/completions` — OpenAI Chat Completions
+- `/v1/completions` — OpenAI Text Completions
+- `/v1/embeddings` — OpenAI Embeddings
+- `/v1/responses` — OpenAI Responses API
+- `/v1/messages` — Anthropic Messages API
+- `/v1/models` — List configured models
+- `/health` — Liveness probe
+- `/metrics` — Prometheus metrics
+- `/swagger-ui/` — Interactive API explorer
+
+## Supported Clients
+
+- OpenCode
+- Cursor
+- Cline
+- Continue
+- OpenAI SDK (Python, Node.js)
+- Any OpenAI-compatible client
+
+## Documentation
+
+- [README](./README.md)
+- [Quick Start](./docs/getting-started/quick-start.md)
+- [Installation](./docs/getting-started/installation.md)
+- [Configuration](./docs/getting-started/configuration.md)
+- [Model Search](./docs/models/model-search.md)
+- [GGUF Models](./docs/models/gguf.md)
+- [SafeTensors Models](./docs/models/safetensors.md)
+- [Runtime Overview](./docs/runtimes/overview.md)
+- [llama.cpp Runtime](./docs/runtimes/llama-cpp.md)
+- [vLLM Runtime](./docs/runtimes/vllm.md)
+- [Model Switching](./docs/runtimes/model-switching.md)
+- [VRAM Management](./docs/runtimes/vram-management.md)
+- [OpenCode Integration](./docs/integrations/opencode.md)
+- [Cursor Integration](./docs/integrations/cursor.md)
+- [Cline Integration](./docs/integrations/cline.md)
+- [Continue Integration](./docs/integrations/continue.md)
+- [OpenAI SDK](./docs/integrations/openai-sdk.md)
+- [OpenAI API](./docs/api/openai-api.md)
+- [Anthropic API](./docs/api/anthropic-api.md)
+- [Architecture](./docs/architecture/overview.md)
+- [Backend Selection](./docs/architecture/backend-selection.md)
+- [Troubleshooting](./docs/troubleshooting/model-loading.md)
+
+## Repository
+
+- GitHub: https://github.com/pradeepgudipati/gguf-switchboard
+- License: MIT
+- Language: Rust
+- Primary Platform: Linux with NVIDIA/CUDA

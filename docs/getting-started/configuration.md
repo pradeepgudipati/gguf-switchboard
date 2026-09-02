@@ -1,6 +1,6 @@
 # Configuration
 
-> [← Back to README](../README.md)
+> [← Back to README](../../README.md)
 
 Configuration is split across two files:
 
@@ -414,10 +414,6 @@ Generate or refresh `models.toml` without a full deploy:
 - Writes a sibling **`models.json`** next to the output TOML path
 - Marks the first suitable model as `priority` unless an existing merge already defines one (embedding models are never auto-priority)
 - Deduplicates entries with the same alias or file on merge
-
-#### Docker (`models.docker.toml`)
-
-For Docker deployments, use `models.docker.toml` (mounted by `docker-compose` alongside `config.docker.toml`). The same schema applies; paths are container paths (`/models`, `/usr/local/bin/llama-server`). Example entries for thinking models are included in the repo template.
 
 #### Customizing aliases and priorities
 

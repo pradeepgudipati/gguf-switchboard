@@ -1,6 +1,6 @@
 # Install on macOS
 
-> [← Back to README](../README.md)
+> [← Back to README](../../README.md)
 
 macOS supports GGUF Switchboard as a source build with llama.cpp and Metal. The Linux `deploy.sh` systemd installer and the vLLM backend are not supported by this guide.
 

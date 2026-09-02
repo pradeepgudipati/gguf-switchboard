@@ -39,10 +39,10 @@ historical decisions, or durable memory, ALWAYS scope requests to:
 
 Deeper architecture and behavior docs:
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+- [`docs/architecture/overview.md`](docs/architecture/overview.md)
 - [`docs/COMPARISON.md`](docs/COMPARISON.md)
 - [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md)
-- [`docs/CONFIGURATION.md`](docs/CONFIGURATION.md)
+- [`docs/getting-started/configuration.md`](docs/getting-started/configuration.md)
 - [`docs/USAGE.md`](docs/USAGE.md)
 - [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md)
 - [`docs/adr/001-positioning-vs-llama-swap.md`](docs/adr/001-positioning-vs-llama-swap.md)
@@ -122,7 +122,7 @@ Avoid unrelated refactoring during bug fixes.
 Before significant architectural changes (e.g. multi-GPU support, new backend, storage changes):
 
 1. Use jbcontext to understand current boundaries and dependencies.
-2. Review relevant docs (`docs/ARCHITECTURE.md`, `docs/adr/`).
+2. Review relevant docs (`docs/architecture/overview.md`, `docs/adr/`).
 3. Search Context Harbor project `GGUF-Switchboard` for previous decisions and constraints.
 4. Identify alternatives and trade-offs.
 5. Do not implement a major architectural deviation without explicit approval.
@@ -172,7 +172,6 @@ cargo test --test responses
 
 ```bash
 ./deploy.sh                       # systemd install/upgrade (Linux)
-docker compose up -d --build      # containerized deployment
 ```
 
 ## Mandatory Completion Gate
@@ -221,13 +220,12 @@ For changes to `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1
 
 ### Memory-Pressure / Eviction / Auto-GPU-Layer Changes
 
-- verify behavior against `docs/CONFIGURATION.md` and `docs/COMPATIBILITY.md`
+- verify behavior against `docs/getting-started/configuration.md` and `docs/COMPATIBILITY.md`
 - add/extend targeted unit tests for the heuristic
 - note any change to `vram_gb` / `auto_ngl` heuristics as a durable decision candidate in Context Harbor
 
-### Deployment / Docker / systemd Changes
+### Deployment / systemd Changes
 
-- run `docker compose build` where Docker is affected
 - validate `deploy.sh` / `gguf-switchboard.service` changes on a Linux target when feasible
 - run `./scripts/test-deploy-models.sh` when model discovery/deploy behavior is affected
 
@@ -247,7 +245,7 @@ Client (OpenAI/Anthropic SDK)
    ← forwarded/streamed response (SSE where applicable)
 ```
 
-Full detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+Full detail: [docs/architecture/overview.md](docs/architecture/overview.md).
 
 ### Key Subsystems
 
@@ -261,9 +259,9 @@ Full detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ### Config
 
-- `config.toml` — server/runtime config (see `config.example.toml`, `config.docker.toml`).
-- `models.toml` — model registry defaults (see `models.example.toml`, `models.docker.toml`).
-- Full reference: [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+- `config.toml` — server/runtime config (see `config.example.toml`).
+- `models.toml` — model registry defaults (see `models.example.toml`).
+- Full reference: [docs/getting-started/configuration.md](docs/getting-started/configuration.md).
 
 ### Platform Notes
 
@@ -313,7 +311,7 @@ Use memory retrieval when previous decisions or durable project knowledge may af
 - multi-GPU direction and constraints
 - model lifecycle and eviction policy decisions
 - API compatibility decisions (OpenAI vs Anthropic translation choices)
-- deployment/operational constraints (systemd, Docker, `deploy.sh`)
+- deployment/operational constraints (systemd, `deploy.sh`)
 - security/trust-boundary decisions (LAN-only assumption, auth)
 - previously resolved ambiguities
 
