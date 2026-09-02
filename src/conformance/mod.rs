@@ -9,3 +9,6 @@
 
 pub mod battery;
 pub mod classify;
+pub mod history;
+
+pub use history::{ConformanceHistory, ConformanceRunDetail, ConformanceRunSummary};

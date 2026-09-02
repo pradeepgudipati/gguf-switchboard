@@ -8,6 +8,7 @@ use tracing::{info, warn};
 use crate::config::{
     Config, ModelConfig, ModelsRegistry, RescanResult, SyncSummary, sync_registry_from_hf,
 };
+use crate::conformance::ConformanceHistory;
 use crate::db::TokenDb;
 use crate::embedding_admission::EmbeddingAdmission;
 use crate::errors::RuntimeError;
@@ -17,6 +18,7 @@ use crate::scheduler::Scheduler;
 pub struct AppState {
     pub scheduler: Arc<Scheduler>,
     pub token_db: Arc<TokenDb>,
+    pub conformance_history: Arc<ConformanceHistory>,
     pub registry_json: RwLock<String>,
     pub models_file: Option<String>,
     pub default_backend: String,
@@ -28,7 +30,12 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn new(config: Config, scheduler: Arc<Scheduler>, token_db: Arc<TokenDb>) -> Self {
+    pub fn new(
+        config: Config,
+        scheduler: Arc<Scheduler>,
+        token_db: Arc<TokenDb>,
+        conformance_history: Arc<ConformanceHistory>,
+    ) -> Self {
         Self {
             registry_json: RwLock::new(config.registry_json.clone()),
             models_file: config.models_file.clone(),
@@ -38,6 +45,7 @@ impl AppState {
             refresh_lock: AsyncMutex::new(()),
             scheduler,
             token_db,
+            conformance_history,
             started_at: Instant::now(),
             embedding_admission: EmbeddingAdmission::new(std::time::Duration::from_secs(
                 config.embedding_fit.queue_timeout_secs,

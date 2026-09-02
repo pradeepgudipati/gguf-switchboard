@@ -9,13 +9,15 @@
 use std::sync::Arc;
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
+use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
-use tracing::instrument;
+use tracing::{instrument, warn};
 use utoipa::ToSchema;
 
 use crate::conformance::battery::{self, BatteryReport};
-use crate::conformance::classify::{self, ToolCallClassification};
+use crate::conformance::classify::{self, ToolCallClassification, ToolCallLocation};
+use crate::conformance::{ConformanceRunDetail, ConformanceRunSummary};
 use crate::errors::RuntimeError;
 use crate::kind_guard::{CHAT_KINDS, require_kind};
 use crate::sanitize::sanitize_chat_request;
@@ -73,18 +75,28 @@ pub async fn inspect(
     let backend = state.scheduler.ensure_loaded(&request.model).await?;
     let model_id = request.model.clone();
     let mut raw_response = backend.chat(request).await?;
-    raw_response.model = model_id;
+    raw_response.model = model_id.clone();
 
-    let classifications = raw_response
+    let classifications: Vec<ToolCallClassification> = raw_response
         .choices
         .iter()
         .map(|choice| classify::classify_message(&choice.message))
         .collect();
 
-    Ok(Json(InspectResponse {
+    let response = InspectResponse {
         raw_response,
         classifications,
-    }))
+    };
+    record_run(
+        &state,
+        "inspect",
+        Some(&model_id),
+        None,
+        &summarize_classifications(&response.classifications),
+        None,
+        &response,
+    );
+    Ok(Json(response))
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -146,18 +158,18 @@ pub async fn resolve_template(
         "tools": request.tools,
     });
 
-    match backend.raw_post("/apply-template", body).await {
+    let response = match backend.raw_post("/apply-template", body).await {
         Ok(value) => {
             let prompt = value
                 .get("prompt")
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string);
-            Ok(Json(ResolveTemplateResponse {
+            ResolveTemplateResponse {
                 resolved: prompt.is_some(),
                 prompt,
                 template_source: None,
                 error: None,
-            }))
+            }
         }
         Err(apply_err) => match backend.raw_get("/props").await {
             Ok(props) => {
@@ -165,7 +177,7 @@ pub async fn resolve_template(
                     .get("chat_template")
                     .and_then(serde_json::Value::as_str)
                     .map(str::to_string);
-                Ok(Json(ResolveTemplateResponse {
+                ResolveTemplateResponse {
                     resolved: false,
                     prompt: None,
                     template_source,
@@ -173,9 +185,9 @@ pub async fn resolve_template(
                         "backend does not support live template resolution ({apply_err}); \
                          showing raw template source only"
                     )),
-                }))
+                }
             }
-            Err(props_err) => Ok(Json(ResolveTemplateResponse {
+            Err(props_err) => ResolveTemplateResponse {
                 resolved: false,
                 prompt: None,
                 template_source: None,
@@ -183,9 +195,27 @@ pub async fn resolve_template(
                     "template resolution unavailable: /apply-template failed ({apply_err}), \
                      /props fallback also failed ({props_err})"
                 )),
-            })),
+            },
         },
-    }
+    };
+
+    let summary = if response.resolved {
+        "resolved"
+    } else if response.template_source.is_some() {
+        "template-only"
+    } else {
+        "error"
+    };
+    record_run(
+        &state,
+        "resolve_template",
+        Some(&request.model),
+        None,
+        summary,
+        Some(response.resolved),
+        &response,
+    );
+    Ok(Json(response))
 }
 
 /// Run the fixed 4-case conformance battery (single tool call, parallel
@@ -212,7 +242,19 @@ pub async fn run_battery(
         .model_config(&model_id)
         .ok_or_else(|| RuntimeError::ModelNotFound(model_id.clone()))?;
     let backend = state.scheduler.ensure_loaded(&model_id).await?;
-    Ok(Json(battery::run_battery(&backend, &model_id).await))
+    let report = battery::run_battery(&backend, &model_id).await;
+
+    let passed = report.cases.iter().filter(|c| c.pass).count();
+    record_run(
+        &state,
+        "battery",
+        Some(&model_id),
+        None,
+        &format!("{passed}/{} pass", report.cases.len()),
+        Some(report.overall_pass),
+        &report,
+    );
+    Ok(Json(report))
 }
 
 #[derive(Debug, Deserialize, ToSchema)]
@@ -291,12 +333,22 @@ pub async fn compare(
     let result_a = run_one(&state, &request.model_a, &request).await;
     let result_b = run_one(&state, &request.model_b, &request).await;
 
-    Ok(Json(CompareReport {
-        model_a: request.model_a,
-        model_b: request.model_b,
+    let report = CompareReport {
+        model_a: request.model_a.clone(),
+        model_b: request.model_b.clone(),
         result_a,
         result_b,
-    }))
+    };
+    record_run(
+        &state,
+        "compare",
+        Some(&request.model_a),
+        Some(&request.model_b),
+        &format!("{} vs {}", request.model_a, request.model_b),
+        None,
+        &report,
+    );
+    Ok(Json(report))
 }
 
 async fn run_one(state: &Arc<AppState>, model_id: &str, request: &CompareRequest) -> CompareResult {
@@ -365,4 +417,139 @@ async fn run_one(state: &Arc<AppState>, model_id: &str, request: &CompareRequest
             }
         }
     }
+}
+
+// ── Run history ──────────────────────────────────────────────────────────────
+
+/// Best-effort persist of a conformance run. Never fails the request — a
+/// history write error is logged and swallowed.
+fn record_run<T: Serialize>(
+    state: &Arc<AppState>,
+    kind: &str,
+    model: Option<&str>,
+    model_b: Option<&str>,
+    summary: &str,
+    passed: Option<bool>,
+    detail: &T,
+) {
+    let detail = serde_json::to_value(detail).unwrap_or(serde_json::Value::Null);
+    if let Err(e) = state
+        .conformance_history
+        .record(kind, model, model_b, summary, passed, &detail)
+    {
+        warn!(error = %e, kind, "failed to persist conformance run to history");
+    }
+}
+
+/// One-line summary of where the tool call(s) landed across all choices.
+fn summarize_classifications(classifications: &[ToolCallClassification]) -> String {
+    if classifications.is_empty() {
+        return "no choices".to_string();
+    }
+    let loc = |l: &ToolCallLocation| match l {
+        ToolCallLocation::StructuredToolCalls => "tool_calls",
+        ToolCallLocation::PlainTextJsonDump => "plaintext-json",
+        ToolCallLocation::LeakedIntoReasoning => "leaked-reasoning",
+        ToolCallLocation::NoToolCallDetected => "none",
+    };
+    if classifications.len() == 1 {
+        return loc(&classifications[0].location).to_string();
+    }
+    let mut parts: Vec<&str> = classifications.iter().map(|c| loc(&c.location)).collect();
+    parts.dedup();
+    parts.join(", ")
+}
+
+#[derive(Debug, Deserialize, ToSchema, utoipa::IntoParams)]
+pub struct HistoryQuery {
+    /// Max rows to return (default 50, capped at 500).
+    #[serde(default)]
+    pub limit: Option<u32>,
+    /// Filter by run kind: `battery` | `compare` | `inspect` | `resolve_template`.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// Filter by (primary) model id.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct HistoryClearResponse {
+    pub deleted: u64,
+}
+
+/// List recent conformance-console runs (newest first), without the full
+/// response payload. Use `GET /v1/conformance/history/{id}` for the detail.
+#[utoipa::path(
+    get,
+    path = "/v1/conformance/history",
+    tag = "conformance",
+    params(HistoryQuery),
+    responses((status = 200, description = "Recent runs", body = [ConformanceRunSummary]))
+)]
+pub async fn history_list(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<HistoryQuery>,
+) -> Result<Json<Vec<ConformanceRunSummary>>, RuntimeError> {
+    let rows = state.conformance_history.list(
+        q.limit.unwrap_or(50),
+        q.kind.as_deref(),
+        q.model.as_deref(),
+    )?;
+    Ok(Json(rows))
+}
+
+/// Fetch one stored run including its full response payload.
+#[utoipa::path(
+    get,
+    path = "/v1/conformance/history/{id}",
+    tag = "conformance",
+    params(("id" = i64, Path, description = "History row id")),
+    responses(
+        (status = 200, description = "The stored run", body = ConformanceRunDetail),
+        (status = 404, description = "No such run"),
+    )
+)]
+pub async fn history_get(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> Result<Json<ConformanceRunDetail>, StatusCode> {
+    match state.conformance_history.get(id) {
+        Ok(Some(row)) => Ok(Json(row)),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// Delete one stored run.
+#[utoipa::path(
+    delete,
+    path = "/v1/conformance/history/{id}",
+    tag = "conformance",
+    params(("id" = i64, Path, description = "History row id")),
+    responses((status = 204, description = "Deleted"), (status = 404, description = "No such run"))
+)]
+pub async fn history_delete(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<i64>,
+) -> StatusCode {
+    match state.conformance_history.delete(id) {
+        Ok(true) => StatusCode::NO_CONTENT,
+        Ok(false) => StatusCode::NOT_FOUND,
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+/// Delete the entire conformance run history.
+#[utoipa::path(
+    delete,
+    path = "/v1/conformance/history",
+    tag = "conformance",
+    responses((status = 200, description = "Cleared", body = HistoryClearResponse))
+)]
+pub async fn history_clear(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<HistoryClearResponse>, RuntimeError> {
+    let deleted = state.conformance_history.clear()?;
+    Ok(Json(HistoryClearResponse { deleted }))
 }

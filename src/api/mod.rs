@@ -58,6 +58,10 @@ use crate::state::AppState;
         conformance::resolve_template,
         conformance::run_battery,
         conformance::compare,
+        conformance::history_list,
+        conformance::history_get,
+        conformance::history_delete,
+        conformance::history_clear,
     ),
     components(schemas(
         health::HealthResponse,
@@ -134,6 +138,9 @@ use crate::state::AppState;
         crate::conformance::battery::BatteryCase,
         crate::conformance::battery::CaseVerdict,
         crate::conformance::battery::BatteryReport,
+        crate::conformance::ConformanceRunSummary,
+        crate::conformance::ConformanceRunDetail,
+        conformance::HistoryClearResponse,
     )),
     tags(
         (name = "health", description = "Health and status endpoints"),
@@ -264,6 +271,14 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/conformance/compare",
             axum::routing::post(conformance::compare),
+        )
+        .route(
+            "/v1/conformance/history",
+            axum::routing::get(conformance::history_list).delete(conformance::history_clear),
+        )
+        .route(
+            "/v1/conformance/history/{id}",
+            axum::routing::get(conformance::history_get).delete(conformance::history_delete),
         )
         .route("/health", axum::routing::get(health::health))
         .route("/status", axum::routing::get(health::status))

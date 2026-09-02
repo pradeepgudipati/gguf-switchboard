@@ -9,6 +9,7 @@ use gguf_switchboard::api;
 use gguf_switchboard::config::{
     Config, ModelsRegistry, cmd_files, cmd_pull, cmd_search, sync_registry_from_hf,
 };
+use gguf_switchboard::conformance::ConformanceHistory;
 use gguf_switchboard::db::TokenDb;
 use gguf_switchboard::metrics;
 use gguf_switchboard::scheduler::Scheduler;
@@ -189,9 +190,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let token_db = Arc::new(TokenDb::open(&db_path)?);
 
+    let conformance_db_path = db_path.with_file_name("conformance.db");
+    let conformance_history = Arc::new(ConformanceHistory::open(&conformance_db_path)?);
+
     let scheduler = Arc::new(Scheduler::new(config.clone()).await?);
     let watcher_handles = scheduler.start_watchers();
-    let app_state = Arc::new(AppState::new(config.clone(), scheduler.clone(), token_db));
+    let app_state = Arc::new(AppState::new(
+        config.clone(),
+        scheduler.clone(),
+        token_db,
+        conformance_history,
+    ));
 
     let rescan_cancel = tokio_util::sync::CancellationToken::new();
     let rescan_handle = app_state.spawn_models_rescan_watcher(rescan_cancel.clone());
