@@ -415,6 +415,83 @@ window.onload = function() {
     return lines.join('\n');
   }
 
+  const STATUS_POLL_MS = 3000;
+  let statusPollHandle = null;
+
+  function statusBadgeState(status) {
+    if (!status || !status.loaded_model) {
+      return { dotClass: 'status-dot-gray', text: 'No model loaded' };
+    }
+    var n = status.active_requests || 0;
+    if (n > 0) {
+      return {
+        dotClass: 'status-dot-amber',
+        text: status.loaded_model + ' \u00b7 processing ' + n + ' request' + (n === 1 ? '' : 's')
+      };
+    }
+    return {
+      dotClass: 'status-dot-green',
+      text: status.loaded_model + ' \u00b7 serving (idle)'
+    };
+  }
+
+  function renderStatusBadge(status) {
+    const badge = document.getElementById('model-status-badge');
+    if (!badge) return;
+    const dot = badge.querySelector('.status-dot');
+    const label = badge.querySelector('.status-label');
+    const state = statusBadgeState(status);
+    dot.className = 'status-dot ' + state.dotClass;
+    label.textContent = state.text;
+    badge.title = status
+      ? 'Loaded model: ' + (status.loaded_model || '(none)') +
+        '\nActive requests: ' + (status.active_requests || 0) +
+        '\nUptime: ' + (status.uptime_secs || 0) + 's'
+      : 'Status unavailable';
+  }
+
+  function pollStatus() {
+    fetch('/status')
+      .then(function(r) { return r.json(); })
+      .then(function(data) { renderStatusBadge(data); })
+      .catch(function(err) {
+        console.warn('Failed to poll /status for Swagger UI badge:', err);
+        const badge = document.getElementById('model-status-badge');
+        if (!badge) return;
+        badge.querySelector('.status-dot').className = 'status-dot status-dot-gray';
+        badge.querySelector('.status-label').textContent = 'Status unavailable';
+      });
+  }
+
+  // Currently-loaded / serving / processing indicator. Lives inside the
+  // model-selector bar so it travels with it; the bar itself gets torn
+  // down and rebuilt on "Refresh models", so this re-creates the badge
+  // each time but only ever starts one polling interval.
+  function injectStatusBadge(bar) {
+    const badge = document.createElement('span');
+    badge.id = 'model-status-badge';
+    badge.className = 'model-status-badge';
+    badge.title = 'Checking status\u2026';
+
+    const dot = document.createElement('span');
+    dot.className = 'status-dot status-dot-gray';
+
+    const label = document.createElement('span');
+    label.className = 'status-label';
+    label.textContent = 'Checking\u2026';
+
+    badge.appendChild(dot);
+    badge.appendChild(label);
+    bar.appendChild(badge);
+
+    if (statusPollHandle) {
+      pollStatus();
+    } else {
+      pollStatus();
+      statusPollHandle = setInterval(pollStatus, STATUS_POLL_MS);
+    }
+  }
+
   function injectModelSelector(models) {
     if (document.getElementById('global-model-select')) return;
     allModels = models;
@@ -424,6 +501,8 @@ window.onload = function() {
 
     const bar = document.createElement('div');
     bar.className = 'model-selector-bar';
+
+    injectStatusBadge(bar);
 
     const label = document.createElement('label');
     label.setAttribute('for', 'global-model-select');

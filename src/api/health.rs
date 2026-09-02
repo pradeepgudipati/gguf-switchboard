@@ -24,6 +24,9 @@ pub struct StatusResponse {
     pub priority_model: Option<String>,
     pub configured_models: Vec<serde_json::Value>,
     pub uptime_secs: u64,
+    /// In-flight requests across all models right now (backs the "processing"
+    /// indicator on the Swagger UI badge). 0 means the loaded model is idle.
+    pub active_requests: u32,
     /// Timing breakdown of the most recent model load/switch (ms per phase).
     /// The same data is exported to Prometheus as
     /// `gguf_switchboard_model_switch_seconds` / `..._switch_phase_seconds`.
@@ -79,6 +82,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> 
         .collect();
 
     let uptime_secs = state.started_at.elapsed().as_secs();
+    let active_requests = state.scheduler.total_active_requests();
     let last_switch = state
         .scheduler
         .last_switch()
@@ -93,6 +97,7 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> 
         priority_model: priority,
         configured_models: models,
         uptime_secs,
+        active_requests,
         last_switch,
     })
 }

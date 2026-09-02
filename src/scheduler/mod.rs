@@ -178,6 +178,12 @@ impl Scheduler {
             .unwrap_or(0)
     }
 
+    /// Total in-flight requests across all models (loaded or mid-switch).
+    /// Backs the "processing" indicator on `/status` and the Swagger UI badge.
+    pub fn total_active_requests(&self) -> u32 {
+        self.inner.active_requests.lock().values().sum()
+    }
+
     /// Ensure the given model is loaded and ready.
     ///
     /// Fast path: the model is resident and healthy → returned immediately.
