@@ -87,10 +87,9 @@ impl Backend for ExternalOpenAiBackend {
             req = req.bearer_auth(key);
         }
 
-        let response = req
-            .send()
-            .await
-            .map_err(|e| RuntimeError::ProxyError(format!("Request to external endpoint failed: {e}")))?;
+        let response = req.send().await.map_err(|e| {
+            RuntimeError::ProxyError(format!("Request to external endpoint failed: {e}"))
+        })?;
 
         if !response.status().is_success() {
             let status = response.status();

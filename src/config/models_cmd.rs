@@ -1677,8 +1677,7 @@ fn server_registry_path(config_path: &Path) -> PathBuf {
 /// the user can consolidate. Deploy-time consolidation lives in `deploy.sh`.
 fn warn_on_stray_registries(resolved: &str, config_path: &Path) {
     let canonical = server_registry_path(config_path);
-    let resolved_abs = std::fs::canonicalize(resolved)
-        .unwrap_or_else(|_| PathBuf::from(resolved));
+    let resolved_abs = std::fs::canonicalize(resolved).unwrap_or_else(|_| PathBuf::from(resolved));
     let canonical_abs = std::fs::canonicalize(&canonical).unwrap_or_else(|_| canonical.clone());
 
     if resolved_abs != canonical_abs {
@@ -1702,7 +1701,9 @@ fn warn_on_stray_registries(resolved: &str, config_path: &Path) {
         let Ok(abs) = std::fs::canonicalize(&cand) else {
             continue;
         };
-        if abs != canonical_abs && abs != resolved_abs && !strays.contains(&abs.display().to_string())
+        if abs != canonical_abs
+            && abs != resolved_abs
+            && !strays.contains(&abs.display().to_string())
         {
             strays.push(abs.display().to_string());
         }

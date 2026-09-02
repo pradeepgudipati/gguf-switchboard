@@ -1371,7 +1371,12 @@ impl ModelsRegistry {
             entry.context_size = Some(ctx);
         }
         registry.write(models_file)?;
-        tracing::info!(alias, ngl, ?context_size, "Persisted reduced ngl to models registry");
+        tracing::info!(
+            alias,
+            ngl,
+            ?context_size,
+            "Persisted reduced ngl to models registry"
+        );
         Ok(())
     }
 

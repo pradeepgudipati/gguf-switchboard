@@ -41,12 +41,11 @@ pub fn host_stats_cached(ttl: Duration) -> HostStats {
     static CACHE: OnceLock<Mutex<Option<(Instant, HostStats)>>> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
 
-    if let Ok(guard) = cache.lock() {
-        if let Some((at, stats)) = guard.as_ref() {
-            if at.elapsed() < ttl {
-                return stats.clone();
-            }
-        }
+    if let Ok(guard) = cache.lock()
+        && let Some((at, stats)) = guard.as_ref()
+        && at.elapsed() < ttl
+    {
+        return stats.clone();
     }
 
     let stats = sample();

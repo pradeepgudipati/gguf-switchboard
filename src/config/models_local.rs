@@ -289,9 +289,8 @@ fn resolve_scan_dirs(
     let configured = registry
         .map(|r| r.defaults.models_dir.clone())
         .unwrap_or_default();
-    resolve_models_dirs_with_fallback(&configured).map_err(|e| {
-        format!("models list: could not resolve a model directory ({e}); pass --dir")
-    })
+    resolve_models_dirs_with_fallback(&configured)
+        .map_err(|e| format!("models list: could not resolve a model directory ({e}); pass --dir"))
 }
 
 fn json_sibling(toml_path: &str) -> String {
@@ -479,9 +478,7 @@ pub async fn cmd_delete_local(args: &[String]) -> Result<(), Box<dyn Error>> {
         }
     }
 
-    println!(
-        "\nRestart the service or POST /v1/models/refresh to drop it from the live registry."
-    );
+    println!("\nRestart the service or POST /v1/models/refresh to drop it from the live registry.");
     Ok(())
 }
 
@@ -491,10 +488,12 @@ fn resolve_target<'a>(
 ) -> Result<&'a LocalModelEntry, String> {
     // Numeric index from `ggs models list`.
     if let Ok(n) = target.parse::<usize>() {
-        return entries
-            .iter()
-            .find(|e| e.index == n)
-            .ok_or_else(|| format!("models delete: index {n} out of range (1..={})", entries.len()));
+        return entries.iter().find(|e| e.index == n).ok_or_else(|| {
+            format!(
+                "models delete: index {n} out of range (1..={})",
+                entries.len()
+            )
+        });
     }
 
     let want = target.to_ascii_lowercase();
@@ -531,6 +530,34 @@ fn resolve_target<'a>(
                 .collect::<Vec<_>>()
                 .join(", ")
         )),
+    }
+}
+
+/// Print (but never auto-delete) files that commonly ride alongside a GGUF.
+fn report_sidecars(gguf: &Path) {
+    let (Some(parent), Some(stem)) = (gguf.parent(), gguf.file_stem()) else {
+        return;
+    };
+    let stem = stem.to_string_lossy();
+    let mut related = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(parent) {
+        for e in entries.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if e.path() == gguf {
+                continue;
+            }
+            let lower = name.to_ascii_lowercase();
+            if lower.contains("mmproj") || (name.starts_with(&*stem) && lower.ends_with(".json")) {
+                related.push(name);
+            }
+        }
+    }
+    if !related.is_empty() {
+        println!(
+            "note: left {} related file(s) in place: {}",
+            related.len(),
+            related.join(", ")
+        );
     }
 }
 
@@ -580,7 +607,11 @@ mod tests {
         assert_eq!(resolve_target("1", &entries).unwrap().index, 1);
         assert!(resolve_target("99", &entries).is_err());
         assert_eq!(
-            resolve_target("beta-chat", &entries).unwrap().path.file_name().unwrap(),
+            resolve_target("beta-chat", &entries)
+                .unwrap()
+                .path
+                .file_name()
+                .unwrap(),
             "beta-chat"
         );
         assert!(resolve_target("nope", &entries).is_err());
@@ -591,38 +622,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = make_safetensors_dir(tmp.path(), "m");
         let outside = tmp.path().join("m");
-        // canonical(dir) starts_with canonical(scan dir) -> ok
         assert!(canonical(&dir).starts_with(canonical(tmp.path())));
-        // a sibling temp dir is not inside
         let other = tempfile::tempdir().unwrap();
         assert!(!canonical(&outside).starts_with(canonical(other.path())));
-    }
-}
-
-/// Print (but never auto-delete) files that commonly ride alongside a GGUF.
-fn report_sidecars(gguf: &Path) {
-    let (Some(parent), Some(stem)) = (gguf.parent(), gguf.file_stem()) else {
-        return;
-    };
-    let stem = stem.to_string_lossy();
-    let mut related = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(parent) {
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if e.path() == gguf {
-                continue;
-            }
-            let lower = name.to_ascii_lowercase();
-            if lower.contains("mmproj") || (name.starts_with(&*stem) && lower.ends_with(".json")) {
-                related.push(name);
-            }
-        }
-    }
-    if !related.is_empty() {
-        println!(
-            "note: left {} related file(s) in place: {}",
-            related.len(),
-            related.join(", ")
-        );
     }
 }

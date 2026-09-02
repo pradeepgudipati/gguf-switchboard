@@ -1781,10 +1781,16 @@ impl SchedulerInner {
             return Ok(false);
         }
         let ctx_first = matches!(kind, LoadFailureKind::GpuOomKvCache);
-        let levers: [bool; 2] = if ctx_first { [true, false] } else { [false, true] };
+        let levers: [bool; 2] = if ctx_first {
+            [true, false]
+        } else {
+            [false, true]
+        };
         for use_ctx in levers {
             let changed = if use_ctx {
-                self.try_reduce_context(model_id, current_ctx).await?.is_some()
+                self.try_reduce_context(model_id, current_ctx)
+                    .await?
+                    .is_some()
             } else {
                 self.try_reduce_ngl(model_id, current_ngl, block_count)
                     .await?

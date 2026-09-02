@@ -819,33 +819,32 @@ fn build_fallback_ladder(
             let reduce_this_attempt = default_ngl > 1
                 && (plans.len() == max_attempts - 1
                     || (weights_dont_fit && plans.len() >= max_attempts.saturating_sub(3)));
-            let (ngl, split_mode, tensor_split) =
-                if reduce_this_attempt {
-                    // Fraction of the layer budget, decreasing monotonically as
-                    // attempts progress (roughly 0.7x → 0.15x by the last rung).
-                    let base = layers.unwrap_or(default_ngl).max(1);
-                    let steps = max_attempts as u32;
-                    let numer = steps.saturating_sub(plans.len() as u32).max(1);
-                    let reduced = (u64::from(base) * u64::from(numer) / u64::from(steps + 1)) as u32;
-                    let reduced = reduced.min(default_ngl.saturating_sub(1)).max(1);
-                    let reason_extra = "reduced GPU offload";
-                    debug!(
-                        ngl = reduced,
-                        reason = reason_extra,
-                        "Reducing ngl for fallback attempt"
-                    );
-                    (
-                        reduced,
-                        default_split_mode.clone(),
-                        default_tensor_split.clone(),
-                    )
-                } else {
-                    (
-                        default_ngl,
-                        default_split_mode.clone(),
-                        default_tensor_split.clone(),
-                    )
-                };
+            let (ngl, split_mode, tensor_split) = if reduce_this_attempt {
+                // Fraction of the layer budget, decreasing monotonically as
+                // attempts progress (roughly 0.7x → 0.15x by the last rung).
+                let base = layers.unwrap_or(default_ngl).max(1);
+                let steps = max_attempts as u32;
+                let numer = steps.saturating_sub(plans.len() as u32).max(1);
+                let reduced = (u64::from(base) * u64::from(numer) / u64::from(steps + 1)) as u32;
+                let reduced = reduced.min(default_ngl.saturating_sub(1)).max(1);
+                let reason_extra = "reduced GPU offload";
+                debug!(
+                    ngl = reduced,
+                    reason = reason_extra,
+                    "Reducing ngl for fallback attempt"
+                );
+                (
+                    reduced,
+                    default_split_mode.clone(),
+                    default_tensor_split.clone(),
+                )
+            } else {
+                (
+                    default_ngl,
+                    default_split_mode.clone(),
+                    default_tensor_split.clone(),
+                )
+            };
 
             // Compute batch size for this attempt (embedding models only).
             let (batch_size, ubatch_size) = if default_batch.is_some() {

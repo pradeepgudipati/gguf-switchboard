@@ -287,8 +287,15 @@ mod tests {
     fn newest_first_and_limit() {
         let h = db();
         for i in 0..5 {
-            h.record("inspect", Some(&format!("m{i}")), None, "s", None, &json!({}))
-                .unwrap();
+            h.record(
+                "inspect",
+                Some(&format!("m{i}")),
+                None,
+                "s",
+                None,
+                &json!({}),
+            )
+            .unwrap();
         }
         let list = h.list(3, None, None).unwrap();
         assert_eq!(list.len(), 3);

@@ -4,6 +4,8 @@ use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tracing::debug;
 
+type GpuCache = Mutex<Option<(Instant, Vec<GpuDeviceInfo>)>>;
+
 /// Per-GPU device information from nvidia-smi.
 #[derive(Debug, Clone, Default)]
 pub struct GpuDeviceInfo {
@@ -49,15 +51,14 @@ pub fn probe_all_gpus() -> Vec<GpuDeviceInfo> {
 /// Like [`probe_all_gpus`] but memoised for `ttl`, so a burst of `/status`
 /// polls from the Swagger UI does not spawn an `nvidia-smi` per request.
 pub fn probe_all_gpus_cached(ttl: Duration) -> Vec<GpuDeviceInfo> {
-    static CACHE: OnceLock<Mutex<Option<(Instant, Vec<GpuDeviceInfo>)>>> = OnceLock::new();
+    static CACHE: OnceLock<GpuCache> = OnceLock::new();
     let cache = CACHE.get_or_init(|| Mutex::new(None));
 
-    if let Ok(guard) = cache.lock() {
-        if let Some((at, data)) = guard.as_ref() {
-            if at.elapsed() < ttl {
-                return data.clone();
-            }
-        }
+    if let Ok(guard) = cache.lock()
+        && let Some((at, data)) = guard.as_ref()
+        && at.elapsed() < ttl
+    {
+        return data.clone();
     }
     let fresh = probe_all_gpus();
     if let Ok(mut guard) = cache.lock() {
