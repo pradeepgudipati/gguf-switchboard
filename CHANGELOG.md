@@ -5,6 +5,16 @@ Release notes for each version live in [`releases/`](releases/) and on [GitHub R
 ## Unreleased
 
 
+## [v0.1.8](https://github.com/pradeepgudipati/gguf-switchboard/releases/tag/v0.1.8) — 2026-09-03
+
+- **Adoption-ready documentation** — reorganized the documentation into focused getting-started, runtime, model, API, deployment, troubleshooting, and client-integration guides, with `llms.txt` and `llms-full.txt` for AI-assisted discovery.
+- **Branded API consoles** — added project branding, icons, and clearer navigation across Swagger UI and the Conformance Console.
+- **Community workflows** — added contribution guidance, structured issue templates, and a pull-request checklist.
+- **Safer deployment updates** — `deploy.sh` now merges stray `models.toml` registries into the canonical deployed registry and skips unnecessary binary installation and service restarts after no-change pulls.
+- **Clearer supported scope** — refreshed product positioning around GGUF through llama.cpp and SafeTensors through vLLM, added dedicated integration guides, and removed the unsupported Docker deployment files.
+- **CLI discoverability** — added `ggs version`, `--version`, and `-V`, plus reorganized help and copyable examples.
+
+
 ## [v0.1.6](https://github.com/pradeepgudipati/gguf-switchboard/releases/tag/v0.1.6) — 2026-08-31
 
 - **Dual vLLM and llama.cpp backends** — registry-driven routing supports safetensors models through vLLM and GGUF models through llama.cpp under the same alias, with hardware-fit planning, model-source reporting, and safer search/pull behavior.
