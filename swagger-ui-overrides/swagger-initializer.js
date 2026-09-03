@@ -593,22 +593,24 @@ window.onload = function() {
   // branding. Safe to call repeatedly (guarded by a data attribute).
   function applyBranding(wrapper) {
     document.title = 'GGUF Switchboard — API console';
+    let favicon = document.querySelector('link[rel~="icon"]');
+    if (!favicon) {
+      favicon = document.createElement('link');
+      favicon.rel = 'icon';
+      document.head.appendChild(favicon);
+    }
+    favicon.type = 'image/svg+xml';
+    favicon.href = './brand/gguf-switchboard-mark.svg';
     const link = wrapper.querySelector('a.link');
     if (!link || link.dataset.ggsBranded) return;
     link.dataset.ggsBranded = '1';
     link.removeAttribute('href');
     link.textContent = '';
-    const brand = document.createElement('span');
-    brand.className = 'ggs-brand';
-    const mark = document.createElement('span');
-    mark.className = 'ggs-brand-mark';
-    mark.textContent = 'GGUF';
-    const word = document.createElement('span');
-    word.className = 'ggs-brand-word';
-    word.textContent = 'Switchboard';
-    brand.appendChild(mark);
-    brand.appendChild(word);
-    link.appendChild(brand);
+    const logo = document.createElement('img');
+    logo.className = 'ggs-brand-logo';
+    logo.src = './brand/gguf-switchboard-logo-on-dark.svg';
+    logo.alt = 'GGUF Switchboard';
+    link.appendChild(logo);
   }
 
   function injectModelSelector(models) {

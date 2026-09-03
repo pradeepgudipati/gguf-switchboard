@@ -23,6 +23,20 @@ fn write_test_gguf(path: &Path, architecture: &str) {
 }
 
 #[test]
+fn swagger_and_conformance_console_use_product_brand_assets() {
+    let initializer = include_str!("../swagger-ui-overrides/swagger-initializer.js");
+    let conformance = include_str!("../swagger-ui-overrides/conformance.html");
+    let css = include_str!("../swagger-ui-overrides/conformance.css");
+
+    assert!(initializer.contains("gguf-switchboard-logo-on-dark.svg"));
+    assert!(initializer.contains("gguf-switchboard-mark.svg"));
+    assert!(conformance.contains("gguf-switchboard-logo-on-dark.svg"));
+    assert!(conformance.contains("gguf-switchboard-mark.svg"));
+    assert!(conformance.contains("apple-touch-icon.png"));
+    assert!(css.contains("--brand-font"));
+}
+
+#[test]
 fn test_config_load_from_str() {
     let toml = r#"
 bind = "127.0.0.1:8080"

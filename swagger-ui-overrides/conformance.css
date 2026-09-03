@@ -1,13 +1,14 @@
 :root {
-  --bg: #f7f9f8;
+  --bg: #f5f8fc;
   --panel-bg: #ffffff;
   --border: #d6ded9;
   --text: #1b1f1d;
   --text-muted: #5a655f;
-  --accent: #2f8f5b;
-  --accent-dark: #1f6b42;
+  --accent: #1677d2;
+  --accent-dark: #5741c9;
   --mono: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --brand-font: Inter, "Avenir Next", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --sans: var(--brand-font);
 
   --pass: #2f8f5b;
   --pass-bg: #e7f5ed;
@@ -33,17 +34,30 @@ body {
 }
 
 .topbar {
-  background: #17241d;
+  background: radial-gradient(circle at 12% 0%, #173b68 0, #09152d 48%, #110b31 100%);
   color: #fff;
   padding: 14px 24px;
 }
 
 .topbar-inner {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   justify-content: space-between;
   max-width: 1100px;
   margin: 0 auto;
+}
+
+.brand {
+  display: grid;
+  grid-template-columns: minmax(190px, 280px) auto;
+  align-items: center;
+  gap: 4px 16px;
+}
+
+.brand-logo {
+  grid-row: 1 / span 2;
+  width: 100%;
+  height: auto;
 }
 
 .brand-title {
@@ -54,11 +68,11 @@ body {
 
 .brand-subtitle {
   font-size: 12px;
-  color: #a9c4b3;
+  color: #b9c9ea;
 }
 
 .back-link {
-  color: #cfe9da;
+  color: #9bdcff;
   text-decoration: none;
   font-size: 13px;
 }
