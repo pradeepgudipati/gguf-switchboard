@@ -88,6 +88,11 @@ pub struct ModelInfo {
     /// never been loaded/probed yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tools_verified: Option<bool>,
+    /// Rough measured generation throughput in tokens/second — the median of
+    /// recent non-streaming requests (output tokens ÷ wall-clock time).
+    /// `None` until the model has served enough requests to estimate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tokens_per_sec: Option<f64>,
 }
 
 /// Runtime profile exposed via the API.
@@ -137,6 +142,7 @@ impl ModelInfo {
             gpu_memory_utilization: None,
             runtime_profile: None,
             tools_verified: None,
+            tokens_per_sec: None,
         }
     }
 
@@ -199,6 +205,7 @@ impl ModelInfo {
             gpu_memory_utilization,
             runtime_profile,
             tools_verified: None,
+            tokens_per_sec: None,
         }
     }
 }

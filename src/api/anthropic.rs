@@ -145,7 +145,9 @@ pub async fn messages(
         let _request_guard = request_guard;
         let _inference_timer = inference_timer;
 
+        let started = std::time::Instant::now();
         let openai_response = backend.chat(openai_req).await?;
+        let elapsed = started.elapsed().as_secs_f64();
         let anthropic_response = to_anthropic_response(&model_id, &openai_response);
 
         // Record token usage
@@ -156,6 +158,13 @@ pub async fn messages(
             anthropic_response.usage.output_tokens,
             anthropic_response.usage.input_tokens + anthropic_response.usage.output_tokens,
             None,
+        );
+        let _ = state.token_db.record_throughput(
+            &model_id,
+            "/v1/messages",
+            anthropic_response.usage.input_tokens,
+            anthropic_response.usage.output_tokens,
+            elapsed,
         );
 
         Ok(Json(anthropic_response).into_response())

@@ -42,6 +42,7 @@ use crate::state::AppState;
         models::list_models,
         models::get_model,
         models::get_model_runtime,
+        models::get_model_throughput,
         models::registry_json,
         models::refresh_models,
         chat::chat_completions,
@@ -72,6 +73,8 @@ use crate::state::AppState;
         crate::types::ListModelsResponse,
         crate::types::RuntimeProfileInfo,
         models::RefreshModelsResponse,
+        models::ThroughputResponse,
+        crate::db::ThroughputTrendPoint,
         crate::types::Usage,
         crate::types::FunctionCall,
         crate::types::ToolCall,
@@ -242,6 +245,10 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route(
             "/v1/models/{model_id}/runtime",
             axum::routing::get(models::get_model_runtime),
+        )
+        .route(
+            "/v1/models/{model_id}/throughput",
+            axum::routing::get(models::get_model_throughput),
         )
         .route(
             "/v1/models/{model_id}",

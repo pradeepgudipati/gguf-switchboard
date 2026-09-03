@@ -162,7 +162,9 @@ pub async fn chat_completions(
         let _guard = active_guard;
         let _request_guard = request_guard;
         let _inference_timer = inference_timer;
+        let started = std::time::Instant::now();
         let mut response = backend.chat(request).await?;
+        let elapsed = started.elapsed().as_secs_f64();
         response.model = model_id.clone();
 
         // Record token usage
@@ -173,6 +175,13 @@ pub async fn chat_completions(
             response.usage.completion_tokens,
             response.usage.total_tokens,
             None,
+        );
+        let _ = state.token_db.record_throughput(
+            &model_id,
+            "/v1/chat/completions",
+            response.usage.prompt_tokens,
+            response.usage.completion_tokens,
+            elapsed,
         );
 
         Ok(Json(response).into_response())
