@@ -14,6 +14,7 @@ Release notes for each version live in [`releases/`](releases/) and on [GitHub R
 - **Deployment script validation** — fixed an unmatched function declaration that prevented `deploy.sh` from parsing and added Bash syntax validation to local and hosted quality gates.
 - **Clearer supported scope** — refreshed product positioning around GGUF through llama.cpp and SafeTensors through vLLM, added dedicated integration guides, and removed the unsupported Docker deployment files.
 - **CLI discoverability** — added `ggs version`, `--version`, and `-V`, plus reorganized help and copyable examples.
+- **README product demos** — added dashboard and runtime screenshots, autoplaying product/API Console previews linked to MP4 demos, and a four-step OpenCode integration walkthrough.
 
 
 ## [v0.1.6](https://github.com/pradeepgudipati/gguf-switchboard/releases/tag/v0.1.6) — 2026-08-31
