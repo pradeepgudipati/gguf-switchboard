@@ -484,9 +484,6 @@ check_stray_registries() {
     fi
 }
 
-# Shared project tree: deploy owner + ggs group (setgid dirs).
-fix_install_ownership() {
-
 configure_vllm_defaults() {
     local file="$1"
     [[ -r "$file" ]] || sudo test -r "$file" || return 1

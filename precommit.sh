@@ -17,6 +17,9 @@ if ! command -v cargo >/dev/null 2>&1; then
     exit 127
 fi
 
+echo "→ bash syntax"
+bash -n deploy.sh
+
 echo "→ cargo fmt --check"
 cargo fmt --all -- --check
 
