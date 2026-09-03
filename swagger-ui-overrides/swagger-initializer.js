@@ -399,6 +399,7 @@ window.onload = function() {
     var ctx = m.context_size || m.max_context_length;
     if (ctx) parts.push('ctx ' + ctx);
     if (m.min_vram_gb) parts.push('~' + m.min_vram_gb + 'GB');
+    if (m.tokens_per_sec) parts.push('~' + Math.round(m.tokens_per_sec) + ' tok/s');
     return parts.join(' · ');
   }
 
