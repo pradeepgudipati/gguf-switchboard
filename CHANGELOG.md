@@ -11,6 +11,7 @@ Release notes for each version live in [`releases/`](releases/) and on [GitHub R
 - **Branded API consoles** — added project branding, correctly embedded logo assets, icons, and clearer navigation across Swagger UI and the Conformance Console.
 - **Community workflows** — added contribution guidance, structured issue templates, and a pull-request checklist.
 - **Safer deployment updates** — `deploy.sh` now merges stray `models.toml` registries into the canonical deployed registry and skips unnecessary binary installation and service restarts after no-change pulls.
+- **Deployment script validation** — fixed an unmatched function declaration that prevented `deploy.sh` from parsing and added Bash syntax validation to local and hosted quality gates.
 - **Clearer supported scope** — refreshed product positioning around GGUF through llama.cpp and SafeTensors through vLLM, added dedicated integration guides, and removed the unsupported Docker deployment files.
 - **CLI discoverability** — added `ggs version`, `--version`, and `-V`, plus reorganized help and copyable examples.
 

@@ -4,6 +4,9 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 
+echo "→ bash syntax"
+bash -n deploy.sh
+
 echo "→ cargo fmt --check"
 cargo fmt --all -- --check
 
