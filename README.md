@@ -39,6 +39,8 @@ Some models are best distributed as GGUF and run through llama.cpp. Others are b
 
 GGUF Switchboard gives all of them one OpenAI-compatible endpoint while managing the runtime behind the scenes.
 
+![GGUF Switchboard dashboard with live host and GPU telemetry and a capability-grouped model selector](docs/assets/gguf-switchboard-dashboard.png)
+
 ## Quick Start
 
 **Install** (Linux with NVIDIA/CUDA):
@@ -73,6 +75,20 @@ Name the model you want. GGUF Switchboard selects its registered backend, unload
 
 **Platform guides:** [Linux](docs/deployment/linux.md) · [macOS](docs/deployment/macos.md) · [Windows (WSL2)](docs/deployment/windows.md)
 
+## API Console
+
+Use the Swagger UI to inspect available models, monitor the active runtime, refresh the registry, and exercise every supported endpoint.
+
+The previews play automatically. Select either one to open the full MP4 demo.
+
+| GGUF Switchboard demo | API console demo |
+|---|---|
+| [![GGUF Switchboard demo showing model management and inference](docs/assets/demo.gif)](docs/assets/demo.mp4) | [![GGUF Switchboard API console demo showing endpoint exploration](docs/assets/GGUF-Switchboard-—-API-console.gif)](docs/assets/GGUF-Switchboard-—-API-console.mp4) |
+
+| Resident model idle | Model processing a request |
+|---|---|
+| ![Swagger UI header showing an idle resident model and host telemetry](docs/assets/gguf-switchboard-header.png) | ![Swagger UI header showing a loaded model processing a request with GPU telemetry](docs/assets/gguf-switchboard-header-loaded.png) |
+
 ## Key Features
 
 1. **One API for GGUF and SafeTensors models** — GGUF through llama.cpp and Hugging Face SafeTensors through vLLM, exposed via a single OpenAI-compatible endpoint.
@@ -97,6 +113,23 @@ Name the model you want. GGUF Switchboard selects its registered backend, unload
 | **Continue** | [docs/integrations/continue.md](docs/integrations/continue.md) |
 | **OpenAI SDK** | [docs/integrations/openai-sdk.md](docs/integrations/openai-sdk.md) |
 | **Any OpenAI-compatible client** | Use `http://localhost:9090/v1` as base URL |
+
+<details>
+<summary><strong>OpenCode Desktop setup walkthrough</strong></summary>
+
+Select **Custom provider**, configure the GGUF Switchboard base URL, add the model aliases exposed by `/v1/models`, and connect.
+
+| 1. Select Custom provider | 2. Configure the endpoint |
+|---|---|
+| ![OpenCode provider settings with Custom provider highlighted](docs/assets/opencode_1.png) | ![OpenCode custom provider form configured for a GGUF Switchboard endpoint](docs/assets/opencode_2.png) |
+
+| 3. Add model aliases | 4. Confirm the connected provider |
+|---|---|
+| ![OpenCode custom provider model aliases](docs/assets/opencode_3.png) | ![OpenCode provider list showing the connected local provider](docs/assets/opencode_4.png) |
+
+See the complete [OpenCode integration guide](docs/integrations/opencode.md).
+
+</details>
 
 ## Model Search
 
