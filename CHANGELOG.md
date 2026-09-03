@@ -8,7 +8,7 @@ Release notes for each version live in [`releases/`](releases/) and on [GitHub R
 ## [v0.1.8](https://github.com/pradeepgudipati/gguf-switchboard/releases/tag/v0.1.8) — 2026-09-03
 
 - **Adoption-ready documentation** — reorganized the documentation into focused getting-started, runtime, model, API, deployment, troubleshooting, and client-integration guides, with `llms.txt` and `llms-full.txt` for AI-assisted discovery.
-- **Branded API consoles** — added project branding, icons, and clearer navigation across Swagger UI and the Conformance Console.
+- **Branded API consoles** — added project branding, correctly embedded logo assets, icons, and clearer navigation across Swagger UI and the Conformance Console.
 - **Community workflows** — added contribution guidance, structured issue templates, and a pull-request checklist.
 - **Safer deployment updates** — `deploy.sh` now merges stray `models.toml` registries into the canonical deployed registry and skips unnecessary binary installation and service restarts after no-change pulls.
 - **Clearer supported scope** — refreshed product positioning around GGUF through llama.cpp and SafeTensors through vLLM, added dedicated integration guides, and removed the unsupported Docker deployment files.

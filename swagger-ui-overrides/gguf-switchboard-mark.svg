@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">GGUF Switchboard mark</title>
+  <desc id="desc">A cyan and violet switch ring around a three-node routing symbol.</desc>
+  <defs>
+    <linearGradient id="ring" x1="70" y1="90" x2="442" y2="422" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#22d3ee"/>
+      <stop offset="0.48" stop-color="#38bdf8"/>
+      <stop offset="0.52" stop-color="#6366f1"/>
+      <stop offset="1" stop-color="#c026d3"/>
+    </linearGradient>
+    <radialGradient id="core" cx="0" cy="0" r="1" gradientTransform="translate(210 174) rotate(52) scale(348)" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#152957"/>
+      <stop offset="1" stop-color="#050816"/>
+    </radialGradient>
+  </defs>
+  <circle cx="256" cy="256" r="218" fill="url(#ring)"/>
+  <circle cx="256" cy="256" r="184" fill="url(#core)" stroke="#bdefff" stroke-opacity="0.72" stroke-width="8"/>
+  <g fill="none" stroke="#eefcff" stroke-linecap="round" stroke-linejoin="round" stroke-width="24">
+    <path d="M142 256h86m36-18 72-72m-72 108 72 72"/>
+  </g>
+  <g fill="#eefcff" stroke="url(#ring)" stroke-width="10">
+    <circle cx="132" cy="256" r="28"/>
+    <circle cx="250" cy="256" r="32"/>
+    <circle cx="356" cy="150" r="28"/>
+    <circle cx="356" cy="362" r="28"/>
+  </g>
+</svg>
