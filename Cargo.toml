@@ -1,6 +1,6 @@
 [package]
 name = "gguf-switchboard"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2024"
 description = "Hardware-aware local LLM runtime. Run GGUF via llama.cpp and SafeTensors via vLLM behind one OpenAI-compatible API."
 license = "MIT"
