@@ -28,11 +28,12 @@ fn swagger_and_conformance_console_use_product_brand_assets() {
     let conformance = include_str!("../swagger-ui-overrides/conformance.html");
     let css = include_str!("../swagger-ui-overrides/conformance.css");
 
-    assert!(initializer.contains("gguf-switchboard-logo-on-dark.svg"));
-    assert!(initializer.contains("gguf-switchboard-mark.svg"));
-    assert!(conformance.contains("gguf-switchboard-logo-on-dark.svg"));
-    assert!(conformance.contains("gguf-switchboard-mark.svg"));
-    assert!(conformance.contains("apple-touch-icon.png"));
+    assert!(initializer.contains("'./gguf-switchboard-logo-on-dark.svg'"));
+    assert!(initializer.contains("'./gguf-switchboard-mark.svg'"));
+    assert!(conformance.contains("\"./gguf-switchboard-logo-on-dark.svg\""));
+    assert!(conformance.contains("\"./gguf-switchboard-mark.svg\""));
+    assert!(!initializer.contains("./brand/"));
+    assert!(!conformance.contains("./brand/"));
     assert!(css.contains("--brand-font"));
 }
 

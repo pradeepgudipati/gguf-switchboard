@@ -600,7 +600,7 @@ window.onload = function() {
       document.head.appendChild(favicon);
     }
     favicon.type = 'image/svg+xml';
-    favicon.href = './brand/gguf-switchboard-mark.svg';
+    favicon.href = './gguf-switchboard-mark.svg';
     const link = wrapper.querySelector('a.link');
     if (!link || link.dataset.ggsBranded) return;
     link.dataset.ggsBranded = '1';
@@ -608,7 +608,7 @@ window.onload = function() {
     link.textContent = '';
     const logo = document.createElement('img');
     logo.className = 'ggs-brand-logo';
-    logo.src = './brand/gguf-switchboard-logo-on-dark.svg';
+    logo.src = './gguf-switchboard-logo-on-dark.svg';
     logo.alt = 'GGUF Switchboard';
     link.appendChild(logo);
   }
