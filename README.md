@@ -5,41 +5,53 @@
 [![CI](https://github.com/pradeepgudipati/gguf-switchboard/actions/workflows/ci.yml/badge.svg)](https://github.com/pradeepgudipati/gguf-switchboard/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Latest Release](https://img.shields.io/github/v/release/pradeepgudipati/gguf-switchboard)](https://github.com/pradeepgudipati/gguf-switchboard/releases)
+[![Star this repo](https://img.shields.io/github/stars/pradeepgudipati/gguf-switchboard?style=social)](https://github.com/pradeepgudipati/gguf-switchboard)
 
 **One machine. Many local models. One API.**
 
 GGUF via llama.cpp, SafeTensors via vLLM.
 
+## Why this matters
+
+Local AI workflows increasingly depend on coding, reasoning, embedding, vision, and task-specific models. Some work best as GGUF through llama.cpp; others ship as SafeTensors and run through vLLM. Operating each runtime, port, and model lifecycle separately pushes orchestration into every client.
+
+GGUF Switchboard gives those models one OpenAI-compatible endpoint. Name the model you want, and the switchboard selects the backend, drains in-flight work, switches models, rolls back failed loads, and plans against available VRAM.
+
+## See it in action
+
+The previews play automatically. Select either one to open the full MP4 demo.
+
+| GGUF Switchboard demo | API console demo |
+|---|---|
+| [![GGUF Switchboard demo showing model management and inference](docs/assets/demo.gif)](docs/assets/demo.mp4) | [![GGUF Switchboard API console demo showing endpoint exploration](docs/assets/GGUF-Switchboard-—-API-console.gif)](docs/assets/GGUF-Switchboard-—-API-console.mp4) |
+
+## Architecture
+
+```mermaid
+flowchart TB
+    Clients["OpenCode · Cursor · Cline · Continue · Agents · SDKs"]
+    Switchboard["GGUF Switchboard<br/>OpenAI-compatible API"]
+    Selector{"Runtime selection"}
+    Llama["llama.cpp"]
+    VLLM["vLLM"]
+    GGUF["GGUF models"]
+    SafeTensors["SafeTensors models"]
+
+    Clients --> Switchboard
+    Switchboard --> Selector
+    Selector --> Llama
+    Selector --> VLLM
+    Llama --> GGUF
+    VLLM --> SafeTensors
 ```
- OpenCode   Cursor   Cline   Continue   Agents   SDKs
-     \        |        |        |        |       /
-      \       |        |        |       |      /
-       └─────────── GGUF Switchboard ──────────┐
-                            │
-                   Runtime selection
-                            │
-                ┌───────────┴───────────┐
-                │                       |
-            llama.cpp                  vLLM
-                │                       |
-              GGUF               SafeTensors
-```
 
-## Why GGUF Switchboard?
+## What makes this different
 
-Local AI workflows increasingly use several models:
-
-- a coding model
-- a reasoning model
-- an embedding model
-- a vision model
-- a task-specific model
-
-Some models are best distributed as GGUF and run through llama.cpp. Others are best distributed as SafeTensors and run through vLLM.
-
-GGUF Switchboard gives all of them one OpenAI-compatible endpoint while managing the runtime behind the scenes.
-
-![GGUF Switchboard dashboard with live host and GPU telemetry and a capability-grouped model selector](docs/assets/gguf-switchboard-dashboard.png)
+1. **One API across model formats and runtimes:** GGUF through llama.cpp and Hugging Face SafeTensors through vLLM, exposed through the same OpenAI-compatible endpoint.
+2. **Request-driven model switching:** The requested model controls backend selection, with in-flight draining, failed-switch rollback, and idle priority warm-up.
+3. **VRAM-aware operation:** Hardware-aware fit planning, bounded OOM fallback, automatic GPU-layer selection, and memory-pressure eviction help a model fleet share one machine.
+4. **Hardware-aware Hugging Face search:** `ggs models search` scores available quantizations against detected hardware for fit, speed, balance, and precision.
+5. **Broad client compatibility:** Chat Completions, Completions, Embeddings, Responses, Rerank, Audio, and Anthropic Messages support coding tools, agents, and OpenAI-compatible SDKs.
 
 ## Quick Start
 
@@ -74,34 +86,6 @@ curl http://localhost:9090/v1/chat/completions \
 Name the model you want. GGUF Switchboard selects its registered backend, unloads the resident model when necessary, starts the requested model, and forwards the request through the same API.
 
 **Platform guides:** [Linux](docs/deployment/linux.md) · [macOS](docs/deployment/macos.md) · [Windows (WSL2)](docs/deployment/windows.md)
-
-## API Console
-
-Use the Swagger UI to inspect available models, monitor the active runtime, refresh the registry, and exercise every supported endpoint.
-
-The previews play automatically. Select either one to open the full MP4 demo.
-
-| GGUF Switchboard demo | API console demo |
-|---|---|
-| [![GGUF Switchboard demo showing model management and inference](docs/assets/demo.gif)](docs/assets/demo.mp4) | [![GGUF Switchboard API console demo showing endpoint exploration](docs/assets/GGUF-Switchboard-—-API-console.gif)](docs/assets/GGUF-Switchboard-—-API-console.mp4) |
-
-| Resident model idle | Model processing a request |
-|---|---|
-| ![Swagger UI header showing an idle resident model and host telemetry](docs/assets/gguf-switchboard-header.png) | ![Swagger UI header showing a loaded model processing a request with GPU telemetry](docs/assets/gguf-switchboard-header-loaded.png) |
-
-## Key Features
-
-1. **One API for GGUF and SafeTensors models** — GGUF through llama.cpp and Hugging Face SafeTensors through vLLM, exposed via a single OpenAI-compatible endpoint.
-
-2. **Automatic model/runtime switching** — Request-driven single-slot switching, in-flight request draining, failed-switch rollback, and idle priority warm-up.
-
-3. **VRAM-aware execution** — Hardware-aware model fit planning, bounded OOM fallback, auto GPU layer selection, and memory-pressure eviction.
-
-4. **Hardware-aware Hugging Face search** — `ggs models search` scores every quant against your detected hardware with FIT/SPEED/BALANCED/PRECISION columns.
-
-5. **OpenAI-compatible API** — Chat Completions, Completions, Embeddings, Responses, Rerank, Audio, plus Anthropic Messages.
-
-6. **Built for AI coding tools** — Works with OpenCode, Cursor, Cline, Continue, OpenAI SDK, and any OpenAI-compatible client.
 
 ## Supported Clients
 
@@ -258,6 +242,22 @@ curl http://localhost:9090/v1/messages \
   -H "anthropic-version: 2023-06-01" \
   -d '{"model":"YOUR_ALIAS","max_tokens":64,"messages":[{"role":"user","content":"Hello"}]}'
 ```
+
+## Share GGUF Switchboard
+
+If you find GGUF Switchboard useful, please share it with your communities.
+
+**Reddit (r/LocalLLaMA)**
+
+> GGUF Switchboard: Run GGUF + SafeTensors behind one OpenAI-compatible endpoint. Automatic model switching, draining, rollback, VRAM-aware planning, and multi-backend orchestration.
+
+**Hacker News**
+
+> Show HN: GGUF Switchboard: unified GGUF + SafeTensors runtime with automatic backend selection and an OpenAI-compatible API.
+
+**Discord**
+
+> A local model switchboard that lets coding tools pick a model while the runtime handles backend orchestration.
 
 ## License
 
