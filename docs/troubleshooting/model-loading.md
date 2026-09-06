@@ -55,6 +55,49 @@ Common model loading errors and solutions.
 2. Check model format compatibility
 3. Check logs: `ggs logs`
 
+## Model times out waiting for health (`did not become healthy`)
+
+**Error:** `Model 'qwen3.5-9b' did not become healthy within 60s` → 504 → rollback
+
+**Cause:** usually VRAM pressure in disguise, not a dead server. Weights + KV
+cache don't fit free VRAM, `llama-server` spills to CPU, and the spill makes
+the load crawl past `startup_timeout`. Concrete shape on an RTX 3060 12 GB
+(~6.7 GB free): a 5.4 GB Qwen3.5-9B with a 32K context leaves ~1.3 GB for a KV
+cache that needs far more, so the load takes 60.4s against a 60s timeout.
+
+**What the proxy does:** a health timeout now triggers the same fit-reduction
+retry as an OOM (context first, then `-ngl`), instead of rolling straight back
+to the previous model. The reduced profile is persisted to `models.toml` /
+`model-profiles.json` so the next load starts small.
+
+**Immediate workaround** (before the retry lands you a small profile, or if
+you want to pin it yourself):
+
+```toml
+# models.toml — qwen3.5-9b on a 12 GB card
+[[models]]
+alias = "qwen3.5-9b"
+context_size = 8192
+```
+
+and/or raise the ceiling in `config.toml`:
+
+```toml
+startup_timeout = 180
+```
+
+**Second cause — stale `llama-server`:** Qwen3.5 uses a Gated DeltaNet (GDN)
+recurrent architecture whose kernels only exist in recent llama.cpp. If the
+load fails fast with unknown-architecture / missing-tensor errors rather than
+a slow timeout, update the backend first:
+
+```bash
+# stable channel (default); Qwen3.5 GDN needs a build newer than ~Sep 2026 —
+# use the nightly channel until the next stable cut includes it
+LLAMA_RELEASE_CHANNEL=nightly ./scripts/update-llama-cpp.sh
+llama-server --version
+```
+
 ## Port already in use
 
 **Error:** `address already in use`

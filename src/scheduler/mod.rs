@@ -1457,7 +1457,7 @@ impl SchedulerInner {
                 );
                 let _ = backend.unload().await;
 
-                if kind.is_oom()
+                if kind.should_reduce_fit()
                     && let Some(next) = planner.advance(&message)
                 {
                     metrics::record_load_attempt(
@@ -1545,7 +1545,7 @@ impl SchedulerInner {
                         "FitPlanner: health check failed"
                     );
 
-                    if kind.is_oom()
+                    if kind.should_reduce_fit()
                         && let Some(next) = planner.advance(&message)
                     {
                         metrics::record_load_attempt(
@@ -1636,7 +1636,7 @@ impl SchedulerInner {
                 warn!(model = %model_id, attempt, error = %message, failure_kind = ?kind, "VllmFitPlanner: load failed");
                 let _ = backend.unload().await;
 
-                if kind.is_oom()
+                if kind.should_reduce_fit()
                     && let Some(next) = planner.advance(&message)
                 {
                     metrics::record_load_attempt(
@@ -1678,7 +1678,7 @@ impl SchedulerInner {
                     let kind = classify_load_failure(&message, &stderr);
                     warn!(model = %model_id, attempt, error = %message, failure_kind = ?kind, "VllmFitPlanner: health check failed");
 
-                    if kind.is_oom()
+                    if kind.should_reduce_fit()
                         && let Some(next) = planner.advance(&message)
                     {
                         metrics::record_load_attempt(
@@ -1764,8 +1764,11 @@ impl SchedulerInner {
 
     /// OOM recovery for the legacy load path. Picks the right lever for the OOM
     /// sub-kind — context for KV-cache OOM, `-ngl` for weight/generic OOM — and
-    /// falls back to the other lever if the first is exhausted. Mutates
-    /// `runtime_args` in place; returns `true` when a retry-worthy change was made.
+    /// falls back to the other lever if the first is exhausted. A health
+    /// timeout is treated like a KV-cache OOM (context first): it usually
+    /// means weights + KV spilled to CPU and the load crawled past
+    /// `startup_timeout`. Mutates `runtime_args` in place; returns `true` when
+    /// a retry-worthy change was made.
     async fn try_oom_recovery(
         &self,
         model_id: &str,
@@ -1777,10 +1780,13 @@ impl SchedulerInner {
     ) -> Result<bool, RuntimeError> {
         let kind = classify_load_failure(message, stderr);
         debug!(?kind, "Classified model load failure");
-        if !kind.is_oom() {
+        if !kind.should_reduce_fit() {
             return Ok(false);
         }
-        let ctx_first = matches!(kind, LoadFailureKind::GpuOomKvCache);
+        let ctx_first = matches!(
+            kind,
+            LoadFailureKind::GpuOomKvCache | LoadFailureKind::HealthTimeout
+        );
         let levers: [bool; 2] = if ctx_first {
             [true, false]
         } else {

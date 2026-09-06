@@ -27,6 +27,20 @@ impl LoadFailureKind {
             Self::GpuOomWeights | Self::GpuOomKvCache | Self::GpuOomGeneric | Self::Oom
         )
     }
+
+    /// True when the scheduler should retry with a reduced fit (smaller
+    /// context / quantized KV / fewer GPU layers) instead of failing fast.
+    ///
+    /// OOM is the obvious case. `HealthTimeout` is included because a slow
+    /// load that outruns `startup_timeout` is usually VRAM pressure in
+    /// disguise: weights + KV cache don't fit free VRAM, `llama-server`
+    /// spills to CPU, and the spill makes the load crawl past the deadline
+    /// (e.g. a 5.4 GB Qwen3.5-9B with a 32K KV cache on ~6.7 GB free VRAM).
+    /// A smaller context loads faster and fits, so retrying reduced beats
+    /// rolling back to the previous model.
+    pub fn should_reduce_fit(self) -> bool {
+        self.is_oom() || matches!(self, Self::HealthTimeout)
+    }
 }
 
 /// Classify a load failure from the error message and captured stderr.
@@ -164,6 +178,23 @@ mod tests {
             classify_load_failure("Model GGUF file not found: '/tmp/missing.gguf'", ""),
             LoadFailureKind::MissingFile
         );
+    }
+
+    #[test]
+    fn health_timeout_triggers_fit_reduction() {
+        // A 60s+ CPU-spill load trips `startup_timeout` without an explicit
+        // OOM line; the scheduler must still retry with a smaller context.
+        let kind =
+            classify_load_failure("Model 'qwen3.5-9b' did not become healthy within 60s", "");
+        assert_eq!(kind, LoadFailureKind::HealthTimeout);
+        assert!(!kind.is_oom());
+        assert!(kind.should_reduce_fit());
+    }
+
+    #[test]
+    fn unknown_still_fails_fast() {
+        let kind = classify_load_failure("some random failure", "bad flag");
+        assert!(!kind.should_reduce_fit());
     }
 
     #[test]
