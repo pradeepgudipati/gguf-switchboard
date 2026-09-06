@@ -960,6 +960,20 @@ fi
 
 if [[ "$SKIP_LLAMA_CPP" != "true" ]]; then
     echo "==> Checking CUDA llama.cpp release..."
+    # A prior `sudo cmake --build` in the llama.cpp tree leaves a root-owned
+    # build/ dir that dies with `rm: ... Permission denied`. update-llama-cpp.sh
+    # self-heals this, but pre-clean here too so an older checked-out copy
+    # invoked by deploy still recovers. Touch-test only: never delete a
+    # writable tree, so the no-rebuild fast path keeps its cache.
+    LLAMA_SRC_DIR="${LLAMA_DIR:-${HOME}/llama.cpp}"
+    if [[ -d "${LLAMA_SRC_DIR}/build" ]]; then
+        if touch "${LLAMA_SRC_DIR}/build/.deploy-writability-check-$$" 2>/dev/null; then
+            rm -f "${LLAMA_SRC_DIR}/build/.deploy-writability-check-$$"
+        else
+            echo "==> llama.cpp build/ not writable (likely root-owned); removing with sudo..."
+            sudo rm -rf "${LLAMA_SRC_DIR}/build"
+        fi
+    fi
     llama_skip_pull=0
     [[ "$SKIP_PULL" == "true" ]] && llama_skip_pull=1
     LLAMA_DEPLOY_LOG="$(mktemp)"
@@ -987,6 +1001,17 @@ fi
 
 echo "==> Building release..."
 export SWAGGER_UI_OVERWRITE_FOLDER="${SOURCE_DIR}/swagger-ui-overrides"
+# Same root-owned-trap as the llama.cpp build tree: a prior `sudo cargo build`
+# leaves target/ unwritable and the release build dies on permission errors.
+# Touch-test only, so a healthy incremental cache is preserved.
+if [[ -d "${SOURCE_DIR}/target" ]]; then
+    if touch "${SOURCE_DIR}/target/.deploy-writability-check-$$" 2>/dev/null; then
+        rm -f "${SOURCE_DIR}/target/.deploy-writability-check-$$"
+    else
+        echo "==> target/ not writable (likely root-owned); removing with sudo..."
+        sudo rm -rf "${SOURCE_DIR}/target"
+    fi
+fi
 cargo clean -p utoipa-swagger-ui --release 2>/dev/null || true
 cargo build --release
 

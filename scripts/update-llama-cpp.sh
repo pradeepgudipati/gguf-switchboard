@@ -146,13 +146,30 @@ nvcc --version
 nvidia-smi
 
 echo "==> Configuring CUDA build"
-rm -rf build
+# A previous `sudo cmake --build` (or sudo invocation of this script) leaves a
+# root-owned build/ tree that a plain `rm -rf` cannot remove (Permission
+# denied). Retry with sudo so a normal-user re-run self-heals instead of
+# failing mid-deploy.
+if [[ -d build ]]; then
+  if ! rm -rf build 2>/dev/null; then
+    echo "==> build/ not writable (likely root-owned from a prior sudo build); removing with sudo..."
+    sudo rm -rf build
+  fi
+fi
 cmake -B build \
   -DGGML_CUDA=ON \
   -DCMAKE_BUILD_TYPE=Release
 
 echo "==> Building"
 cmake --build build -j"$(nproc)"
+
+# If this script was run via sudo, the fresh build/ tree is root-owned and the
+# next normal-user run would hit Permission denied again. Hand it back to the
+# invoking user so normal-user re-runs keep working.
+if [[ "${EUID:-$(id -u)}" -eq 0 && -n "${SUDO_USER:-}" ]] && id "$SUDO_USER" >/dev/null 2>&1; then
+  echo "==> Restoring build/ ownership to ${SUDO_USER} (script was run via sudo)..."
+  chown -R "$SUDO_USER" build
+fi
 
 echo "==> Verifying CUDA backend (build tree)"
 ./build/bin/llama-server --list-devices
