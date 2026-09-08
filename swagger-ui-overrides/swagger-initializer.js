@@ -555,11 +555,38 @@ window.onload = function() {
       });
   }
 
-  // Currently-loaded / serving / processing indicator. Lives inside the
-  // model-selector bar so it travels with it; the bar itself gets torn
-  // down and rebuilt on "Refresh models", so this re-creates the badge
-  // each time but only ever starts one polling interval.
-  function injectStatusBadge(bar) {
+  // Stock Swagger UI ships an "/api-docs/openai.json + Explore" form
+  // (DownloadUrl plugin) in the header. This console serves a single fixed
+  // spec, so the form is dead weight — strip it so the header top row is
+  // just branding + the Conformance Console button.
+  function removeDownloadUrlForm() {
+    document
+      .querySelectorAll('.topbar form.download-url-wrapper, .topbar .download-url-wrapper, form.download-url-wrapper')
+      .forEach(function(el) { el.remove(); });
+  }
+
+  // Conformance Console lives in the header top row (where Explore used to
+  // be), right-aligned via margin-left:auto. Safe to call repeatedly.
+  function injectConformanceHeaderBtn(wrapper) {
+    if (document.getElementById('conformance-console-link')) return;
+    const link = document.createElement('a');
+    link.id = 'conformance-console-link';
+    link.href = './conformance.html';
+    link.target = '_blank';
+    link.rel = 'noopener';
+    link.className = 'conformance-header-btn';
+    link.textContent = 'Conformance Console \u2192';
+    link.title =
+      'Open the tool-calling / chat-template conformance console in a new tab';
+    wrapper.appendChild(link);
+  }
+
+  // Currently-loaded / serving / processing indicator plus host/GPU tiles.
+  // Lives in the status row (top row of the control bar, above the model
+  // dropdown). The bar gets torn down and rebuilt on "Refresh models", so
+  // this re-creates the badge each time but only ever starts one polling
+  // interval.
+  function injectStatusBadge(statusRow) {
     const badge = document.createElement('span');
     badge.id = 'model-status-badge';
     badge.className = 'model-status-badge';
@@ -574,13 +601,13 @@ window.onload = function() {
 
     badge.appendChild(dot);
     badge.appendChild(label);
-    bar.appendChild(badge);
+    statusRow.appendChild(badge);
 
     const gpuStats = document.createElement('span');
     gpuStats.id = 'gpu-stats';
     gpuStats.className = 'gpu-stats';
     gpuStats.style.display = 'none';
-    bar.appendChild(gpuStats);
+    statusRow.appendChild(gpuStats);
 
     if (statusPollHandle) {
       pollStatus();
@@ -623,10 +650,21 @@ window.onload = function() {
 
     applyBranding(wrapper);
 
+    removeDownloadUrlForm();
+    injectConformanceHeaderBtn(wrapper);
+
     const bar = document.createElement('div');
     bar.className = 'model-selector-bar';
 
-    injectStatusBadge(bar);
+    const statusRow = document.createElement('div');
+    statusRow.className = 'status-row';
+    bar.appendChild(statusRow);
+
+    injectStatusBadge(statusRow);
+
+    const modelRow = document.createElement('div');
+    modelRow.className = 'model-row';
+    bar.appendChild(modelRow);
 
     const label = document.createElement('label');
     label.setAttribute('for', 'global-model-select');
@@ -718,21 +756,20 @@ window.onload = function() {
         });
     });
 
-    const conformanceLink = document.createElement('a');
-    conformanceLink.id = 'conformance-console-link';
-    conformanceLink.href = './conformance.html';
-    conformanceLink.target = '_blank';
-    conformanceLink.rel = 'noopener';
-    conformanceLink.className = 'conformance-console-link';
-    conformanceLink.textContent = 'Conformance Console →';
-    conformanceLink.title =
-      'Open the tool-calling / chat-template conformance console in a new tab';
-
-    bar.appendChild(label);
-    bar.appendChild(select);
-    bar.appendChild(refreshBtn);
-    bar.appendChild(conformanceLink);
+    modelRow.appendChild(label);
+    modelRow.appendChild(select);
+    modelRow.appendChild(refreshBtn);
     wrapper.appendChild(bar);
+
+    // The stock Explore form can render after onComplete; strip it whenever
+    // the topbar mutates, and keep the header button in place.
+    if (!wrapper.dataset.ggsTopbarObserved) {
+      wrapper.dataset.ggsTopbarObserved = '1';
+      new MutationObserver(function() {
+        removeDownloadUrlForm();
+        injectConformanceHeaderBtn(wrapper);
+      }).observe(wrapper, { childList: true });
+    }
 
     if (selectedModel) {
       updateModelFieldOnly(selectedModel);
@@ -760,6 +797,13 @@ window.onload = function() {
       })
       .catch(function(err) {
         console.warn('Failed to load models for Swagger UI selector:', err);
+        // Models failed — still strip Explore and show the header button.
+        var wrapper = document.querySelector('.topbar-wrapper');
+        if (wrapper) {
+          applyBranding(wrapper);
+          removeDownloadUrlForm();
+          injectConformanceHeaderBtn(wrapper);
+        }
       });
   }
 
@@ -812,13 +856,15 @@ window.onload = function() {
 
       return request;
     },
-    onComplete: fetchModelsAndInject,
+    onComplete: function() {
+      removeDownloadUrlForm();
+      fetchModelsAndInject();
+    },
     presets: [
       SwaggerUIBundle.presets.apis,
       SwaggerUIStandalonePreset
     ],
     plugins: [
-      SwaggerUIBundle.plugins.DownloadUrl
     ]
   });
 };
