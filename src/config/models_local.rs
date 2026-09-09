@@ -256,11 +256,16 @@ fn parse_common(args: &[String], allow_yes: bool) -> Result<CommonArgs, String> 
     Ok(out)
 }
 
+/// Resolve the registry `list`/`delete` read, mirroring the order `models
+/// pull` writes with (`resolve_vllm_registry_path` in `models_cmd.rs`):
+/// explicit `--registry` → a `models.toml` sibling to the scan dir → the
+/// canonical deployed registry → `./models.toml` → config.toml's
+/// `models_file`. Previously this only checked `./models.toml`, so models
+/// pulled into the deployed registry showed as `(unregistered)`.
 fn resolve_registry(explicit: Option<&str>) -> Option<(String, ModelsRegistry)> {
     let path = match explicit {
         Some(p) => p.to_string(),
-        None if Path::new("models.toml").is_file() => "models.toml".to_string(),
-        None => return None,
+        None => default_local_registry_path()?,
     };
     match ModelsRegistry::load(&path) {
         Ok(reg) => Some((path, reg)),
@@ -269,6 +274,68 @@ fn resolve_registry(explicit: Option<&str>) -> Option<(String, ModelsRegistry)> 
             None
         }
     }
+}
+
+/// Default registry lookup for `list`/`delete` when `--registry` is absent.
+/// Order matches `resolve_vllm_registry_path`: deployed registry first, then
+/// `./models.toml`, then config.toml's `models_file` — so the inventory reads
+/// the same file `models pull` writes.
+fn default_local_registry_path() -> Option<String> {
+    let deployed = Path::new("/opt/gguf-switchboard/models.toml");
+    if deployed.is_file() {
+        return Some(deployed.to_string_lossy().into_owned());
+    }
+    if Path::new("models.toml").is_file() {
+        return Some("models.toml".to_string());
+    }
+    config_registry_path()
+}
+
+/// `models_file` from the resolved `config.toml`, as `models pull` falls back
+/// to. Relative paths resolve against the config's directory. Returns `None`
+/// when no config or registry is discoverable.
+fn config_registry_path() -> Option<String> {
+    let config_path = resolve_config_toml_path();
+    let content = std::fs::read_to_string(&config_path).ok()?;
+    let config: toml::Value = toml::from_str(&content).ok()?;
+    let raw = config.get("models_file").and_then(toml::Value::as_str)?;
+    let path = PathBuf::from(raw);
+    let resolved = if path.is_absolute() {
+        path
+    } else {
+        config_path.parent().unwrap_or(Path::new(".")).join(path)
+    };
+    if !resolved.is_file() {
+        return None;
+    }
+    // Canonicalize so `../` segments don't leak into the returned path.
+    let display = std::fs::canonicalize(&resolved)
+        .unwrap_or(resolved)
+        .to_string_lossy()
+        .into_owned();
+    Some(display)
+}
+
+/// Locate `config.toml` the same way `models pull` does (`models_cmd.rs`):
+/// `$GGUF_SWITCHBOARD_CONFIG_DIR`, then `./config.toml`, then the deployed
+/// and legacy paths.
+fn resolve_config_toml_path() -> PathBuf {
+    if let Ok(dir) = std::env::var("GGUF_SWITCHBOARD_CONFIG_DIR") {
+        let path = PathBuf::from(dir).join("config.toml");
+        if path.is_file() {
+            return path;
+        }
+    }
+    for candidate in [
+        PathBuf::from("config.toml"),
+        PathBuf::from("/opt/gguf-switchboard/config.toml"),
+        PathBuf::from("/etc/gguf-switchboard/config.toml"),
+    ] {
+        if candidate.is_file() {
+            return candidate;
+        }
+    }
+    PathBuf::from("config.toml")
 }
 
 fn resolve_scan_dirs(
@@ -625,5 +692,72 @@ mod tests {
         assert!(canonical(&dir).starts_with(canonical(tmp.path())));
         let other = tempfile::tempdir().unwrap();
         assert!(!canonical(&outside).starts_with(canonical(other.path())));
+    }
+
+    #[test]
+    fn explicit_registry_wins_over_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = dir.path().join("custom.toml");
+        std::fs::write(&registry, "version = 1\n").unwrap();
+
+        let (path, _) = resolve_registry(Some(registry.to_str().unwrap())).unwrap();
+        assert_eq!(path, registry.to_string_lossy());
+    }
+
+    #[test]
+    fn config_models_file_resolves_relative_to_config_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let registry = dir.path().join("models.toml");
+        std::fs::write(&registry, "version = 1\n").unwrap();
+        let nested = dir.path().join("conf");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(
+            nested.join("config.toml"),
+            "models_file = \"../models.toml\"\n",
+        )
+        .unwrap();
+
+        // Point HOME at the temp dir so the deployed/cwd lookups miss and the
+        // config fallback is what resolves.
+        let guard = EnvGuard::set("GGUF_SWITCHBOARD_CONFIG_DIR", nested.to_str().unwrap());
+        let _guard = guard;
+        let found = config_registry_path().unwrap();
+        assert_eq!(
+            std::fs::canonicalize(&found).unwrap(),
+            std::fs::canonicalize(&registry).unwrap()
+        );
+    }
+
+    /// `std::env::set_var` is process-global; guard restores on drop.
+    /// Serialized via `SERIAL_ENV_GUARD` so parallel tests can't race it.
+    struct EnvGuard {
+        key: &'static str,
+        prev: Option<std::ffi::OsString>,
+        _lock: std::sync::MutexGuard<'static, ()>,
+    }
+
+    static SERIAL_ENV_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    impl EnvGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let lock = SERIAL_ENV_GUARD.lock().unwrap();
+            let prev = std::env::var_os(key);
+            // `std::env::set_var` is (still) unsafe-opinioned on this toolchain.
+            unsafe { std::env::set_var(key, value) };
+            Self {
+                key,
+                prev,
+                _lock: lock,
+            }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match self.prev.take() {
+                Some(v) => unsafe { std::env::set_var(self.key, v) },
+                None => unsafe { std::env::remove_var(self.key) },
+            }
+        }
     }
 }

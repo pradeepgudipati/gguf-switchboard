@@ -249,10 +249,8 @@ impl TokenDb {
             .lock()
             .map_err(|e| RuntimeError::InternalError(format!("Database lock poisoned: {e}")))?;
 
-        let full_cutoff =
-            (Utc::now() - Duration::days(THROUGHPUT_RETENTION_DAYS)).to_rfc3339();
-        let recent_cutoff =
-            (Utc::now() - Duration::days(THROUGHPUT_RECENT_DAYS)).to_rfc3339();
+        let full_cutoff = (Utc::now() - Duration::days(THROUGHPUT_RETENTION_DAYS)).to_rfc3339();
+        let recent_cutoff = (Utc::now() - Duration::days(THROUGHPUT_RECENT_DAYS)).to_rfc3339();
 
         let mut stmt = conn
             .prepare(
@@ -274,9 +272,7 @@ impl TokenDb {
                     row.get::<_, f64>(2)?,
                 ))
             })
-            .map_err(|e| {
-                RuntimeError::InternalError(format!("Failed to query throughput: {e}"))
-            })?;
+            .map_err(|e| RuntimeError::InternalError(format!("Failed to query throughput: {e}")))?;
         for row in rows {
             let (model, ts, tps) =
                 row.map_err(|e| RuntimeError::InternalError(format!("throughput row: {e}")))?;
@@ -525,9 +521,10 @@ mod throughput_tests {
     use super::*;
     use rusqlite::params;
 
-    fn db() -> TokenDb {
-        let f = tempfile::NamedTempFile::new().unwrap();
-        TokenDb::open(f.path()).unwrap()
+    fn db() -> (TokenDb, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = TokenDb::open(&dir.path().join("throughput.db")).unwrap();
+        (db, dir)
     }
 
     /// Insert a throughput row at an explicit timestamp (bypasses the
@@ -545,7 +542,7 @@ mod throughput_tests {
 
     #[test]
     fn ignores_trivial_requests() {
-        let db = db();
+        let (db, _guard) = db();
         db.record_throughput("m", "/v1/chat/completions", 10, 5, 1.0)
             .unwrap();
         db.record_throughput("m", "/v1/chat/completions", 10, 100, 0.001)
@@ -555,7 +552,7 @@ mod throughput_tests {
 
     #[test]
     fn records_and_computes_tps() {
-        let db = db();
+        let (db, _guard) = db();
         // 100 tokens in 2s => 50 tok/s
         db.record_throughput("m", "/v1/chat/completions", 10, 100, 2.0)
             .unwrap();
@@ -566,7 +563,7 @@ mod throughput_tests {
 
     #[test]
     fn recent_window_median_wins_when_enough_samples() {
-        let db = db();
+        let (db, _guard) = db();
         let now = Utc::now();
         // 3 recent samples (median 20) + old samples (would pull toward 100)
         for tps in [10.0, 20.0, 30.0] {
@@ -583,7 +580,7 @@ mod throughput_tests {
 
     #[test]
     fn falls_back_to_full_history_when_recent_sparse() {
-        let db = db();
+        let (db, _guard) = db();
         let now = Utc::now();
         insert_at(&db, "m", &now.to_rfc3339(), 20.0); // 1 recent < min
         for _ in 0..5 {
@@ -596,7 +593,7 @@ mod throughput_tests {
 
     #[test]
     fn trend_buckets_by_day() {
-        let db = db();
+        let (db, _guard) = db();
         insert_at(&db, "m", "2026-01-01T01:00:00+00:00", 10.0);
         insert_at(&db, "m", "2026-01-01T05:00:00+00:00", 30.0);
         insert_at(&db, "m", "2026-01-02T05:00:00+00:00", 40.0);

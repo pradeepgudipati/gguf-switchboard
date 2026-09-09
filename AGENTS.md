@@ -396,3 +396,22 @@ When completing implementation work, report:
 Never claim completion when an implementation-caused mandatory verification step is failing.
 
 **Durable memory lines are mandatory** — cannot be omitted after meaningful work. Always state whether durable memory was reviewed and what was stored (or that it wasn't required).
+
+<!-- CONTEXT_HARBOR_START -->
+## Context Harbor
+
+### Context Harbor SDLC
+Project name: GGUF-Switchboard
+Full tool reference: read ".opencode/skills/context-harbor/SKILL.md" (skill file, always in repo) — AGENTS.md stays slim by design.
+Before planning, coding, estimating, refactoring, or changing requirements, use the context-harbor MCP server.
+Required call:
+planning_context(project_name="GGUF-Switchboard", task="<current task>")
+For exact requirement lookup:
+requirement_lookup(project_name="GGUF-Switchboard", requirement="<question>")
+RAG: use search_project_docs / query_documents directly (project id is scoped in the skill file). Call list_projects only if a query fails on the project id. Full roster (get_project_brief, read_chunk_neighbors, hierarchy, ingest) lives in the skill file.
+Prompts: list_prompts (filter by tag, check usageCount) → get_prompt(title) before writing your own; ch_memory_remember = decisions, save_prompt = reusable instructions.
+Memory: ch_memory_search (legacy search_memory) before deciding; ch_memory_remember (legacy add_memory) after — canonical ch_memory_* / ch_session_* preferred, legacy search_memory / add_memory / forget_memory aliases keep working. A task with a durable outcome is not complete until memory is reviewed (or explicitly NOT REQUIRED). Only the top-level session writes.
+Code graph: setup_code_graph → write script → sh ./ch-code-graph-setup.sh <repo-dir> (auth reuses harness MCP key, CH_MCP_TOKEN overrides; CH_BRANCH=<deploy branch>) → get_code_brief to verify ready. First run = full bundle; reruns = auto delta (base_commit); later syncs: ch code sync.
+Install: setup_agent_harness (skill + AGENTS.md; claude-code also gets CLAUDE.md + Stop hook via setup_harness + .claude/hooks/context-harbor-stop-check.mjs — see skill file).
+Rules: do not invent requirements; include source filenames; small auditable changes. Roles (don't retry on unauthorized): manager-only are ingest_file, ingest_data, delete_file, add_memory, forget_memory, save_prompt, delete_prompt, rename_prompt, update_prompt.
+<!-- CONTEXT_HARBOR_END -->
