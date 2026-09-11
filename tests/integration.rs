@@ -55,9 +55,11 @@ health_url = "http://127.0.0.1:9999/health"
 priority = true
 "#;
 
-    // Write temp file and load
-    let dir = std::env::temp_dir();
-    let path = dir.join("test-gguf-switchboard-config.toml");
+    // Write temp file and load. Uses an isolated directory (not the shared
+    // temp root): Config::resolve_models auto-loads a sibling models.toml,
+    // and a stray one in the shared temp dir would hijack the inline model.
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("test-gguf-switchboard-config.toml");
     std::fs::write(&path, toml).unwrap();
 
     let config = Config::load(path.to_str().unwrap()).unwrap();
@@ -74,8 +76,6 @@ priority = true
     assert!(model.priority);
 
     assert_eq!(config.priority_model_id(), Some("test-model".to_string()));
-
-    std::fs::remove_file(&path).ok();
 }
 
 #[test]
@@ -85,14 +85,12 @@ bind = "127.0.0.1:8080"
 default_backend = "llama.cpp"
 "#;
 
-    let dir = std::env::temp_dir();
-    let path = dir.join("test-gguf-switchboard-empty.toml");
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = dir.path().join("test-gguf-switchboard-empty.toml");
     std::fs::write(&path, toml).unwrap();
 
     let result = Config::load(path.to_str().unwrap());
     assert!(result.is_err());
-
-    std::fs::remove_file(&path).ok();
 }
 
 #[test]
@@ -378,7 +376,8 @@ file = "demo.gguf"
 display_name = "Demo Model"
 priority = true
 "#,
-        dir.to_string_lossy()
+        // Escape backslashes so Windows paths stay valid TOML basic strings.
+        dir.to_string_lossy().replace('\\', "\\\\")
     );
 
     let config_toml = r#"

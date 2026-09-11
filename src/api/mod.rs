@@ -211,7 +211,9 @@ pub fn create_router(state: Arc<AppState>) -> Router {
 
     let swagger_config = Config::new(["/api-docs/openapi.json"])
         .try_it_out_enabled(true)
-        .show_mutated_request(true);
+        .show_mutated_request(true)
+        // The Schemas section is unused; hide it entirely.
+        .default_models_expand_depth(-1);
 
     Router::new()
         .route(

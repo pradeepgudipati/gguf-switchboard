@@ -463,6 +463,19 @@ fn render_search_table(hits: &[Value], assessments: &[SearchAssessment]) -> Stri
                 .unwrap_or("")
                 .to_string();
             let assessment = assessments.get(index);
+            // Binary verdict from the original hardware-support spec: Yes iff
+            // the repo is standalone-eligible AND at least one named quant fits
+            // capacity (SearchAssessment.supported). FIT alongside is the
+            // continuous score for the same data.
+            let supported = assessment
+                .map(|value| {
+                    if value.supported {
+                        "Yes".to_string()
+                    } else {
+                        "No".to_string()
+                    }
+                })
+                .unwrap_or_else(|| "-".to_string());
             let fit = assessment
                 .map(|value| format!("{:.0}", value.fit_score))
                 .unwrap_or_else(|| "-".to_string());
@@ -495,7 +508,8 @@ fn render_search_table(hits: &[Value], assessments: &[SearchAssessment]) -> Stri
                 })
                 .unwrap_or_else(|| "-".to_string());
             (
-                id, siblings, size_mb, fit, context, arch, speed, balanced, precision, quants,
+                id, siblings, size_mb, supported, fit, context, arch, speed, balanced, precision,
+                quants,
             )
         })
         .collect::<Vec<_>>();
@@ -511,7 +525,8 @@ fn render_search_table(hits: &[Value], assessments: &[SearchAssessment]) -> Stri
                 5 => &row.5,
                 6 => &row.6,
                 7 => &row.7,
-                _ => &row.8,
+                8 => &row.8,
+                _ => &row.9,
             };
             width.max(value.len())
         })
@@ -519,24 +534,27 @@ fn render_search_table(hits: &[Value], assessments: &[SearchAssessment]) -> Stri
     let repo_width = width("REPO", 0);
     let files_width = width("FILES", 1);
     let size_width = width("SIZE", 2);
-    let fit_width = width("FIT", 3);
-    let context_width = width("CONTEXT", 4);
-    let arch_width = width("ARCH", 5);
-    let speed_width = width("SPEED", 6);
-    let balanced_width = width("BALANCED", 7);
-    let precision_width = width("PRECISION", 8);
+    let supported_width = width("SUPPORTED", 3);
+    let fit_width = width("FIT", 4);
+    let context_width = width("CONTEXT", 5);
+    let arch_width = width("ARCH", 6);
+    let speed_width = width("SPEED", 7);
+    let balanced_width = width("BALANCED", 8);
+    let precision_width = width("PRECISION", 9);
 
     let mut output = String::new();
     writeln!(
         output,
-        "{:<repo_width$} | {:>files_width$} | {:>size_width$} | {:>fit_width$} | {:<context_width$} | {:<arch_width$} | {:<speed_width$} | {:<balanced_width$} | {:<precision_width$} | QUANT",
-        "REPO", "FILES", "SIZE", "FIT", "CONTEXT", "ARCH", "SPEED", "BALANCED", "PRECISION"
+        "{:<repo_width$} | {:>files_width$} | {:>size_width$} | {:<supported_width$} | {:>fit_width$} | {:<context_width$} | {:<arch_width$} | {:<speed_width$} | {:<balanced_width$} | {:<precision_width$} | QUANT",
+        "REPO", "FILES", "SIZE", "SUPPORTED", "FIT", "CONTEXT", "ARCH", "SPEED", "BALANCED", "PRECISION"
     )
     .expect("writing to a String cannot fail");
-    for (repo, files, size, fit, context, arch, speed, balanced, precision, quants) in rows {
+    for (repo, files, size, supported, fit, context, arch, speed, balanced, precision, quants) in
+        rows
+    {
         writeln!(
             output,
-            "{repo:<repo_width$} | {files:>files_width$} | {size:>size_width$} | {fit:>fit_width$} | {context:<context_width$} | {arch:<arch_width$} | {speed:<speed_width$} | {balanced:<balanced_width$} | {precision:<precision_width$} | {quants}"
+            "{repo:<repo_width$} | {files:>files_width$} | {size:>size_width$} | {supported:<supported_width$} | {fit:>fit_width$} | {context:<context_width$} | {arch:<arch_width$} | {speed:<speed_width$} | {balanced:<balanced_width$} | {precision:<precision_width$} | {quants}"
         )
         .expect("writing to a String cannot fail");
     }
@@ -2672,20 +2690,19 @@ mod tests {
         let table = render_search_table(&hits, &assessments);
 
         let header = table.lines().next().unwrap();
+        assert!(header.contains("SUPPORTED"));
         assert!(header.contains("FIT"));
         assert!(header.contains("SPEED"));
         assert!(header.contains("BALANCED"));
         assert!(header.contains("PRECISION"));
-        assert!(!header.contains("SUPPORTED"));
         assert!(table.lines().any(|line| line.contains("org/gemma-small")
+            && line.contains("Yes")
             && line.contains("95")
             && line.contains("42tok/s")
             && line.contains("96.7%")));
-        assert!(
-            table
-                .lines()
-                .any(|line| { line.contains("org/gemma-large") && line.trim_end().ends_with('-') })
-        );
+        assert!(table.lines().any(|line| line.contains("org/gemma-large")
+            && line.contains("No")
+            && line.trim_end().ends_with('-')));
     }
 
     #[test]

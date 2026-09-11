@@ -1,0 +1,93 @@
+# Release pipeline (Forgejo Actions): preflight -> build -> publish.
+#
+# Runs on tag push (v*). The preflight step fails fast when the tag's
+# release notes are missing/empty or the crate version disagrees with the
+# tag, before either build leg starts. The `ci` checks workflow is a
+# required dependency of the build job for the same reason.
+#
+# Replaces .woodpecker/release-linux.yml. Publishing targets Forgejo
+# Releases via the built-in FORGEJO_TOKEN (no PAT secret required).
+#
+# Required runner labels: linux-amd64, linux-arm64 (native builds;
+# no cross-compilation toolchain needed).
+
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  preflight:
+    name: Release preflight
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate release metadata
+        run: bash scripts/check-release-preflight.sh "${GITHUB_REF_NAME}" "${GITHUB_WORKSPACE}"
+
+  build:
+    name: Build release (${{ matrix.target }})
+    needs: [ci, preflight]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: linux-amd64
+            artifact: gguf-switchboard-linux-amd64
+          - target: aarch64-unknown-linux-gnu
+            runner: linux-arm64
+            artifact: gguf-switchboard-linux-arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Release tag must point at main
+        run: |
+          git fetch origin main
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main || {
+            echo "Release tags must point to a commit on main."
+            exit 1
+          }
+      - name: Install Rust toolchain
+        run: rustup target add ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Stage artifact
+        run: cp target/${{ matrix.target }}/release/gguf-switchboard ${{ matrix.artifact }}
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  publish:
+    name: Publish Forgejo release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+      - name: Generate checksums
+        run: |
+          for dir in ./gguf-switchboard-*/; do
+            (cd "$dir" && sha256sum ./* >> ../checksums.txt)
+          done
+      - name: Create release with notes and assets
+        uses: https://code.forgejo.org/actions/forgejo-release@v2
+        with:
+          tag: ${{ github.ref_name }}
+          body: releases/${{ github.ref_name }}.md
+          files: |
+            gguf-switchboard-linux-amd64/*
+            gguf-switchboard-linux-arm64/*
+            checksums.txt

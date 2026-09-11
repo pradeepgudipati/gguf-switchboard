@@ -13,6 +13,9 @@ cargo fmt --all -- --check
 echo "→ cargo clippy (deny warnings)"
 cargo clippy --all-targets --locked -- -D warnings
 
+echo "→ release preflight regression"
+bash scripts/test-release-preflight.sh
+
 echo "→ cargo test"
 cargo test --locked
 

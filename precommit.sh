@@ -19,6 +19,9 @@ fi
 
 echo "→ bash syntax"
 bash -n deploy.sh
+bash -n scripts/check-release-preflight.sh
+bash -n scripts/release.sh
+bash -n scripts/test-release-preflight.sh
 
 echo "→ cargo fmt --check"
 cargo fmt --all -- --check
@@ -28,6 +31,9 @@ cargo clippy --all-targets --locked -- -D warnings
 
 echo "→ cargo build"
 cargo build --locked
+
+echo "→ release preflight regression"
+bash scripts/test-release-preflight.sh
 
 echo "→ cargo test"
 cargo test --locked

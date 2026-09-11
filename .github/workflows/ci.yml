@@ -1,8 +1,8 @@
 # The build-release + release jobs below (macOS + Linux release binaries,
-# GitHub Release creation) no longer run automatically — that was the
-# expensive part (macos-latest is billed at 10x). Migrated to Woodpecker:
-#   - Linux release legs:  .woodpecker/release-linux.yml
-#   - macOS release legs:  .woodpecker/release-macos.yml (pending Mac agent)
+# GitHub Release creation) no longer run automatically.
+# Release flow is now:
+#   - Preflight + build + publish: .forgejo/workflows/release.yml (Forgejo Actions, on tag push)
+#   - Local driver: scripts/release.sh vX.Y.Z (preflight + gate + tag + build + publish)
 # Both jobs are kept here as a workflow_dispatch fallback (pick the tag as
 # the ref when running manually). Hosted CI runs on pull requests only so a
 # merge to main does not repeat the checks that already passed on the PR.
@@ -36,11 +36,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      # Pinned to match the rust:1.88-bookworm image used by Dockerfile and
-      # .woodpecker/release-linux.yml. A floating `stable` here previously let
+      # Pinned to match the rust:1.88-bookworm image used by the release
+      # pipeline (.forgejo/workflows/release.yml). A floating `stable` here previously let
       # Cargo.lock silently drift to transitive dependency versions that only
       # build with a newer rustc than the actual release/deploy images pin —
-      # CI stayed green while the Docker/Woodpecker build failed. Bump all
+      # CI stayed green while the Docker/Forgejo release build failed. Bump all
       # three together when raising this.
       - uses: dtolnay/rust-toolchain@1.88.0
         with:
