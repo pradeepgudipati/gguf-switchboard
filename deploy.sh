@@ -34,6 +34,7 @@ MODELS_FILE="${INSTALL_DIR}/models.toml"
 BIN="/usr/local/bin/gguf-switchboard"
 LLAMA_SERVER="/usr/local/bin/llama-server"
 LLAMA_RELEASE_CHANNEL="${LLAMA_RELEASE_CHANNEL:-stable}"
+VLLM_RELEASE_CHANNEL="${VLLM_RELEASE_CHANNEL:-stable}"
 SERVICE_FILE="/etc/systemd/system/gguf-switchboard.service"
 ETC_DIR="/etc/gguf-switchboard"
 
@@ -190,6 +191,8 @@ sync_project_to_install() {
         --exclude '/config.toml' \
         --exclude '/models.toml' \
         --exclude '/models.json' \
+        --include '/vllm-runtime/uv.lock' \
+        --exclude '/vllm-runtime/.venv/' \
         "${source_dir}/" \
         "${INSTALL_DIR}/"
 
@@ -452,10 +455,16 @@ EOF
     fi
 }
 
-# Warn about (and optionally fold in) stray models.toml files outside the install
-# dir. `ggs models pull` run from a source checkout or $HOME writes there, and the
-# running service never sees those entries. We merge them into the canonical registry
-# during deploy so they are always read by the service.
+# Fold stray models.toml files outside the install dir into the canonical
+# registry. `ggs models pull` run from a source checkout or $HOME writes
+# there, and the running service never sees those entries.
+#
+# The merge runs as $SERVICE_USER, which often cannot read the stray file
+# (e.g. owner-only mode under another $HOME) — the observed `Permission
+# denied (os error 13)` failure. So the stray is first staged into a
+# ggs-readable temp copy; the original is only moved aside after a
+# successful merge, and per-file ok/fail is reported (no blanket
+# "merged" message when a merge actually failed).
 check_stray_registries() {
     local canonical="$MODELS_FILE"
     local -a candidates=(
@@ -465,7 +474,7 @@ check_stray_registries() {
         "${DEPLOY_OWNER:+/home/${DEPLOY_OWNER}/models/models.toml}"
         "${DISCOVER_MODELS_DIR:+${DISCOVER_MODELS_DIR}/models.toml}"
     )
-    local canon_real stray_real found=0
+    local canon_real stray_real found=0 merged=0 failed=0
     canon_real="$(readlink -f "$canonical" 2>/dev/null || echo "$canonical")"
     for stray in "${candidates[@]}"; do
         [[ -n "$stray" && -f "$stray" ]] || continue
@@ -473,14 +482,60 @@ check_stray_registries() {
         [[ "$stray_real" == "$canon_real" ]] && continue
         found=1
         echo "==> Stray registry: $stray (not read by the service)"
+        # Stage a ggs-readable copy: the merge child runs as $SERVICE_USER
+        # and cannot read owner-only files under another home directory.
+        staged="$(sudo mktemp /tmp/stray-models-XXXXXX.toml)"
+        if ! sudo cat "$stray" >"$staged" 2>/dev/null \
+            || ! sudo chown "${SERVICE_USER}:${SERVICE_GROUP}" "$staged"; then
+            echo "    FAILED: could not stage $stray for reading as $SERVICE_USER (check permissions)." >&2
+            sudo rm -f "$staged"
+            failed=1
+            continue
+        fi
         echo "    Merging its pins into $canonical ..."
-        sudo -u "$SERVICE_USER" "$BIN" discover-models "$MODELS_DIR" \
-            -o "$MODELS_FILE" --merge "$stray" \
-            && sudo mv "$stray" "${stray}.merged-$(date +%Y%m%d%H%M%S)" \
-            && echo "    Merged; original moved aside."
+        if sudo -u "$SERVICE_USER" "$BIN" discover-models "$MODELS_DIR" \
+            -o "$MODELS_FILE" --merge "$staged"; then
+            sudo rm -f "$staged"
+            sudo mv "$stray" "${stray}.merged-$(date +%Y%m%d%H%M%S)"
+            echo "    Merged; original moved aside."
+            merged=1
+        else
+            echo "    FAILED: merge of $stray failed; original left untouched." >&2
+            sudo rm -f "$staged"
+            failed=1
+        fi
     done
-    if [[ "$found" == "1" ]]; then
+    if [[ "$merged" == "1" ]]; then
         echo "    Stray registries merged into $canonical."
+    fi
+    if [[ "$failed" == "1" ]]; then
+        echo "    Some stray registries could NOT be merged (see FAILED lines above)." >&2
+        echo "    Fix: sudo chmod 644 <stray>  or remove it: rm <stray>" >&2
+        return 1
+    fi
+    return 0
+}
+
+# A script cannot change its parent shell's groups, so `newgrp` can only be
+# offered, never done transparently. Called at the end of a successful
+# deploy: when the deploying user belongs to $SERVICE_GROUP on paper but
+# this shell lacks it (typical right after deploy added them), offer to
+# `exec newgrp $SERVICE_GROUP`, which replaces this shell with one that
+# has the group — interactive pulls then work immediately, no logout.
+offer_group_activation() {
+    [[ "$DEPLOY_OWNER" != "root" ]] || return 0
+    id "$DEPLOY_OWNER" >/dev/null 2>&1 || return 0
+    id -nG "$DEPLOY_OWNER" 2>/dev/null | tr ' ' '\n' | grep -qx "$SERVICE_GROUP" || return 0
+    id -nG 2>/dev/null | tr ' ' '\n' | grep -qx "$SERVICE_GROUP" && return 0
+    [[ -t 0 ]] || {
+        echo "==> NOTE: log out/in (or run: newgrp $SERVICE_GROUP) to activate $SERVICE_GROUP membership."
+        return 0
+    }
+    read -r -p "Activate '$SERVICE_GROUP' group now (exec newgrp $SERVICE_GROUP)? [Y/n] " REPLY
+    REPLY="${REPLY:-Y}"
+    if [[ "$REPLY" =~ ^[Yy]$ ]]; then
+        echo "==> Activating '$SERVICE_GROUP' via newgrp (replaces this shell)..."
+        exec newgrp "$SERVICE_GROUP"
     fi
 }
 
@@ -547,7 +602,25 @@ registry_vllm_ready() {
     command="$(registry_vllm_command "$file")"
     project="$(registry_vllm_project "$file")"
     [[ -x "$command" && -r "$project/pyproject.toml" ]] || return 1
-    "$command" run --project "$project" vllm --version >/dev/null 2>&1
+    # Import probe, not `vllm --version`: the CLI entrypoint infers the
+    # device type at startup and crashes on GPU-less/driver-broken hosts
+    # (`Can't initialize NVML` / `Failed to infer device type`) even when
+    # the install is fine.
+    "$command" run --no-sync --project "$project" python -c \
+        "import importlib.metadata, sys; print(importlib.metadata.version('vllm'))" >/dev/null 2>&1
+}
+
+# Non-fatal GPU preflight: `vllm serve` needs a CUDA driver, while the
+# import probe above passes without one — so warn here instead of letting
+# the first serve crash with a bare `Failed to infer device type`.
+warn_if_no_gpu() {
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        if ! nvidia-smi -L >/dev/null 2>&1; then
+            echo "WARNING: nvidia-smi lists no GPUs; vLLM serve will likely fail device detection." >&2
+        fi
+    else
+        echo "WARNING: nvidia-smi not found; vLLM requires a CUDA GPU + driver." >&2
+    fi
 }
 
 write_systemd_unit() {
@@ -605,11 +678,12 @@ validate_runtime_access() {
             echo "ERROR: $SERVICE_USER cannot read $effective_vllm_project/pyproject.toml" >&2
             failed=1
         }
-        sudo -u "$SERVICE_USER" "$effective_vllm_command" run --project "$effective_vllm_project" \
-            vllm --version >/dev/null 2>&1 || {
+        sudo -u "$SERVICE_USER" "$effective_vllm_command" run --no-sync --project "$effective_vllm_project" \
+            python -c "import importlib.metadata; print(importlib.metadata.version('vllm'))" >/dev/null 2>&1 || {
             echo "ERROR: vLLM runtime check failed as $SERVICE_USER" >&2
             failed=1
         }
+        warn_if_no_gpu
     fi
     sudo -u "$SERVICE_USER" test -r "$MODELS_DIR" || {
         echo "ERROR: $SERVICE_USER cannot read $MODELS_DIR" >&2
@@ -856,6 +930,7 @@ Environment:
   MODELS_DIR / DISCOVER_MODELS_DIR   Override discover scan dirs (comma-separated)
   GGUF_SWITCHBOARD_DIR               Source checkout for clone/bootstrap only
   LLAMA_RELEASE_CHANNEL              stable (default) or nightly
+  VLLM_RELEASE_CHANNEL               stable (default, locked) or nightly (re-resolve vs PyPI)
 
 Post-install:
   Adds a 'ggs' alias to your shell rc file (bash/zsh) when accepted.
@@ -891,15 +966,33 @@ if [[ "$SKIP_PULL" != "true" ]]; then
         git fetch origin "$BRANCH" 2>/dev/null || true
         git checkout "$BRANCH" 2>/dev/null || git checkout -B "$BRANCH" "origin/$BRANCH"
 
+        DEPLOY_STASH_REF=""
         if [[ -n "$(git status --porcelain)" ]]; then
             STASH_LABEL="deploy-auto-stash-$(date +%Y%m%d-%H%M%S)"
-            echo "==> Local changes detected; stashing as '$STASH_LABEL'..."
+            echo "==> Local changes detected; stashing as '$STASH_LABEL':"
+            git status --porcelain | sed 's/^/    /'
             git stash push --include-untracked --message "$STASH_LABEL" >/dev/null
-            echo "==> Stashed local changes. (Use 'git stash list' / 'git stash pop' to recover.)"
+            DEPLOY_STASH_REF="$(git rev-parse -q --verify refs/stash || true)"
+            echo "    Stashed. (Recover: git stash show --name-only ${DEPLOY_STASH_REF:-stash@{0}} / git stash pop)"
         fi
 
         echo "==> Pulling latest changes..."
         git pull origin "$BRANCH"
+
+        # Restore what we stashed once the pull landed: the pull
+        # fast-forwarded (or was already current), so the pre-pull dirt —
+        # usually live config/models.toml, not real code edits — belongs
+        # back. On conflict, leave the stash in place and say so loudly
+        # instead of silently piling up another deploy-auto-stash entry.
+        if [[ -n "${DEPLOY_STASH_REF:-}" ]]; then
+            if git stash pop -q 2>/dev/null; then
+                echo "==> Restored pre-pull local changes (stash popped)."
+            else
+                echo "WARNING: could not auto-restore $STASH_LABEL (pull touched the same files)." >&2
+                echo "         Inspect with: git stash show --name-only ${DEPLOY_STASH_REF}" >&2
+                echo "         Then: git stash pop  (resolve conflicts)  or: git stash drop ${DEPLOY_STASH_REF}" >&2
+            fi
+        fi
         if [[ -n "$(git status --porcelain)" ]]; then
             git_pull_has_changes=true
         fi
@@ -1020,20 +1113,21 @@ write_system_config
 
 if [[ "$SKIP_VLLM" != "true" ]]; then
     VLLM_DEPLOY_LOG="$(mktemp)"
-    ensure_vllm_current "$VLLM_PROJECT_DIR" 2>&1 | tee "$VLLM_DEPLOY_LOG"
+    VLLM_RELEASE_CHANNEL="$VLLM_RELEASE_CHANNEL" \
+        ensure_vllm_current "$VLLM_PROJECT_DIR" 2>&1 | tee "$VLLM_DEPLOY_LOG"
     if grep -q 'already current' "$VLLM_DEPLOY_LOG"; then
-        VLLM_DEPLOY_STATUS="current; no sync"
+        VLLM_DEPLOY_STATUS="current; no sync; $VLLM_RELEASE_CHANNEL"
     elif grep -q 'release check failed; keeping' "$VLLM_DEPLOY_LOG"; then
-        VLLM_DEPLOY_STATUS="retained; update check unavailable"
+        VLLM_DEPLOY_STATUS="retained; update check unavailable; $VLLM_RELEASE_CHANNEL"
     elif grep -q 'Updating vLLM' "$VLLM_DEPLOY_LOG"; then
-        VLLM_DEPLOY_STATUS="updated"
+        VLLM_DEPLOY_STATUS="updated; $VLLM_RELEASE_CHANNEL"
     else
-        VLLM_DEPLOY_STATUS="installed"
+        VLLM_DEPLOY_STATUS="installed; $VLLM_RELEASE_CHANNEL"
     fi
     rm -f "$VLLM_DEPLOY_LOG"
 else
     echo "==> Skipping vLLM setup (--skip-vllm)."
-    VLLM_DEPLOY_STATUS="skipped"
+    VLLM_DEPLOY_STATUS="skipped; $VLLM_RELEASE_CHANNEL"
 fi
 
 echo "==> Installing binary → $BIN..."
@@ -1147,7 +1241,8 @@ for i in {1..30}; do
         else
             print_models_from_config "$CONFIG_FILE"
         fi
-        check_stray_registries
+        check_stray_registries || true
+        offer_group_activation
         echo "==> Checklist:"
         print_deploy_checklist
         if [[ "$REFRESH_MODELS" == "true" ]]; then

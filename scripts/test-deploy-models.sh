@@ -102,6 +102,9 @@ grep -q 'Left .* untouched' deploy.sh
 test -x scripts/setup-vllm.sh
 test -f vllm-runtime/pyproject.toml
 grep -q 'UV_NO_MODIFY_PATH=1' scripts/setup-vllm.sh
+grep -q "include '/vllm-runtime/uv.lock'" deploy.sh
+grep -q "requires-python = \">=3.10,<3.13\"" vllm-runtime/pyproject.toml
+test -f vllm-runtime/uv.lock
 
 GGUF_SWITCHBOARD_VLLM_LIB=1 source ./scripts/setup-vllm.sh
 fake_uv="$TMP/uv"
@@ -109,17 +112,25 @@ uv_log="$TMP/uv.log"
 cat >"$fake_uv" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >>"$UV_TEST_LOG"
-if [ "${1:-}" = "--version" ] || [ "${4:-}" = "--version" ]; then
+# The import probe is `uv run ... python -c "<script>"`; echo a version for it.
+if [ "${4:-}" = "python" ]; then
   printf '%s\n' "uv/vllm test version"
 fi
 EOF
 chmod +x "$fake_uv"
+# Empty CUDA_VISIBLE_DEVICES exercises the warn_if_no_gpu path below.
 test_vllm_project="$TMP/vllm-runtime"
 mkdir -p "$test_vllm_project"
 cp vllm-runtime/pyproject.toml "$test_vllm_project/pyproject.toml"
-UV_TEST_LOG="$uv_log" UV_BIN="$fake_uv" setup_vllm "$test_vllm_project"
+# Deploy copies uv.lock when present; mirror that so the --frozen path is covered.
+if [ -f vllm-runtime/uv.lock ]; then
+  cp vllm-runtime/uv.lock "$test_vllm_project/uv.lock"
+fi
+CUDA_VISIBLE_DEVICES="" UV_TEST_LOG="$uv_log" UV_BIN="$fake_uv" setup_vllm "$test_vllm_project" 2>"$TMP/gpu-warn.log"
 grep -q "sync --project $test_vllm_project" "$uv_log"
-grep -q "run --no-sync --project $test_vllm_project vllm --version" "$uv_log"
+grep -q -- "--frozen" "$uv_log"
+grep -q "run --no-sync --project $test_vllm_project python -c" "$uv_log"
+grep -q "WARNING" "$TMP/gpu-warn.log"
 
 # Deploy keeps tracked examples separate from runtime configuration.
 test -f config.example.toml
@@ -303,6 +314,9 @@ grep -q '/usr/local/bin/llama-server' <<<"$llama_help"
 # llama.cpp bootstrap is shallow; stable semver is the default with nightly opt-in.
 grep -Eq 'git clone .*--depth 1 .*--single-branch .*llama\.cpp\.git' scripts/update-llama-cpp.sh
 grep -q "LLAMA_RELEASE_CHANNEL=\"\${LLAMA_RELEASE_CHANNEL:-stable}\"" scripts/update-llama-cpp.sh
+grep -q 'VLLM_RELEASE_CHANNEL="${VLLM_RELEASE_CHANNEL:-stable}"' scripts/setup-vllm.sh
+grep -q 'VLLM_RELEASE_CHANNEL="${VLLM_RELEASE_CHANNEL:-stable}"' deploy.sh
+grep -q 'VLLM_RELEASE_CHANNEL *stable (default, locked) or nightly' deploy.sh
 grep -q "release_pattern='v\[0-9\]\*'" scripts/update-llama-cpp.sh
 grep -q "release_pattern='b\[0-9\]\*'" scripts/update-llama-cpp.sh
 grep -q 'git fetch --depth 1 origin' scripts/update-llama-cpp.sh
@@ -317,12 +331,34 @@ test "$deployed_registry_line" -lt "$cwd_registry_line"
 
 # Ordering: stop → build → install binary → enable --now
 stop_line="$(grep -n 'systemctl stop gguf-switchboard' deploy.sh | head -1 | cut -d: -f1)"
-build_line="$(grep -n '^cargo build --release$' deploy.sh | cut -d: -f1)"
-install_line="$(grep -n 'install -o root -g root -m 755' deploy.sh | cut -d: -f1)"
-enable_line="$(grep -n 'systemctl enable --now gguf-switchboard' deploy.sh | cut -d: -f1)"
+build_line="$(grep -n '^cargo build --release$' deploy.sh | head -1 | cut -d: -f1)"
+install_line="$(grep -n 'install -o root -g root -m 755' deploy.sh | head -1 | cut -d: -f1)"
+enable_line="$(grep -n 'systemctl enable --now gguf-switchboard' deploy.sh | head -1 | cut -d: -f1)"
 test "$stop_line" -lt "$build_line"
 test "$build_line" -lt "$install_line"
 test "$install_line" -lt "$enable_line"
+
+# Stash hygiene: deploy must print the stashed file list, capture the stash
+# ref, and auto-pop after pull (no silent pile-up of deploy-auto-stash).
+grep -q 'git status --porcelain | sed' deploy.sh
+grep -q 'DEPLOY_STASH_REF="$(git rev-parse -q --verify refs/stash' deploy.sh
+grep -q 'git stash pop -q' deploy.sh
+grep -q 'could not auto-restore' deploy.sh
+grep -q 'vllm-runtime/.venv/' .gitignore
+
+# Stray merge: stage a ggs-readable copy, report per-file FAILED, and only
+# print success when at least one merge actually succeeded.
+grep -q 'staged="$(sudo mktemp /tmp/stray-models-XXXXXX.toml)"' deploy.sh
+grep -q 'FAILED: merge of $stray failed' deploy.sh
+grep -q 'could NOT be merged' deploy.sh
+grep -q 'if [[ "$merged" == "1" ]]' deploy.sh
+
+# Group activation: deploy offers (never forces) exec newgrp at the end,
+# after the service is healthy (never mid-deploy).
+offer_line="$(grep -n 'offer_group_activation' deploy.sh | head -1 | cut -d: -f1)"
+health_line="$(grep -n 'Deploy complete' deploy.sh | head -1 | cut -d: -f1)"
+test "$offer_line" -gt "$health_line"
+grep -q 'exec newgrp "$SERVICE_GROUP"' deploy.sh
 
 # Runtime paths must not be constructed from $HOME in the main deploy body.
 # (HOME is still ok for git clone bootstrap, rustup, and optional shell alias.)
@@ -331,11 +367,11 @@ test "$install_line" -lt "$enable_line"
 deployment_summary="$(print_deployment_summary \
     "v0.1.2" "current; no rebuild; stable" \
     "v0.1.6" \
-    "0.28.0" "current; no sync" \
+    "0.28.0" "current; no sync; stable" \
     "12" "running")"
 grep -q 'llama.cpp:.*v0.1.2.*current; no rebuild; stable' <<<"$deployment_summary"
 grep -q 'gguf-switchboard:.*v0.1.6' <<<"$deployment_summary"
-grep -q 'vLLM:.*0.28.0.*current; no sync' <<<"$deployment_summary"
+grep -q 'vLLM:.*0.28.0.*current; no sync; stable' <<<"$deployment_summary"
 grep -q 'Models indexed:.*12' <<<"$deployment_summary"
 grep -q 'Service:.*running' <<<"$deployment_summary"
 grep -q 'ggs status' <<<"$deployment_summary"

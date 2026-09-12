@@ -258,8 +258,8 @@ fn parse_common(args: &[String], allow_yes: bool) -> Result<CommonArgs, String> 
 
 /// Resolve the registry `list`/`delete` read, mirroring the order `models
 /// pull` writes with (`resolve_vllm_registry_path` in `models_cmd.rs`):
-/// explicit `--registry` → a `models.toml` sibling to the scan dir → the
-/// canonical deployed registry → `./models.toml` → config.toml's
+/// explicit `--registry` → the canonical deployed registry → a
+/// `models.toml` sibling to the scan dir → `./models.toml` → config.toml's
 /// `models_file`. Previously this only checked `./models.toml`, so models
 /// pulled into the deployed registry showed as `(unregistered)`.
 fn resolve_registry(explicit: Option<&str>) -> Option<(String, ModelsRegistry)> {
@@ -277,9 +277,10 @@ fn resolve_registry(explicit: Option<&str>) -> Option<(String, ModelsRegistry)> 
 }
 
 /// Default registry lookup for `list`/`delete` when `--registry` is absent.
-/// Order matches `resolve_vllm_registry_path`: deployed registry first, then
-/// `./models.toml`, then config.toml's `models_file` — so the inventory reads
-/// the same file `models pull` writes.
+/// Order matches `resolve_vllm_registry_path`: deployed registry first
+/// (whenever it exists), then the scan-dir sibling, then `./models.toml`,
+/// then config.toml's `models_file` — so the inventory reads the same file
+/// `models pull` writes.
 fn default_local_registry_path() -> Option<String> {
     let deployed = Path::new("/opt/gguf-switchboard/models.toml");
     if deployed.is_file() {

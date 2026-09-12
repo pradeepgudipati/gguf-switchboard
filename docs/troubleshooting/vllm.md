@@ -17,10 +17,36 @@ vLLM-specific errors and uv environment issues.
 
 **Solutions:**
 
-1. Check vLLM installation: `/usr/local/bin/uv run --project /opt/gguf-switchboard/vllm-runtime vllm --version`
+1. Check vLLM installation (import probe — safe without a GPU): `/usr/local/bin/uv run --project /opt/gguf-switchboard/vllm-runtime python -c "import importlib.metadata; print(importlib.metadata.version('vllm'))"`
 2. Check CUDA: `nvcc --version`
 3. Check model compatibility
 4. Check logs: `ggs logs`
+
+## `Can't initialize NVML` / `Failed to infer device type`
+
+**Cause:** torch cannot see an NVIDIA driver/GPU, so vLLM's device
+inference fails during CLI startup — even for version checks. The
+import probe above still succeeds; only `vllm serve` (and the old
+`vllm --version` check) crash.
+
+**Solutions:**
+
+1. `nvidia-smi -L` must list a GPU; `ls -l /dev/nvidia*` must exist.
+2. Unset an empty `CUDA_VISIBLE_DEVICES` (it hides all GPUs).
+3. Confirm torch sees CUDA: `/usr/local/bin/uv run --project /opt/gguf-switchboard/vllm-runtime python -c "import torch; print(torch.cuda.is_available())"`.
+4. vLLM requires a CUDA GPU — there is no CPU fallback for serving.
+
+## Unexpected dependency upgrades (tokenspeed-triton, xgrammar, ...)
+
+**Cause:** without a lockfile, `uv sync` re-resolves floating
+transitive pins on every deploy.
+
+**Solutions:**
+
+1. Deploys sync `--frozen` against the committed `vllm-runtime/uv.lock`.
+   Refresh it deliberately with `uv lock --project vllm-runtime --python 3.12`
+   (Python is capped at `<3.13`: torch/vLLM wheels lag new CPython releases).
+2. Verify drift with `./deploy.sh` (the locked fast path re-syncs to the lock).
 
 ## uv environment creation failed
 

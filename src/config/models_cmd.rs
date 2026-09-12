@@ -907,9 +907,10 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         .unwrap_or_else(|| selected.path.clone());
 
     // Resolve the same way `models pull vllm` does: an explicit --registry wins,
-    // then a models.toml beside the download dir, then the canonical deployed
-    // registry, then config.toml's `models_file`. `ggs` is commonly run from a
-    // source checkout while the running server reads /opt/gguf-switchboard.
+    // then the canonical deployed registry whenever it exists, then a
+    // models.toml beside the download dir, then config.toml's `models_file`.
+    // `ggs` is commonly run from a source checkout while the running server
+    // reads /opt/gguf-switchboard.
     let config_path = resolve_config_toml_path();
     let dest_dir_str = dest_dir.to_string_lossy().into_owned();
     let registry_path = resolve_vllm_registry_path(
@@ -968,7 +969,7 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         let alias = existing.alias.clone();
         registry.write(&registry_path)?;
         println!(
-            "✓ Merged GGUF source into existing alias: {alias} \
+            "✓ Merged GGUF source into existing alias: {alias} (registry: {registry_path}) \
              (this model now has both GGUF and vLLM sources — vLLM is preferred when it fits)"
         );
         let refreshed = refresh_after_pull().await;
@@ -995,7 +996,7 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     registry.models.push(entry);
 
     registry.write(&registry_path)?;
-    println!("✓ Registered as: {alias}");
+    println!("✓ Registered as: {alias} (registry: {registry_path})");
     let refreshed = refresh_after_pull().await;
     maybe_bench_after_pull(&alias, &kind, no_bench, refreshed).await;
 
@@ -1312,7 +1313,7 @@ async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         existing.max_context_length = existing.max_context_length.or(meta.max_position_embeddings);
         registry.write(&registry_path)?;
         println!(
-            "✓ Merged vLLM source into existing alias: {alias} \
+            "✓ Merged vLLM source into existing alias: {alias} (registry: {registry_path}) \
              (this model now has both GGUF and vLLM sources — vLLM is preferred when it fits)"
         );
         // refresh_after_pull() already prints a "start or restart" hint on failure.
@@ -1343,7 +1344,7 @@ async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     };
     registry.models.push(entry);
     registry.write(&registry_path)?;
-    println!("✓ Registered as: {alias} (vLLM source)");
+    println!("✓ Registered as: {alias} (vLLM source, registry: {registry_path})");
 
     // refresh_after_pull() already prints a "start or restart" hint on failure.
     refresh_after_pull().await;
@@ -1762,6 +1763,13 @@ fn resolve_config_toml_path() -> PathBuf {
     PathBuf::from("config.toml")
 }
 
+/// Registry resolution for `models pull` (GGUF and vLLM) writes.
+/// Order (option C): an explicit `--registry` always wins; otherwise the
+/// canonical deployed registry wins whenever it exists, so pulls from a
+/// source checkout land where the running server reads them. A
+/// `models.toml` beside the download dir is next (fresh `--dir` pulls
+/// keep a local registry until deployed), then `./models.toml` (local
+/// dev), then config.toml's `models_file`.
 fn resolve_vllm_registry_path(
     explicit: Option<&str>,
     destination: Option<&str>,
@@ -1771,14 +1779,14 @@ fn resolve_vllm_registry_path(
     if let Some(path) = explicit {
         return path.to_string();
     }
+    if deployed_registry.is_file() {
+        return deployed_registry.to_string_lossy().into_owned();
+    }
     if let Some(destination) = destination {
         let candidate = Path::new(destination).join("models.toml");
         if candidate.is_file() {
             return candidate.to_string_lossy().into_owned();
         }
-    }
-    if deployed_registry.is_file() {
-        return deployed_registry.to_string_lossy().into_owned();
     }
     if Path::new("models.toml").is_file() {
         return "models.toml".to_string();
@@ -2327,15 +2335,15 @@ mod tests {
         let registry = dir.path().join("models.toml");
         std::fs::write(&registry, "version = 1\n").unwrap();
         let config = dir.path().join("config.toml");
-        std::fs::write(
-            &config,
-            format!("models_file = \"{}\"\n", registry.display()),
-        )
-        .unwrap();
+        // Forward slashes: a raw Windows path in a TOML basic string turns
+        // `\U`/`\A` into invalid escapes and breaks parsing on Windows.
+        let registry_forward = registry.display().to_string().replace('\\', "/");
+        std::fs::write(&config, format!("models_file = \"{registry_forward}\"\n")).unwrap();
 
         assert_eq!(
-            resolve_vllm_registry_path(None, None, &config, std::path::Path::new("missing.toml"),),
-            registry.to_string_lossy()
+            resolve_vllm_registry_path(None, None, &config, std::path::Path::new("missing.toml"),)
+                .replace('\\', "/"),
+            registry_forward
         );
     }
 
@@ -2366,6 +2374,30 @@ mod tests {
 
         assert_eq!(
             resolve_vllm_registry_path(None, None, &source_config, &deployed_registry),
+            deployed_registry.to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn vllm_registry_resolution_prefers_deployed_over_dir_sibling_and_cwd() {
+        // Option C: once the deployed registry exists, pulls from a source
+        // checkout land where the server reads — no new stray registries.
+        let dir = tempfile::tempdir().unwrap();
+        let deployed_registry = dir.path().join("deployed-models.toml");
+        std::fs::write(&deployed_registry, "version = 1\n").unwrap();
+        let sibling_dir = dir.path().join("downloads");
+        std::fs::create_dir_all(&sibling_dir).unwrap();
+        std::fs::write(sibling_dir.join("models.toml"), "version = 1\n").unwrap();
+        let source_config = dir.path().join("source-config.toml");
+        std::fs::write(&source_config, "bind = \"127.0.0.1:9090\"\n").unwrap();
+
+        assert_eq!(
+            resolve_vllm_registry_path(
+                None,
+                sibling_dir.to_str(),
+                &source_config,
+                &deployed_registry,
+            ),
             deployed_registry.to_string_lossy()
         );
     }

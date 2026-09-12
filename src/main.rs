@@ -420,9 +420,7 @@ fn run_service_ctl(action: &str) -> Result<(), Box<dyn std::error::Error>> {
     #[cfg(not(unix))]
     {
         let _ = action;
-        return Err(
-            "'stop'/'restart' manage the systemd service and are only supported on Linux".into(),
-        );
+        Err("'stop'/'restart' manage the systemd service and are only supported on Linux".into())
     }
 
     #[cfg(unix)]

@@ -3,7 +3,7 @@
 //! Provides platform-specific memory stats for Linux and macOS.
 //! Falls back gracefully on unsupported platforms.
 
-use tracing::{debug, warn};
+use tracing::warn;
 
 /// Current system memory statistics.
 #[derive(Debug, Clone)]
@@ -43,7 +43,7 @@ pub fn check_memory() -> Option<MemoryStats> {
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         warn!("Memory monitoring is not supported on this platform");
-        return None;
+        None
     }
 }
 

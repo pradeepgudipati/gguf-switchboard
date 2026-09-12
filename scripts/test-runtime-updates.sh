@@ -106,18 +106,53 @@ printf '%s\n' "$*" >>"$UV_TEST_LOG"
 if [ "${1:-}" = "run" ]; then
     echo "0.28.2"
 fi
+# Locked fast path: `sync --locked --check` succeeds -> locked already current.
+if [ "${1:-}" = "sync" ] && [ "${2:-}" = "--locked" ]; then
+    exit 0
+fi
 exit 0
 EOF
 chmod +x "$TMP/bin/uv"
+cat >"$TMP/bin/nvidia-smi" <<'EOF'
+#!/usr/bin/env sh
+echo "GPU 0: Test GPU (UUID: GPU-test)"
+EOF
+chmod +x "$TMP/bin/nvidia-smi"
 : >"$TMP/current-uv.log"
+printf '%s\n' 'name = "vllm"' 'version = "0.28.2"' >"$TMP/project/uv.lock"
 current_vllm_output="$(
     PATH="$TMP/bin:$PATH" \
     UV_BIN="$TMP/bin/uv" \
     UV_TEST_LOG="$TMP/current-uv.log" \
+    CUDA_VISIBLE_DEVICES="0" \
     ensure_vllm_current "$TMP/project"
 )"
-grep -q 'already current (0.28.2); skipping sync' <<<"$current_vllm_output"
-! grep -q '^sync ' "$TMP/current-uv.log"
+grep -q 'already current (0.28.2, locked, stable channel); skipping sync' <<<"$current_vllm_output"
+! grep -q '^sync --project' "$TMP/current-uv.log"
+# The import probe (not `vllm --version`) must drive readiness checks.
+grep -q 'vllm_ready probe' "$TMP/current-uv.log"
+! grep -q 'vllm --version' "$TMP/current-uv.log"
+
+# Nightly channel skips the locked fast path and re-resolves against PyPI.
+: >"$TMP/nightly-uv.log"
+nightly_vllm_output="$(
+    PATH="$TMP/bin:$PATH" \
+    UV_BIN="$TMP/bin/uv" \
+    UV_TEST_LOG="$TMP/nightly-uv.log" \
+    CUDA_VISIBLE_DEVICES="0" \
+    VLLM_RELEASE_CHANNEL=nightly \
+    ensure_vllm_current "$TMP/project"
+)"
+grep -q 'already current (0.28.2, nightly channel); skipping sync' <<<"$nightly_vllm_output"
+! grep -q 'locked' <<<"$nightly_vllm_output"
+
+# Invalid channel fails fast.
+if PATH="$TMP/bin:$PATH" UV_BIN="$TMP/bin/uv" CUDA_VISIBLE_DEVICES="0" \
+    VLLM_RELEASE_CHANNEL=beta ensure_vllm_current "$TMP/project" >/dev/null 2>&1; then
+    echo "VLLM_RELEASE_CHANNEL=beta must be rejected" >&2
+    exit 1
+fi
+rm -f "$TMP/project/uv.lock"
 
 mkdir -p "$TMP/llama-source/.git" "$TMP/llama-prefix/bin" \
     "$TMP/llama-prefix/share/gguf-switchboard"

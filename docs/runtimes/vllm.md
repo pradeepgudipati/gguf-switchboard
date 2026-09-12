@@ -81,8 +81,9 @@ The uv environment is created at:
 ### Managing the environment
 
 ```bash
-# Check vLLM version
-/usr/local/bin/uv run --project /opt/gguf-switchboard/vllm-runtime vllm --version
+# Check vLLM version (import probe: safe without a GPU; `vllm --version`
+# infers the device type at startup and crashes on driver-less hosts)
+/usr/local/bin/uv run --project /opt/gguf-switchboard/vllm-runtime python -c "import importlib.metadata; print(importlib.metadata.version('vllm'))"
 
 # Recreate environment
 rm -rf /opt/gguf-switchboard/vllm-runtime/.venv

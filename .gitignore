@@ -20,6 +20,8 @@ target
 /config.toml
 /models.toml
 /models.json
+# vLLM venv: `uv sync --project` recreates it; never stash or commit it
+/vllm-runtime/.venv/
 # Obsolete deploy mirrors — keep ignored so leftovers are never committed
 models.local.toml
 models.local.json

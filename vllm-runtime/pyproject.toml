@@ -1,7 +1,10 @@
 [project]
 name = "gguf-switchboard-vllm-runtime"
 version = "0.1.0"
-requires-python = ">=3.10,<3.15"
+# Capped below 3.13: torch/vLLM wheels lag new CPython releases (a 3.14
+# interpreter was observed resolving untested transitive pins such as
+# tokenspeed-triton post-releases), and 3.12 is the best-supported floor.
+requires-python = ">=3.10,<3.13"
 dependencies = [
   "vllm>=0.28,<0.29",
 ]

@@ -13,7 +13,7 @@ gguf-switchboard is a **model router**; llama.cpp and vLLM perform inference. Th
 | **Linux** | Ubuntu/Debian for `deploy.sh` (`apt`). Other distros: install build deps yourself. |
 | **NVIDIA GPU + CUDA toolkit** | `nvcc` and the NVIDIA driver must be usable. CPU-only llama.cpp works but is slow. |
 | **llama.cpp** | Installed or updated by `./deploy.sh` into `/usr/local`; serves GGUF models. |
-| **vLLM** | Installed or updated by `./deploy.sh` in `/opt/gguf-switchboard/vllm-runtime`; serves Safetensors models. Verify with `/usr/local/bin/uv run --project /opt/gguf-switchboard/vllm-runtime vllm --version`. See the [official GPU installation guide](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/) for non-default environments. |
+| **vLLM** | Installed or updated by `./deploy.sh` in `/opt/gguf-switchboard/vllm-runtime`; serves Safetensors models. Verify with `/usr/local/bin/uv run --project /opt/gguf-switchboard/vllm-runtime python -c "import importlib.metadata; print(importlib.metadata.version('vllm'))"`. See the [official GPU installation guide](https://docs.vllm.ai/en/latest/getting_started/installation/gpu/) for non-default environments. |
 | **Rust** | Installed automatically by `deploy.sh` if missing; otherwise [rustup](https://rustup.rs/). |
 | **Model weights** | Pulled separately after installation. GGUF defaults to `/var/lib/gguf-switchboard/models`; vLLM weights use the adjacent managed Safetensors directory. |
 
@@ -45,7 +45,16 @@ cd gguf-switchboard
 
 ### How vLLM updates work
 
-The same deployment installs `uv` when needed, checks PyPI for the latest stable vLLM release allowed by `vllm-runtime/pyproject.toml`, and runs `uv sync` only when that version changed or the environment is missing or broken. Use `--skip-llama-cpp` or `--skip-vllm` to bypass even the corresponding update check.
+The same deployment installs `uv` when needed, then follows the
+`VLLM_RELEASE_CHANNEL` (default `stable`, mirroring
+`LLAMA_RELEASE_CHANNEL`). On the stable channel it syncs `--frozen`
+against the committed `vllm-runtime/uv.lock` and skips the sync when the
+environment matches the lock — PyPI is never consulted, so transitive
+pins (tokenspeed-triton, xgrammar, ...) stay reproducible. On the
+nightly channel (`VLLM_RELEASE_CHANNEL=nightly`) it re-resolves the
+latest release allowed by `vllm-runtime/pyproject.toml` against PyPI on
+every deploy. Use `--skip-llama-cpp` or `--skip-vllm` to bypass even the
+corresponding update check.
 
 ### Environment variable overrides
 
@@ -55,6 +64,7 @@ The same deployment installs `uv` when needed, checks PyPI for the latest stable
 | `PREFIX` | `/usr/local` | Install prefix for llama-server binary |
 | `SERVICE` | `gguf-switchboard` | systemd service name |
 | `LLAMA_RELEASE_CHANNEL` | `stable` | `stable` (semver tags) or `nightly` (build snapshots) |
+| `VLLM_RELEASE_CHANNEL` | `stable` | `stable` (locked `uv.lock` sync) or `nightly` (re-resolve vs PyPI) |
 | `SKIP_PULL` | `0` | Set `1` to skip `git pull` |
 | `SKIP_SERVICE` | `0` | Set `1` to skip systemd operations |
 | `FORCE_REBUILD` | `0` | Set `1` to rebuild llama.cpp even if the marker matches |
@@ -237,7 +247,9 @@ cd ~/gguf-switchboard   # or wherever you cloned
 
 **Important:**
 
-- Deploy **stashes uncommitted changes** (including untracked files) before `git pull`. Recover with `git stash list` / `git stash pop`.
+- Deploy **stashes uncommitted changes** (including untracked files) before `git pull`, prints the stashed file list, and pops the stash back after the pull lands. If the pop conflicts, the stash is kept and deploy prints the exact `git stash show` / `pop` / `drop` recovery commands. Inspect leftovers with `git stash show --include-untracked --name-only stash@{N}`.
+- At the end of a successful deploy, if you belong to the `ggs` group on paper but the current shell lacks it (typical right after deploy added you), deploy offers `exec newgrp ggs` so interactive `ggs models pull` works immediately without logout. Non-interactive shells just get the reminder.
+- Stray `models.toml` files outside `/opt/gguf-switchboard` are merged into the canonical registry via a `ggs`-readable staged copy (owner-only files under another `$HOME` no longer fail with `Permission denied`), and each file reports merged vs FAILED — a failed file no longer prints a false "merged" line.
 - Live config lives under `/opt/gguf-switchboard/` (`config.toml`, `models.toml`); models, `usage.db`, and `conformance.db` (conformance-console run history) under `/var/lib/gguf-switchboard/`. Tracked defaults live in `config.example.toml` and `models.example.toml`.
 - After editing aliases / `priority` / `extra_args`, restart: `sudo systemctl restart gguf-switchboard`.
 - `deploy.sh` leaves the unit stopped when no GGUF or Safetensors models are registered. Pull either format, then re-run deploy with the backend skip flags if no engine update is needed.
@@ -292,5 +304,7 @@ ggs logs --tail 250
 | Service unhealthy / no models | Pull either a GGUF or Safetensors model, then rerun deploy |
 | First install has no models | Not fatal. The installer leaves the service stopped and prints both model-pull paths |
 | Empty `/v1/models` | Check `models_dir` in `/opt/gguf-switchboard/models.toml`; enable `auto_discover = true`; `ggs restart` |
-| Deploy "lost" my edits | `git stash list` — deploy stashes dirty trees before pull |
+| Deploy "lost" my edits | Deploy auto-pops its stash after pull; leftovers: `git stash show --include-untracked --name-only stash@{N}`, then `pop` or `drop` |
+| Stray merge "Permission denied" | Fixed: deploy stages a `ggs`-readable copy first; failures report FAILED per file instead of a false "merged" |
+| `pradeep cannot write .../models` | Accept deploy's `exec newgrp ggs` offer, or run `newgrp ggs` / log out and back in |
 | Port 9090 in use | Change `bind` in `/opt/gguf-switchboard/config.toml` and `ggs restart` |

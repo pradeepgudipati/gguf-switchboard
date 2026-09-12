@@ -349,35 +349,79 @@ pub fn detect_llama_server() -> String {
     default_llama_server()
 }
 
-/// Deploy check for the vLLM backend: verifies `uv` is on PATH and that
-/// `vllm` is importable in the resolved uv environment (ambient, or the
-/// `--project <dir>` given). Returns `Err` with an actionable install
+/// Deploy check for the vLLM backend: verifies `uv` can run and that the
+/// `vllm` package is importable in the resolved uv environment (ambient, or
+/// the `--project <dir>` given). The probe deliberately imports the package
+/// instead of running `vllm --version`: the CLI entrypoint parses engine
+/// args (and infers the device type) at startup, so on GPU-less or
+/// driver-broken hosts the version check itself crashes with `Can't
+/// initialize NVML` / `Failed to infer device type` even though the runtime
+/// is correctly installed. Returns `Err` with an actionable install or GPU
 /// message when either is missing — used both before spawning a vLLM
 /// backend and as a `models pull --backend vllm` preflight, so a user
 /// finds out before waiting on a multi-GB download.
 pub fn check_vllm_available(vllm_command: &str, vllm_project: Option<&str>) -> Result<(), String> {
+    let probe = "import importlib.metadata, sys; print(importlib.metadata.version('vllm'))";
     let mut cmd = std::process::Command::new(vllm_command);
     cmd.arg("run");
     if let Some(project) = vllm_project {
         cmd.arg("--project").arg(project);
     }
-    cmd.args(["vllm", "--version"]);
+    cmd.args(["python", "-c", probe]);
 
     match cmd.output() {
         Ok(out) if out.status.success() => Ok(()),
         Ok(out) => {
             let stderr = String::from_utf8_lossy(&out.stderr);
+            let combined = format!("{}\n{}", String::from_utf8_lossy(&out.stdout), stderr);
+            if let Some(gpu_hint) = classify_vllm_probe_failure(&combined) {
+                return Err(gpu_hint);
+            }
             Err(format!(
-                "vLLM not found in the configured uv environment ({vllm_command} run vllm --version failed: {}).\n\
-                 Install it with:\n  uv pip install vllm\nor:\n  uv tool install vllm\n\
+                "vLLM not found in the configured uv environment ({vllm_command} run python -c \
+                 \"import importlib.metadata ...\" failed: {}).\n\
+                 Install it with:\n  uv sync --project <vllm-runtime-dir>\n\
                  See https://docs.vllm.ai/en/latest/getting_started/installation.html",
                 stderr.trim()
             ))
         }
         Err(e) => Err(format!(
             "Could not run '{vllm_command}' ({e}). Install uv (https://docs.astral.sh/uv/) \
-             and vLLM with: uv pip install vllm"
+             and vLLM with: uv sync --project <vllm-runtime-dir>"
         )),
+    }
+}
+
+/// Classify a failed vLLM probe as a GPU/driver problem when the output
+/// matches the signatures vLLM/torch emit on hosts without a usable GPU
+/// (`Can't initialize NVML`, `Failed to infer device type`, `CUDA driver
+/// ... is too old`, `no CUDA-capable device`, ...). Returns `Some` with an
+/// actionable message, or `None` when the output looks like a plain missing
+/// install instead.
+pub fn classify_vllm_probe_failure(output: &str) -> Option<String> {
+    let haystack = output.to_ascii_lowercase();
+    let gpu_markers = [
+        "can't initialize nvml",
+        "cannot initialize nvml",
+        "failed to infer device type",
+        "no cuda-capable device",
+        "cuda driver version is insufficient",
+        "cuda driver is too old",
+        "nvml",
+        "libcuda.so",
+        "libnvidia-ml.so",
+    ];
+    if gpu_markers.iter().any(|marker| haystack.contains(marker)) {
+        Some(
+            "vLLM runtime found, but no usable GPU/driver was detected (NVML/device probe failed).\n\
+             Check: `nvidia-smi`, `ls -l /dev/nvidia*`, and that CUDA_VISIBLE_DEVICES is not \
+             empty/mis-set. Then confirm torch sees CUDA:\n  \
+             uv run --project <vllm-runtime-dir> python -c \"import torch; print(torch.cuda.is_available())\"\n\
+             See docs/troubleshooting/vllm.md — the vLLM backend requires a CUDA GPU."
+                .to_string(),
+        )
+    } else {
+        None
     }
 }
 
@@ -3073,8 +3117,9 @@ mod tests {
 
         let registry = ModelsRegistry::discover(dir.to_str().unwrap()).unwrap();
         assert_eq!(registry.models.len(), 1);
+        // Separator-agnostic: discover joins with the platform separator.
         assert_eq!(
-            registry.models[0].file,
+            registry.models[0].file.replace('\\', "/"),
             "lmstudio-community/Qwen3.5-9B-GGUF/Qwen3.5-9B-Q4_K_M.gguf"
         );
 
@@ -3420,6 +3465,25 @@ mod tests {
         assert_eq!(resolved[0], dir);
 
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn vllm_probe_failure_classifier_detects_gpu_errors() {
+        let nvml = classify_vllm_probe_failure(
+            "torch/cuda/__init__.py: Can't initialize NVML\nRuntimeError: Failed to infer device type",
+        )
+        .expect("NVML output must classify as a GPU error");
+        assert!(nvml.contains("nvidia-smi"));
+        assert!(nvml.contains("torch.cuda.is_available"));
+
+        let old_driver = classify_vllm_probe_failure(
+            "CUDA driver version is insufficient for CUDA runtime version",
+        )
+        .expect("driver output must classify as a GPU error");
+        assert!(old_driver.contains("driver"));
+
+        assert!(classify_vllm_probe_failure("No module named 'vllm'").is_none());
+        assert!(classify_vllm_probe_failure("").is_none());
     }
 
     #[test]
