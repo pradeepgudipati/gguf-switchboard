@@ -361,6 +361,18 @@ health_line="$(grep -n 'Deploy complete' deploy.sh | head -1 | cut -d: -f1)"
 test "$offer_line" -gt "$health_line"
 grep -q 'exec newgrp "$SERVICE_GROUP"' deploy.sh
 
+# Self-update safety: when git pull moves HEAD, the running (stale) script
+# must re-exec the fresh copy instead of continuing with buffered old code.
+# Stash pop happens BEFORE the re-exec so the fresh pass starts restored;
+# the fresh pass pulls to the same HEAD (no re-exec loop).
+grep -q 'pre_pull_head="$(git rev-parse HEAD' deploy.sh
+grep -q 'post_pull_head="$(git rev-parse HEAD' deploy.sh
+grep -q 'exec "$SOURCE_DIR/deploy.sh" "$@"' deploy.sh
+grep -q 'GGUF_SWITCHBOARD_NO_REEXEC' deploy.sh
+pop_line="$(grep -n 'Restored pre-pull local changes' deploy.sh | head -1 | cut -d: -f1)"
+reexec_line="$(grep -n 'restarting with the fresh copy' deploy.sh | head -1 | cut -d: -f1)"
+test "$pop_line" -lt "$reexec_line"
+
 # Runtime paths must not be constructed from $HOME in the main deploy body.
 # (HOME is still ok for git clone bootstrap, rustup, and optional shell alias.)
 ! grep -E 'MODELS_DIR=.*\$HOME/models|chown.*whoami.*/var/lib|User=\$\(whoami\)|WorkingDirectory=\$\(pwd\)' deploy.sh

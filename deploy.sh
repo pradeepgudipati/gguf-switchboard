@@ -979,13 +979,18 @@ if [[ "$SKIP_PULL" != "true" ]]; then
         fi
 
         echo "==> Pulling latest changes..."
+        pre_pull_head="$(git rev-parse HEAD 2>/dev/null || true)"
         git pull origin "$BRANCH"
+        post_pull_head="$(git rev-parse HEAD 2>/dev/null || true)"
 
         # Restore what we stashed once the pull landed: the pull
         # fast-forwarded (or was already current), so the pre-pull dirt —
         # usually live config/models.toml, not real code edits — belongs
         # back. On conflict, leave the stash in place and say so loudly
         # instead of silently piling up another deploy-auto-stash entry.
+        # This runs BEFORE the re-exec check below, so the fresh process
+        # starts with the dirt already restored (its own pull is a no-op
+        # and its own stash block sees a clean tree).
         if [[ -n "${DEPLOY_STASH_REF:-}" ]]; then
             if git stash pop -q 2>/dev/null; then
                 echo "==> Restored pre-pull local changes (stash popped)."
@@ -994,6 +999,19 @@ if [[ "$SKIP_PULL" != "true" ]]; then
                 echo "         Inspect with: git stash show --name-only ${DEPLOY_STASH_REF}" >&2
                 echo "         Then: git stash pop  (resolve conflicts)  or: git stash drop ${DEPLOY_STASH_REF}" >&2
             fi
+        fi
+
+        # A running bash script executes the bytes it already buffered: if
+        # the pull just moved HEAD, the rest of THIS process is stale code.
+        # Re-exec the fresh script instead of continuing half-old.
+        # GGUF_SWITCHBOARD_NO_REEXEC=1 is the escape hatch (tests).
+        # No loop risk: the fresh process pulls to the same HEAD
+        # (pre == post) and continues normally.
+        if [[ -n "$pre_pull_head" && -n "$post_pull_head" \
+            && "$pre_pull_head" != "$post_pull_head" \
+            && "${GGUF_SWITCHBOARD_NO_REEXEC:-0}" != "1" ]]; then
+            echo "==> Deploy script updated by pull; restarting with the fresh copy..."
+            exec "$SOURCE_DIR/deploy.sh" "$@"
         fi
         if [[ -n "$(git status --porcelain)" ]]; then
             git_pull_has_changes=true
