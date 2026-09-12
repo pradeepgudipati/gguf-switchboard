@@ -484,9 +484,11 @@ check_stray_registries() {
         echo "==> Stray registry: $stray (not read by the service)"
         # Stage a ggs-readable copy: the merge child runs as $SERVICE_USER
         # and cannot read owner-only files under another home directory.
+        # Single `install` (not `cat` + redirect + `chown`): a `>` redirect
+        # runs as the invoking user, which cannot write a root-owned 600
+        # mktemp file — `install` reads as root and sets owner/mode at once.
         staged="$(sudo mktemp /tmp/stray-models-XXXXXX.toml)"
-        if ! sudo cat "$stray" >"$staged" 2>/dev/null \
-            || ! sudo chown "${SERVICE_USER}:${SERVICE_GROUP}" "$staged"; then
+        if ! sudo install -o "$SERVICE_USER" -g "$SERVICE_GROUP" -m 644 "$stray" "$staged" 2>/dev/null; then
             echo "    FAILED: could not stage $stray for reading as $SERVICE_USER (check permissions)." >&2
             sudo rm -f "$staged"
             failed=1

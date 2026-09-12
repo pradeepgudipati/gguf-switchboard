@@ -349,6 +349,7 @@ grep -q 'vllm-runtime/.venv/' .gitignore
 # Stray merge: stage a ggs-readable copy, report per-file FAILED, and only
 # print success when at least one merge actually succeeded.
 grep -q 'staged="$(sudo mktemp /tmp/stray-models-XXXXXX.toml)"' deploy.sh
+grep -q 'sudo install -o "\$SERVICE_USER" -g "\$SERVICE_GROUP" -m 644 "\$stray" "\$staged"' deploy.sh
 grep -q 'FAILED: merge of $stray failed' deploy.sh
 grep -q 'could NOT be merged' deploy.sh
 grep -q 'if [[ "$merged" == "1" ]]' deploy.sh
