@@ -3,6 +3,8 @@
 //! Provides platform-specific memory stats for Linux and macOS.
 //! Falls back gracefully on unsupported platforms.
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use tracing::debug;
 use tracing::warn;
 
 /// Current system memory statistics.
