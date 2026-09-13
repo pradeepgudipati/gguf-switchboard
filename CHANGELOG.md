@@ -4,6 +4,8 @@ Release notes for each version live in [`releases/`](releases/) and on [GitHub R
 
 ## Unreleased
 
+## [v0.1.9](https://github.com/pradeepgudipati/gguf-switchboard/releases/tag/v0.1.9) — 2026-09-13
+
 - **Release preflight + local release driver** — `scripts/check-release-preflight.sh` fails fast on malformed tags, missing/empty `releases/<tag>.md` notes, and `Cargo.toml`/tag version drift; covered by `scripts/test-release-preflight.sh` (now part of `ci.sh`/`precommit.sh`). New `scripts/release.sh vX.Y.Z` runs preflight + gate + tag + build + publish locally, and `.forgejo/workflows/release.yml` runs preflight before the Forgejo release build/publish (replaces Woodpecker).
 - **`models search` SUPPORTED column** — the GGUF table again shows the binary `SUPPORTED` Yes/No verdict (standalone-eligible repo with at least one fitting named quant) alongside the continuous `FIT` score.
 - **Endpoint conformance tests** — new `tests/conformance_endpoints.rs` pins chat/completions, legacy completions, embeddings cardinality, `/v1/models` + `/health` shapes, the OpenAI error envelope, SSE framing with `[DONE]`, drain-timeout 409, and rollback-after-failed-switch over HTTP. Test fixture configs are now hermetic (own temp dir, immune to stray `models.toml` files).
