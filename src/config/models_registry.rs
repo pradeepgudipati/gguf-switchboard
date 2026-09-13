@@ -1364,17 +1364,10 @@ impl ModelsRegistry {
         entry.ngl = Some(ngl);
         // Merge fit-related extra_args (--split-mode, --tensor-split, --cache-type-k/v)
         // while preserving other existing extra_args (e.g. --jinja, --chat-template).
-        let fit_flags = [
-            "--split-mode",
-            "--tensor-split",
-            "--cache-type-k",
-            "--cache-type-v",
-            "-b",
-            "-ub",
-        ];
-        entry
-            .extra_args
-            .retain(|a| !fit_flags.contains(&a.as_str()));
+        // Strip flag + value pairs: the old retain() removed only the flag token
+        // and left orphaned values (e.g. "2048") as positional args, which
+        // llama-server rejects with "error: invalid argument".
+        strip_fit_flag_pairs(&mut entry.extra_args);
         // Append new fit args in pairs.
         let mut i = 0;
         while i + 1 < extra_args.len() {
@@ -1914,6 +1907,13 @@ impl ModelsRegistry {
                             args.push(ubatch_size.to_string());
                         }
                     }
+                    // `extra` may repeat fit-managed flags already defaulted above
+                    // (e.g. stale `-b`/`-ub` persisted by an older fit run). Drop
+                    // those pairs so the command line has each flag exactly once;
+                    // otherwise llama-server sees a bare positional value and
+                    // exits with "error: invalid argument".
+                    let mut extra = extra;
+                    strip_fit_flag_pairs_from_slice(&mut extra);
                     args.extend(extra);
 
                     (
@@ -2160,6 +2160,46 @@ fn extra_args_pin_ngl(extra_args: &[String]) -> bool {
     extra_args
         .iter()
         .any(|arg| matches!(arg.as_str(), "-ngl" | "--n-gpu-layers" | "--gpu-layers"))
+}
+
+/// Fit-managed flags persisted via `persist_fit_params` (`--split-mode`,
+/// `--tensor-split`, `--cache-type-k/v`, `-b`, `-ub`). Listed once so both the
+/// registry merge and the expand-time dedup agree on which flags take values.
+fn fit_flag_names() -> &'static [&'static str] {
+    &[
+        "--split-mode",
+        "--tensor-split",
+        "--cache-type-k",
+        "--cache-type-v",
+        "-b",
+        "-ub",
+    ]
+}
+
+/// Remove fit-managed flag/value pairs from `extra_args`, preserving unrelated
+/// entries (e.g. `--jinja`, `--chat-template`). Each fit flag consumes the
+/// following token as its value; both are dropped. A trailing flag with no
+/// value is dropped on its own.
+fn strip_fit_flag_pairs(extra_args: &mut Vec<String>) {
+    strip_fit_flag_pairs_from_slice(extra_args);
+}
+
+fn strip_fit_flag_pairs_from_slice(extra_args: &mut Vec<String>) {
+    let fit_flags = fit_flag_names();
+    let mut kept = Vec::with_capacity(extra_args.len());
+    let mut skip_next = false;
+    for arg in extra_args.iter() {
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if fit_flags.contains(&arg.as_str()) {
+            skip_next = true;
+            continue;
+        }
+        kept.push(arg.clone());
+    }
+    *extra_args = kept;
 }
 
 /// Llama 3.1 GGUFs often ship a tool-use chat template that makes the model
@@ -2960,6 +3000,133 @@ mod tests {
             infer_kind("some-model", "jina-reranker-v2.gguf"),
             "reranker"
         );
+    }
+
+    #[test]
+    fn persist_fit_params_strips_flag_values_without_orphans() {
+        // Regression: the old retain() removed only the flag token ("-b") and
+        // left the value ("2048") as a bare positional arg, which llama-server
+        // rejects with "error: invalid argument: 2048".
+        let dir = std::env::temp_dir().join("gguf-switchboard-persist-fit-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("models.toml");
+        let registry = ModelsRegistry {
+            version: 1,
+            defaults: RegistryDefaults {
+                models_dir: dir.to_string_lossy().into_owned(),
+                ..RegistryDefaults::default()
+            },
+            auto_discover: false,
+            models: vec![RegistryEntry {
+                alias: "embed-test".to_string(),
+                file: "embed.gguf".to_string(),
+                extra_args: vec![
+                    "--jinja".to_string(),
+                    "-b".to_string(),
+                    "2048".to_string(),
+                    "-ub".to_string(),
+                    "1024".to_string(),
+                ],
+                ..Default::default()
+            }],
+        };
+        registry.write(path.to_str().unwrap()).unwrap();
+
+        ModelsRegistry::persist_fit_params(
+            path.to_str().unwrap(),
+            "embed-test",
+            8192,
+            999,
+            &[
+                "-b".to_string(),
+                "512".to_string(),
+                "-ub".to_string(),
+                "256".to_string(),
+            ],
+        )
+        .unwrap();
+
+        let reloaded = ModelsRegistry::load(path.to_str().unwrap()).unwrap();
+        let entry = reloaded
+            .models
+            .iter()
+            .find(|e| e.alias == "embed-test")
+            .unwrap();
+        assert_eq!(
+            entry.extra_args,
+            vec![
+                "--jinja".to_string(),
+                "-b".to_string(),
+                "512".to_string(),
+                "-ub".to_string(),
+                "256".to_string(),
+            ],
+            "stale -b/-ub values must be replaced, not orphaned"
+        );
+        // No bare numeric positional should survive.
+        assert!(
+            !entry.extra_args.iter().any(|a| a == "2048" || a == "1024"),
+            "orphaned values: {:?}",
+            entry.extra_args
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn expand_dedupes_stale_fit_flags_from_extra_args() {
+        // Regression: stale fit flags in extra_args were appended after the
+        // embedding defaults, producing `-b 2048 -ub 1024 ... -b 2048 -ub 1024`
+        // plus orphaned positionals; llama-server then fails to start.
+        let dir = std::env::temp_dir().join("gguf-switchboard-expand-dedupe-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let model_path = dir.join("qwen3-embed.gguf");
+        write_minimal_gguf(&model_path, "bert");
+
+        let registry = ModelsRegistry {
+            version: 1,
+            defaults: RegistryDefaults {
+                models_dir: dir.to_string_lossy().into_owned(),
+                base_port: 9300,
+                ..RegistryDefaults::default()
+            },
+            auto_discover: false,
+            models: vec![RegistryEntry {
+                alias: "qwen3-embed".to_string(),
+                file: "qwen3-embed.gguf".to_string(),
+                kind: Some("embedding".to_string()),
+                extra_args: vec![
+                    "-b".to_string(),
+                    "2048".to_string(),
+                    "-ub".to_string(),
+                    "1024".to_string(),
+                ],
+                ..Default::default()
+            }],
+        };
+
+        let models = registry.expand("llama.cpp", 12).unwrap();
+        let cfg = models.get("qwen3-embed").unwrap();
+        let b_count = cfg.args.iter().filter(|a| *a == "-b").count();
+        let ub_count = cfg.args.iter().filter(|a| *a == "-ub").count();
+        assert_eq!(b_count, 1, "duplicate -b in {:?}", cfg.args);
+        assert_eq!(ub_count, 1, "duplicate -ub in {:?}", cfg.args);
+        // Every flag-like token must be followed by a non-flag value; no
+        // orphaned bare values may appear as positionals.
+        for w in cfg.args.windows(2) {
+            if w[0] == "-b" || w[0] == "-ub" {
+                assert!(
+                    w[1].parse::<u32>().is_ok(),
+                    "flag {} followed by non-value {:?}",
+                    w[0],
+                    w[1]
+                );
+            }
+        }
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
