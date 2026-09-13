@@ -109,6 +109,18 @@ pub struct ChatCompletionRequest {
     pub response_format: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_template_kwargs: Option<serde_json::Value>,
+    /// Ask the backend to send a terminal usage chunk in stream mode
+    /// (`stream_options: {"include_usage": true}`). Always set by the
+    /// streaming handlers; harmless for non-streaming requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<StreamOptions>,
+}
+
+/// Stream-mode usage request. Serializes as
+/// `{"include_usage": true}` — the OpenAI / llama-server / vLLM shape.
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct StreamOptions {
+    pub include_usage: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

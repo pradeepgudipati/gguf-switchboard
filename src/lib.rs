@@ -21,5 +21,6 @@ pub mod quant_profile;
 pub mod sanitize;
 pub mod scheduler;
 pub mod state;
+pub mod stream_usage;
 pub mod sysmon;
 pub mod types;

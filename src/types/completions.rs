@@ -42,6 +42,11 @@ pub struct CompletionRequest {
     pub user: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub seed: Option<i64>,
+    /// Ask the backend to send a terminal usage chunk in stream mode
+    /// (`stream_options: {"include_usage": true}`). Always set by the
+    /// streaming handlers; harmless for non-streaming requests.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_options: Option<super::chat::StreamOptions>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -78,6 +83,10 @@ pub struct CompletionChunk {
     pub created: i64,
     pub model: String,
     pub choices: Vec<CompletionChunkChoice>,
+    /// Terminal usage chunk when the backend was asked with
+    /// `stream_options.include_usage` (OpenAI shape). `None` on deltas.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]

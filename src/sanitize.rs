@@ -155,6 +155,7 @@ mod tests {
             seed: Some(SWAGGER_MAX_INT),
             response_format: Some(serde_json::Value::String("string".to_string())),
             chat_template_kwargs: None,
+            stream_options: None,
         };
 
         let sanitized = sanitize_chat_request(request);
@@ -198,6 +199,7 @@ mod tests {
             seed: None,
             response_format: None,
             chat_template_kwargs: None,
+            stream_options: None,
         };
 
         let sanitized = sanitize_chat_request(request);

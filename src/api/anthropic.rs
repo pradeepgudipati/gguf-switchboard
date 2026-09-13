@@ -86,15 +86,23 @@ pub async fn messages(
 
         let openai_stream = backend.chat_stream(openai_req).await?;
 
-        // Record streaming request
-        let _ = state
-            .token_db
-            .record(&model_id, "/v1/messages", 0, 0, 0, None);
+        // Capture terminal usage chunks; the recorder guard writes them to
+        // the token DB when the stream completes (or the client disconnects).
+        let stream_usage = crate::stream_usage::StreamUsage::new();
+        let usage_recorder = crate::stream_usage::StreamUsageRecorder::new(
+            Arc::clone(&stream_usage),
+            Arc::clone(&state.token_db),
+            &model_id,
+            "/v1/messages",
+        );
 
         let model_for_stream = model_id.clone();
         let mapped = openai_stream.map(move |chunk| {
             match chunk {
                 Ok(chunk) => {
+                    if let Some(ref usage) = chunk.usage {
+                        stream_usage.capture(usage);
+                    }
                     // Convert OpenAI chunk to Anthropic SSE event
                     let events = convert_chunk_to_anthropic_events(&model_for_stream, &chunk);
                     let sse_output = events
@@ -124,6 +132,7 @@ pub async fn messages(
                 Box::new(active_guard),
                 Box::new(streaming_guard),
                 Box::new(inference_timer),
+                Box::new(usage_recorder),
             ],
         );
 
@@ -224,7 +233,7 @@ fn convert_chunk_to_anthropic_events(
                     stop_sequence: None,
                 },
                 usage: Usage {
-                    input_tokens: 0,
+                    input_tokens: chunk.usage.as_ref().map(|u| u.prompt_tokens).unwrap_or(0),
                     output_tokens: chunk
                         .usage
                         .as_ref()

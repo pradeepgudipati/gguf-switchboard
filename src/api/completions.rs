@@ -76,15 +76,23 @@ pub async fn completions(
 
         let stream = backend.completions_stream(request).await?;
 
-        // Record streaming request (token counts not available in stream mode)
-        let _ = state
-            .token_db
-            .record(&model_id, "/v1/completions", 0, 0, 0, None);
+        // Capture terminal usage chunks; the recorder guard writes them to
+        // the token DB when the stream completes (or the client disconnects).
+        let stream_usage = crate::stream_usage::StreamUsage::new();
+        let usage_recorder = crate::stream_usage::StreamUsageRecorder::new(
+            Arc::clone(&stream_usage),
+            Arc::clone(&state.token_db),
+            &model_id,
+            "/v1/completions",
+        );
 
         let model_for_stream = model_id.clone();
         let mapped = stream.map(move |chunk| match chunk {
             Ok(mut c) => {
                 c.model = model_for_stream.clone();
+                if let Some(ref usage) = c.usage {
+                    stream_usage.capture(usage);
+                }
                 let json = serde_json::to_string(&c).unwrap_or_default();
                 Ok::<_, std::convert::Infallible>(format!("data: {json}\n\n"))
             }
@@ -109,6 +117,7 @@ pub async fn completions(
                 // Observes the inference latency histogram when the stream
                 // completes (or the client disconnects), not when headers are sent.
                 Box::new(inference_timer),
+                Box::new(usage_recorder),
             ],
         );
 

@@ -344,6 +344,54 @@ async fn chat_stream_uses_sse_framing_and_done_sentinel() {
 }
 
 #[tokio::test]
+async fn chat_stream_forwards_terminal_usage_chunk() {
+    // The fake backend sends usage on its final chunk; the handler must
+    // forward it (clients + /v1/usage depend on it) rather than stripping it.
+    let (server, scheduler, fake_a, fake_b) = endpoint_server().await;
+    let (status, body, _) = post_stream(
+        server,
+        "/v1/chat/completions",
+        json!({
+            "model": "model-a",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    let usages: Vec<Value> = body
+        .lines()
+        .filter(|l| l.starts_with("data: ") && !l.contains("[DONE]"))
+        .filter_map(|l| serde_json::from_str::<Value>(l.trim_start_matches("data: ")).ok())
+        .filter(|chunk| chunk.get("usage").is_some())
+        .collect();
+    assert_eq!(
+        usages.len(),
+        1,
+        "expected one terminal usage chunk:\n{body}"
+    );
+    assert_eq!(usages[0]["usage"]["prompt_tokens"], 10);
+    assert_eq!(usages[0]["usage"]["completion_tokens"], 5);
+    assert_eq!(usages[0]["usage"]["total_tokens"], 15);
+
+    // The backend must have been asked for usage in stream mode.
+    let saw_include_usage = fake_a
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .any(|req| req["stream_options"]["include_usage"] == true);
+    assert!(
+        saw_include_usage,
+        "backend request lacked stream_options.include_usage"
+    );
+
+    scheduler.shutdown().await.unwrap();
+    drop((fake_a, fake_b));
+}
+
+#[tokio::test]
 async fn completions_stream_uses_sse_framing_and_done_sentinel() {
     let (server, scheduler, fake_a, fake_b) = endpoint_server().await;
     let (status, body, headers) = post_stream(

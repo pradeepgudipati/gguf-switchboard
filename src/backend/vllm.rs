@@ -255,6 +255,9 @@ impl Backend for VllmBackend {
         RuntimeError,
     > {
         request.stream = Some(true);
+        request.stream_options = Some(crate::types::chat::StreamOptions {
+            include_usage: true,
+        });
         let body = serde_json::to_value(&request)?;
         let resp = self.forward_json("/chat/completions", body).await?;
         let stream = resp.bytes_stream().map(|chunk| {
@@ -285,6 +288,9 @@ impl Backend for VllmBackend {
         RuntimeError,
     > {
         request.stream = Some(true);
+        request.stream_options = Some(crate::types::chat::StreamOptions {
+            include_usage: true,
+        });
         let body = serde_json::to_value(&request)?;
         let resp = self.forward_json("/completions", body).await?;
         let stream = resp.bytes_stream().map(|chunk| {

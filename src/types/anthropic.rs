@@ -352,6 +352,7 @@ pub fn to_openai_request(req: &MessagesRequest) -> ChatCompletionRequest {
         seed: None,
         response_format: None,
         chat_template_kwargs: None,
+        stream_options: None,
     }
 }
 

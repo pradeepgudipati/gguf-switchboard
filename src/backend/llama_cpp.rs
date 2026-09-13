@@ -292,6 +292,11 @@ impl Backend for LlamaCppBackend {
         RuntimeError,
     > {
         request.stream = Some(true);
+        // Ask for a terminal usage chunk (llama-server honors OpenAI's
+        // `stream_options.include_usage`); handlers forward it to clients.
+        request.stream_options = Some(crate::types::chat::StreamOptions {
+            include_usage: true,
+        });
         let body = serde_json::to_value(&request)?;
         let resp = self.forward_json_stream("/chat/completions", body).await?;
 
@@ -324,6 +329,9 @@ impl Backend for LlamaCppBackend {
         RuntimeError,
     > {
         request.stream = Some(true);
+        request.stream_options = Some(crate::types::chat::StreamOptions {
+            include_usage: true,
+        });
         let body = serde_json::to_value(&request)?;
         let resp = self.forward_json_stream("/completions", body).await?;
 

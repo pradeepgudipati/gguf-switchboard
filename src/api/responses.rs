@@ -158,6 +158,7 @@ fn to_chat_request(request: &ResponseRequest) -> Result<ChatCompletionRequest, R
         seed: None,
         response_format: request.response_format.clone(),
         chat_template_kwargs: None,
+        stream_options: None,
     })
 }
 
@@ -592,6 +593,17 @@ pub async fn responses(
         let response_id = format!("resp_{}", Uuid::new_v4().simple());
         let mut response_state =
             ResponseStreamState::new(response_id, model_id.clone(), Utc::now().timestamp());
+        // Captured terminal usage is forwarded in `response.completed` by
+        // ResponseStreamState; mirror it into this accumulator so the
+        // recorder guard can write the token DB on stream completion.
+        let stream_usage = crate::stream_usage::StreamUsage::new();
+        let usage_capture = Arc::clone(&stream_usage);
+        let usage_recorder = crate::stream_usage::StreamUsageRecorder::new(
+            stream_usage,
+            Arc::clone(&state.token_db),
+            &model_id,
+            "/v1/responses",
+        );
         let (sender, receiver) =
             tokio::sync::mpsc::channel::<Result<String, std::convert::Infallible>>(32);
         tokio::spawn(async move {
@@ -603,7 +615,12 @@ pub async fn responses(
 
             while let Some(chunk) = stream.next().await {
                 let events = match chunk {
-                    Ok(chunk) => response_state.apply_chunk(chunk),
+                    Ok(chunk) => {
+                        if let Some(ref usage) = chunk.usage {
+                            usage_capture.capture(usage);
+                        }
+                        response_state.apply_chunk(chunk)
+                    }
                     Err(error) => {
                         let body = serde_json::json!({
                             "type": "error",
@@ -668,6 +685,7 @@ pub async fn responses(
                 Box::new(request_guard),
                 Box::new(active_guard),
                 Box::new(inference_timer),
+                Box::new(usage_recorder),
             ],
         );
 

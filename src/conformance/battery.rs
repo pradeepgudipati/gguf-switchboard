@@ -248,6 +248,7 @@ fn parallel_tool_calls_request(model: &str) -> ChatCompletionRequest {
         seed: None,
         response_format: None,
         chat_template_kwargs: None,
+        stream_options: None,
     }
 }
 
@@ -295,6 +296,7 @@ fn tool_call_with_reasoning_request(model: &str) -> ChatCompletionRequest {
         seed: None,
         response_format: None,
         chat_template_kwargs: None,
+        stream_options: None,
     }
 }
 
@@ -366,6 +368,7 @@ fn multi_turn_tool_result_request(model: &str) -> ChatCompletionRequest {
         seed: None,
         response_format: None,
         chat_template_kwargs: None,
+        stream_options: None,
     }
 }
 

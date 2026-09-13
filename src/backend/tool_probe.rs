@@ -64,6 +64,7 @@ pub fn probe_request(model: &str) -> ChatCompletionRequest {
         seed: None,
         response_format: None,
         chat_template_kwargs: None,
+        stream_options: None,
     }
 }
 

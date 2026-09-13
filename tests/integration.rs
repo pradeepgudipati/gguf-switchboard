@@ -120,6 +120,7 @@ fn test_chat_request_serialization() {
         seed: None,
         response_format: None,
         chat_template_kwargs: None,
+        stream_options: None,
     };
 
     let json = serde_json::to_string(&request).unwrap();
@@ -154,6 +155,7 @@ fn test_completion_request_serialization() {
         logit_bias: None,
         user: None,
         seed: None,
+        stream_options: None,
     };
 
     let json = serde_json::to_string(&request).unwrap();
