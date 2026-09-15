@@ -543,27 +543,15 @@ check_stray_registries() {
     return 0
 }
 
-# A script cannot change its parent shell's groups, so `newgrp` can only be
-# offered, never done transparently. Called at the end of a successful
-# deploy: when the deploying user belongs to $SERVICE_GROUP on paper but
-# this shell lacks it (typical right after deploy added them), offer to
-# `exec newgrp $SERVICE_GROUP`, which replaces this shell with one that
-# has the group — interactive pulls then work immediately, no logout.
+# A script cannot change its parent shell's groups, and `exec newgrp` drops
+# the user into a nested subshell they then have to `exit` — more annoying
+# than helpful. So just print the hint and leave the shell alone.
 offer_group_activation() {
     [[ "$DEPLOY_OWNER" != "root" ]] || return 0
     id "$DEPLOY_OWNER" >/dev/null 2>&1 || return 0
     id -nG "$DEPLOY_OWNER" 2>/dev/null | tr ' ' '\n' | grep -qx "$SERVICE_GROUP" || return 0
     id -nG 2>/dev/null | tr ' ' '\n' | grep -qx "$SERVICE_GROUP" && return 0
-    [[ -t 0 ]] || {
-        echo "==> NOTE: log out/in (or run: newgrp $SERVICE_GROUP) to activate $SERVICE_GROUP membership."
-        return 0
-    }
-    read -r -p "Activate '$SERVICE_GROUP' group now (exec newgrp $SERVICE_GROUP)? [Y/n] " REPLY
-    REPLY="${REPLY:-Y}"
-    if [[ "$REPLY" =~ ^[Yy]$ ]]; then
-        echo "==> Activating '$SERVICE_GROUP' via newgrp (replaces this shell)..."
-        exec newgrp "$SERVICE_GROUP"
-    fi
+    echo "==> NOTE: '$SERVICE_GROUP' group is not active in this shell; run: newgrp $SERVICE_GROUP  (or log out and back in)"
 }
 
 configure_vllm_defaults() {
