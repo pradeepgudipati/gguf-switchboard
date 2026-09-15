@@ -176,6 +176,31 @@ fix_install_ownership() {
     sudo find "$INSTALL_DIR" -type d -exec chmod g+s {} \;
 }
 
+# Root-owned files (from `sudo` runs) break the ggs service user at runtime.
+# Repair ownership on exactly the paths ggs touches, touching only mismatches
+# (`find ! -user/! -group`): state, models, install tree (config / registry /
+# vllm-runtime), plus a custom VLLM_PROJECT_DIR when it lives outside the
+# install tree. Binaries stay root-owned (ggs only needs execute). Runs right
+# before validate_runtime_access so validation verifies the repaired state.
+repair_runtime_ownership() {
+    echo "==> Repairing ownership on service paths..."
+    sudo find "$STATE_DIR" "$MODELS_DIR" "$VLLM_MODELS_DIR" \
+        \( ! -user "$SERVICE_USER" -o ! -group "$SERVICE_GROUP" \) \
+        -exec chown "${SERVICE_USER}:${SERVICE_GROUP}" {} + 2>/dev/null || true
+    sudo find "$INSTALL_DIR" \
+        \( ! -user "$DEPLOY_OWNER" -o ! -group "$SERVICE_GROUP" \) \
+        -exec chown "${DEPLOY_OWNER}:${SERVICE_GROUP}" {} + 2>/dev/null || true
+    sudo find "$INSTALL_DIR" -type f ! -perm -g+r \
+        -exec chmod g+r {} + 2>/dev/null || true
+    if [[ -n "${VLLM_PROJECT_DIR:-}" && -d "$VLLM_PROJECT_DIR" ]] && [[ "$(readlink -f "$VLLM_PROJECT_DIR")" != "$(readlink -f "$INSTALL_DIR")"* ]]; then
+        sudo find "$VLLM_PROJECT_DIR" \
+            \( ! -user "$DEPLOY_OWNER" -o ! -group "$SERVICE_GROUP" \) \
+            -exec chown "${DEPLOY_OWNER}:${SERVICE_GROUP}" {} + 2>/dev/null || true
+        sudo find "$VLLM_PROJECT_DIR" -type f ! -perm -g+r \
+            -exec chmod g+r {} + 2>/dev/null || true
+    fi
+}
+
 sync_project_to_install() {
     local source_dir="$1"
     if [[ "$source_dir" == "$INSTALL_DIR" ]]; then
@@ -1206,6 +1231,8 @@ if ! registry_has_model_candidates "$MODELS_FILE"; then
     print_current_deployment_summary "stopped; no models indexed"
     exit 0
 fi
+
+repair_runtime_ownership
 
 validate_runtime_access || {
     echo "==> FAILED: runtime access validation" >&2
