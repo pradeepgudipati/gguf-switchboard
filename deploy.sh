@@ -1090,14 +1090,34 @@ if [[ "$SKIP_LLAMA_CPP" != "true" ]]; then
     llama_skip_pull=0
     [[ "$SKIP_PULL" == "true" ]] && llama_skip_pull=1
     LLAMA_DEPLOY_LOG="$(mktemp)"
-    SKIP_SERVICE=1 SKIP_PULL="$llama_skip_pull" LLAMA_RELEASE_CHANNEL="$LLAMA_RELEASE_CHANNEL" \
-        "$SOURCE_DIR/scripts/update-llama-cpp.sh" 2>&1 | tee "$LLAMA_DEPLOY_LOG"
-    if grep -q 'already current' "$LLAMA_DEPLOY_LOG"; then
-        LLAMA_DEPLOY_STATUS="current; no rebuild; $LLAMA_RELEASE_CHANNEL"
-    elif grep -q 'release check failed; keeping' "$LLAMA_DEPLOY_LOG"; then
-        LLAMA_DEPLOY_STATUS="retained; update check unavailable; $LLAMA_RELEASE_CHANNEL"
+    if SKIP_SERVICE=1 SKIP_PULL="$llama_skip_pull" LLAMA_RELEASE_CHANNEL="$LLAMA_RELEASE_CHANNEL" \
+        "$SOURCE_DIR/scripts/update-llama-cpp.sh" 2>&1 | tee "$LLAMA_DEPLOY_LOG"; then
+        if grep -q 'already current' "$LLAMA_DEPLOY_LOG"; then
+            LLAMA_DEPLOY_STATUS="current; no rebuild; $LLAMA_RELEASE_CHANNEL"
+        elif grep -q 'release check failed; keeping' "$LLAMA_DEPLOY_LOG"; then
+            LLAMA_DEPLOY_STATUS="retained; update check unavailable; $LLAMA_RELEASE_CHANNEL"
+        else
+            LLAMA_DEPLOY_STATUS="updated; $LLAMA_RELEASE_CHANNEL"
+        fi
+    elif llama_server_ready; then
+        echo "WARNING: llama.cpp update failed (see above)." >&2
+        echo "    Existing runtime still works: ${LLAMA_SERVER} ($(installed_llama_release || echo unknown))." >&2
+        LLAMA_PROCEED=""
+        if [[ -t 0 ]]; then
+            read -r -p "Proceed without updating llama.cpp (keep existing runtime)? [y/N] " LLAMA_PROCEED || true
+        fi
+        if [[ "${LLAMA_PROCEED:-N}" =~ ^[Yy]$ ]]; then
+            echo "==> Keeping existing llama.cpp runtime."
+            LLAMA_DEPLOY_STATUS="failed; kept existing; $LLAMA_RELEASE_CHANNEL"
+        else
+            echo "Aborting deploy (re-run with --skip-llama-cpp to skip the update, or fix the failure above)." >&2
+            rm -f "$LLAMA_DEPLOY_LOG"
+            exit 1
+        fi
     else
-        LLAMA_DEPLOY_STATUS="updated; $LLAMA_RELEASE_CHANNEL"
+        echo "ERROR: llama.cpp update failed and no working $LLAMA_SERVER is installed; cannot proceed." >&2
+        rm -f "$LLAMA_DEPLOY_LOG"
+        exit 1
     fi
     rm -f "$LLAMA_DEPLOY_LOG"
 else

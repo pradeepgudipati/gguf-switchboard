@@ -133,6 +133,17 @@ echo "==> Updating llama.cpp ${installed_release:-not installed} → $latest_rel
 if ! git rev-parse --verify --quiet "refs/tags/$latest_release" >/dev/null; then
   git fetch --depth 1 origin "refs/tags/$latest_release:refs/tags/$latest_release"
 fi
+# A prior sudo run in this tree leaves .git/objects root-owned and `git
+# stash` then dies with `insufficient permission ... .git/objects`.
+# Self-heal ownership (same class of issue as the root-owned build/ dir).
+if [[ -d "${LLAMA_DIR}/.git" ]] && ! touch "${LLAMA_DIR}/.git/.deploy-writability-check-$$" 2>/dev/null; then
+  LLAMA_OWNER="${SUDO_USER:-$(id -un)}"
+  echo "==> ${LLAMA_DIR}/.git not writable (likely root-owned from a prior sudo run); fixing ownership to ${LLAMA_OWNER} with sudo..."
+  sudo chown -R "$LLAMA_OWNER" "${LLAMA_DIR}/.git"
+  rm -f "${LLAMA_DIR}/.git/.deploy-writability-check-$$" 2>/dev/null || true
+else
+  rm -f "${LLAMA_DIR}/.git/.deploy-writability-check-$$" 2>/dev/null || true
+fi
 # A dirty build tree must never abort the deploy — but someone's local work
 # must never be silently discarded either. Stash (incl. untracked) and build
 # from the clean tag; the stash stays for manual recovery (no auto-pop: it
@@ -141,7 +152,12 @@ if [[ -n "$(git status --porcelain)" ]]; then
   LLAMA_STASH_LABEL="llama-cpp-local-$(date +%Y%m%d-%H%M%S)"
   echo "==> Local changes in ${LLAMA_DIR}; stashing as '$LLAMA_STASH_LABEL' (build uses clean tag):"
   git status --porcelain | sed 's/^/    /'
-  git stash push --include-untracked --message "$LLAMA_STASH_LABEL" >/dev/null
+  if ! git stash push --include-untracked --message "$LLAMA_STASH_LABEL" >/dev/null; then
+    echo "ERROR: could not stash local changes in ${LLAMA_DIR}." >&2
+    echo "       Check ownership: ls -ld ${LLAMA_DIR}/.git ${LLAMA_DIR}/.git/objects" >&2
+    echo "       Fix: sudo chown -R $(id -un) ${LLAMA_DIR}/.git" >&2
+    exit 1
+  fi
   LLAMA_STASH_REF="$(git rev-parse -q --verify refs/stash || true)"
   echo "    Stashed. (Recover: git stash show --name-only ${LLAMA_STASH_REF:-stash@{0}} / git stash pop)"
 fi
