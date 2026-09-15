@@ -1165,6 +1165,7 @@ sync_project_to_install "$SOURCE_DIR"
 write_system_config
 
 if [[ "$SKIP_VLLM" != "true" ]]; then
+    echo "==> Checking vLLM ${VLLM_RELEASE_CHANNEL} release at ${VLLM_PROJECT_DIR}..."
     VLLM_DEPLOY_LOG="$(mktemp)"
     VLLM_RELEASE_CHANNEL="$VLLM_RELEASE_CHANNEL" \
         ensure_vllm_current "$VLLM_PROJECT_DIR" 2>&1 | tee "$VLLM_DEPLOY_LOG"
