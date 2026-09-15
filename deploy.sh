@@ -661,6 +661,20 @@ WantedBy=multi-user.target
 EOF
 }
 
+# `test -w` under `sudo -u <user>` can report a false negative on
+# group-writable directories (observed: pradeep in ggs, dir ggs:ggs 2775,
+# `touch` succeeds but `test -w` returns 1). Probe with a real file
+# create/remove instead — that is exactly what interactive pulls need.
+deploy_user_can_write() {
+    local user="$1"
+    local dir="$2"
+    local probe
+    probe="${dir}/.deploy-write-probe-$$"
+    sudo -u "$user" touch "$probe" 2>/dev/null || return 1
+    sudo -u "$user" rm -f "$probe" 2>/dev/null || true
+    return 0
+}
+
 validate_runtime_access() {
     echo "==> Validating runtime access as $SERVICE_USER..."
     local failed=0 effective_vllm_command effective_vllm_project
@@ -720,11 +734,11 @@ validate_runtime_access() {
     # Deploy-user write access is convenient for interactive model pulls,
     # but is not required for the system service to run.
     if [[ "$DEPLOY_OWNER" != "root" ]] && id "$DEPLOY_OWNER" >/dev/null 2>&1; then
-        sudo -u "$DEPLOY_OWNER" test -w "$MODELS_DIR" || {
+        deploy_user_can_write "$DEPLOY_OWNER" "$MODELS_DIR" || {
             echo "WARNING: $DEPLOY_OWNER cannot write $MODELS_DIR (interactive model pulls may fail)" >&2
             echo "         Run: newgrp $SERVICE_GROUP  (or log out and back in)" >&2
         }
-        sudo -u "$DEPLOY_OWNER" test -w "$VLLM_MODELS_DIR" || {
+        deploy_user_can_write "$DEPLOY_OWNER" "$VLLM_MODELS_DIR" || {
             echo "WARNING: $DEPLOY_OWNER cannot write $VLLM_MODELS_DIR (interactive vLLM pulls may fail)" >&2
             echo "         Run: newgrp $SERVICE_GROUP  (or log out and back in)" >&2
         }
