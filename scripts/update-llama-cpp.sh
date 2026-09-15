@@ -133,6 +133,18 @@ echo "==> Updating llama.cpp ${installed_release:-not installed} → $latest_rel
 if ! git rev-parse --verify --quiet "refs/tags/$latest_release" >/dev/null; then
   git fetch --depth 1 origin "refs/tags/$latest_release:refs/tags/$latest_release"
 fi
+# A dirty build tree must never abort the deploy — but someone's local work
+# must never be silently discarded either. Stash (incl. untracked) and build
+# from the clean tag; the stash stays for manual recovery (no auto-pop: it
+# could conflict with the new tag and re-dirty the tree).
+if [[ -n "$(git status --porcelain)" ]]; then
+  LLAMA_STASH_LABEL="llama-cpp-local-$(date +%Y%m%d-%H%M%S)"
+  echo "==> Local changes in ${LLAMA_DIR}; stashing as '$LLAMA_STASH_LABEL' (build uses clean tag):"
+  git status --porcelain | sed 's/^/    /'
+  git stash push --include-untracked --message "$LLAMA_STASH_LABEL" >/dev/null
+  LLAMA_STASH_REF="$(git rev-parse -q --verify refs/stash || true)"
+  echo "    Stashed. (Recover: git stash show --name-only ${LLAMA_STASH_REF:-stash@{0}} / git stash pop)"
+fi
 git checkout --detach "$latest_release"
 
 echo "==> Checking CUDA toolchain"
