@@ -422,6 +422,9 @@ generate_models_toml() {
 
     if [[ "$refresh" != "true" ]] && sudo test -f "$MODELS_FILE"; then
         echo "==> Keeping existing $MODELS_FILE (pass --refresh-models to regenerate from disk)."
+        echo "==> Registering any unregistered GGUF files in $MODELS_DIR..."
+        sudo -u "$SERVICE_USER" "$BIN" models register --registry "$MODELS_FILE" --dir "$MODELS_DIR" \
+            || echo "==> Warning: models register failed; run 'ggs models register' manually."
         print_models_dir_hints
         return 0
     fi
