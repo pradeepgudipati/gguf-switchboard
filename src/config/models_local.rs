@@ -522,6 +522,91 @@ pub async fn cmd_register_local(args: &[String]) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+// ── ggs models clean ─────────────────────────────────────────────────────────
+
+/// Delete unregistered duplicate copies: an unregistered GGUF whose filename and
+/// size match a registered one in another scan directory. The registered copy
+/// (the one the service actually loads) is never touched.
+pub async fn cmd_clean_local(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let parsed = parse_common(args, true)?;
+    if !parsed.positional.is_empty() {
+        return Err(
+            "models clean: takes no targets; use `models delete` for a single model".into(),
+        );
+    }
+    let registry = resolve_registry(parsed.registry_path.as_deref());
+    let dirs = resolve_scan_dirs(&parsed.dir_overrides, registry.as_ref().map(|(_, r)| r))?;
+    let entries = scan_local_models(&dirs, registry.as_ref().map(|(_, r)| r));
+
+    let file_name = |e: &LocalModelEntry| e.path.file_name().map(|n| n.to_os_string());
+    let dupes: Vec<&LocalModelEntry> = entries
+        .iter()
+        .filter(|e| e.alias.is_none() && !e.is_safetensors_dir)
+        .filter(|e| {
+            entries.iter().any(|o| {
+                o.alias.is_some()
+                    && !o.is_safetensors_dir
+                    && o.size_bytes == e.size_bytes
+                    && file_name(o) == file_name(e)
+            })
+        })
+        .filter(|e| {
+            let canon = canonical(&e.path);
+            dirs.iter().any(|d| canon.starts_with(canonical(d)))
+        })
+        .collect();
+
+    if dupes.is_empty() {
+        println!("Nothing to clean: no unregistered duplicate copies found.");
+        return Ok(());
+    }
+
+    let total: u64 = dupes.iter().map(|e| e.size_bytes).sum();
+    println!("Unregistered duplicates of registered models:");
+    for e in &dupes {
+        println!(
+            "  #{:<3} {:>10}  {}",
+            e.index,
+            format_bytes(e.size_bytes),
+            e.path.display()
+        );
+    }
+    println!(
+        "\n{} file(s), {} reclaimable.",
+        dupes.len(),
+        format_bytes(total)
+    );
+
+    if !parsed.yes {
+        if !std::io::stdin().is_terminal() {
+            return Err(
+                "models clean: refusing to delete without --yes in a non-interactive shell".into(),
+            );
+        }
+        print!("\nDelete these files? [y/N] ");
+        std::io::stdout().flush().ok();
+        let mut line = String::new();
+        std::io::stdin().read_line(&mut line)?;
+        if !matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes") {
+            println!("Aborted; nothing was deleted.");
+            return Ok(());
+        }
+    }
+
+    let mut freed = 0u64;
+    for e in dupes {
+        match std::fs::remove_file(&e.path) {
+            Ok(()) => {
+                freed += e.size_bytes;
+                println!("Deleted {}", e.path.display());
+            }
+            Err(err) => eprintln!("Failed to delete {}: {err}", e.path.display()),
+        }
+    }
+    println!("\nFreed {}.", format_bytes(freed));
+    Ok(())
+}
+
 // ── ggs models delete ────────────────────────────────────────────────────────
 
 pub async fn cmd_delete_local(args: &[String]) -> Result<(), Box<dyn Error>> {

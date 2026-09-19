@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 pub use hf_sync::{SyncSummary, sync_registry_from_hf};
 pub use models_cmd::{cmd_files, cmd_pull, cmd_search};
-pub use models_local::{cmd_delete_local, cmd_list_local, cmd_register_local};
+pub use models_local::{cmd_clean_local, cmd_delete_local, cmd_list_local, cmd_register_local};
 pub use models_registry::{ModelsRegistry, RescanResult, check_vllm_available};
 
 use crate::errors::RuntimeError;
