@@ -428,6 +428,7 @@ pub async fn cmd_list_local(args: &[String]) -> Result<(), Box<dyn Error>> {
         );
     }
     println!();
+    println!("Register with:  ggs models register [<#|name>...]");
     println!("Delete one with:  ggs models delete <#|name> [--yes]");
     Ok(())
 }
@@ -448,6 +449,77 @@ fn truncate(s: &str, max: usize) -> String {
         let head: String = s.chars().take(max.saturating_sub(1)).collect();
         format!("{head}…")
     }
+}
+
+// ── ggs models register ──────────────────────────────────────────────────────
+
+/// Register GGUF files found on disk but missing from the registry. With no
+/// targets every unregistered GGUF is added; otherwise only the given `#`/name
+/// targets. Existing entries are preserved via `discover_with_merge`.
+pub async fn cmd_register_local(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let parsed = parse_common(args, false)?;
+    let registry = resolve_registry(parsed.registry_path.as_deref());
+    let dirs = resolve_scan_dirs(&parsed.dir_overrides, registry.as_ref().map(|(_, r)| r))?;
+    let entries = scan_local_models(&dirs, registry.as_ref().map(|(_, r)| r));
+
+    let mut wanted: Vec<PathBuf> = Vec::new();
+    for t in parsed.positional.iter().filter(|t| t.as_str() != "all") {
+        let e = resolve_target(t, &entries)
+            .map_err(|m| m.replace("models delete", "models register"))?;
+        if e.is_safetensors_dir {
+            return Err(format!(
+                "models register: '{}' is a safetensors directory; use `ggs models pull vllm`",
+                e.path.display()
+            )
+            .into());
+        }
+        wanted.push(canonical(&e.path));
+    }
+
+    let (path, existing) = match registry {
+        Some((p, r)) => (p, Some(r)),
+        None => (
+            parsed
+                .registry_path
+                .clone()
+                .unwrap_or_else(|| "models.toml".to_string()),
+            None,
+        ),
+    };
+    let dirs_str = super::models_registry::format_models_dirs(&dirs);
+    let mut merged = ModelsRegistry::discover_with_merge(&dirs_str, existing.as_ref())?;
+
+    let known: Vec<String> = existing
+        .iter()
+        .flat_map(|r| r.models.iter().map(|m| m.alias.to_ascii_lowercase()))
+        .collect();
+    let mut added = Vec::new();
+    merged.models.retain(|m| {
+        if known.contains(&m.alias.to_ascii_lowercase()) {
+            return true;
+        }
+        let keep = wanted.is_empty()
+            || resolve_model_path(&dirs, &m.file)
+                .map(|p| wanted.contains(&canonical(Path::new(&p))))
+                .unwrap_or(false);
+        if keep {
+            added.push(m.alias.clone());
+        }
+        keep
+    });
+
+    if added.is_empty() {
+        println!("Nothing to register.");
+        return Ok(());
+    }
+    merged.write(&path)?;
+    let _ = merged.write_json(&json_sibling(&path));
+    println!("Registered {} model(s) in {path}:", added.len());
+    for a in &added {
+        println!("  {a}");
+    }
+    println!("\nRestart the service or POST /v1/models/refresh to load them.");
+    Ok(())
 }
 
 // ── ggs models delete ────────────────────────────────────────────────────────

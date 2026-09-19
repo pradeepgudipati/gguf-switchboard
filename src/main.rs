@@ -7,8 +7,8 @@ use std::path::PathBuf;
 
 use gguf_switchboard::api;
 use gguf_switchboard::config::{
-    Config, ModelsRegistry, cmd_delete_local, cmd_files, cmd_list_local, cmd_pull, cmd_search,
-    sync_registry_from_hf,
+    Config, ModelsRegistry, cmd_delete_local, cmd_files, cmd_list_local, cmd_pull,
+    cmd_register_local, cmd_search, sync_registry_from_hf,
 };
 use gguf_switchboard::conformance::ConformanceHistory;
 use gguf_switchboard::db::TokenDb;
@@ -30,6 +30,7 @@ Commands:
   ggs models search vllm <query>            Search safetensors/vLLM models
   ggs models files <repo-id>                List files in a Hugging Face repository
   ggs models list                           List GGUF/safetensors models on disk
+  ggs models register [<name|#>...]         Register unregistered GGUF files on disk
   ggs models delete <name|#>                Delete a model (file + registry entry)
   ggs models pull <repo-id> --quant Q4_K_M  Download and register a GGUF model
   ggs models pull vllm <repo-id>             Download and register a vLLM model
@@ -635,8 +636,9 @@ async fn run_models_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error
         "pull" => cmd_pull(&sub_args).await,
         "list" => cmd_list_local(&sub_args).await,
         "delete" => cmd_delete_local(&sub_args).await,
+        "register" => cmd_register_local(&sub_args).await,
         other => Err(format!(
-            "models: unknown subcommand '{other}'\n\nUsage:\n  gguf-switchboard models search <query> [--limit N]\n  gguf-switchboard models search vllm <query> [--limit N]\n  gguf-switchboard models files <repo-id>\n  gguf-switchboard models list [--dir PATH] [--registry models.toml] [--json]\n  gguf-switchboard models delete <name|#> [--yes] [--dir PATH] [--registry models.toml]\n  gguf-switchboard models pull <repo-id> [--quant QUANT] [--dir PATH] [--connections N] [--no-bench]\n  gguf-switchboard models pull vllm <repo-id> [--dir PATH] [--draft <repo>] [--num-speculative-tokens N] [--attention-backend NAME] [--tensor-parallel-size N] [--gpu-memory-utilization F] [--served-model-name NAME] [--force]"
+            "models: unknown subcommand '{other}'\n\nUsage:\n  gguf-switchboard models search <query> [--limit N]\n  gguf-switchboard models search vllm <query> [--limit N]\n  gguf-switchboard models files <repo-id>\n  gguf-switchboard models list [--dir PATH] [--registry models.toml] [--json]\n  gguf-switchboard models register [<name|#>...] [--dir PATH] [--registry models.toml]\n  gguf-switchboard models delete <name|#> [--yes] [--dir PATH] [--registry models.toml]\n  gguf-switchboard models pull <repo-id> [--quant QUANT] [--dir PATH] [--connections N] [--no-bench]\n  gguf-switchboard models pull vllm <repo-id> [--dir PATH] [--draft <repo>] [--num-speculative-tokens N] [--attention-backend NAME] [--tensor-parallel-size N] [--gpu-memory-utilization F] [--served-model-name NAME] [--force]"
         ).into()),
     }
 }
