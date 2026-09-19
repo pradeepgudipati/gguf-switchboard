@@ -1,0 +1,10 @@
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/vllm-runtime"
+    schedule:
+      interval: "weekly"
+    ignore:
+      # vLLM pins setuptools<81 (even in 0.29.0), so no patched setuptools can
+      # resolve and every Dependabot run fails. Remove once vLLM lifts the cap.
+      - dependency-name: "setuptools"
