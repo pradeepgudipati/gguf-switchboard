@@ -489,13 +489,20 @@ pub async fn cmd_register_local(args: &[String]) -> Result<(), Box<dyn Error>> {
     let dirs_str = super::models_registry::format_models_dirs(&dirs);
     let mut merged = ModelsRegistry::discover_with_merge(&dirs_str, existing.as_ref())?;
 
-    let known: Vec<String> = existing
+    // Compare alias *and* file: stale entries left over from a removed model
+    // directory keep their alias but no longer point at a real file, so the
+    // rescanned entry with the same alias must still count as new.
+    let known: Vec<(String, String)> = existing
         .iter()
-        .flat_map(|r| r.models.iter().map(|m| m.alias.to_ascii_lowercase()))
+        .flat_map(|r| {
+            r.models
+                .iter()
+                .map(|m| (m.alias.to_ascii_lowercase(), m.file.clone()))
+        })
         .collect();
     let mut added = Vec::new();
     merged.models.retain(|m| {
-        if known.contains(&m.alias.to_ascii_lowercase()) {
+        if known.contains(&(m.alias.to_ascii_lowercase(), m.file.clone())) {
             return true;
         }
         let keep = wanted.is_empty()
