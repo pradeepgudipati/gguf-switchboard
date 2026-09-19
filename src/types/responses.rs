@@ -28,6 +28,9 @@ pub struct ResponseRequest {
     pub tool_choice: Option<serde_json::Value>,
     #[serde(default)]
     pub response_format: Option<serde_json::Value>,
+    /// llama.cpp GBNF grammar; forwarded unchanged to the backend.
+    #[serde(default)]
+    pub grammar: Option<String>,
     #[serde(default)]
     pub user: Option<String>,
 }

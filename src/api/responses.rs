@@ -157,7 +157,7 @@ fn to_chat_request(request: &ResponseRequest) -> Result<ChatCompletionRequest, R
         tool_choice,
         seed: None,
         response_format: request.response_format.clone(),
-        grammar: None,
+        grammar: request.grammar.clone(),
         json_schema: None,
         chat_template_kwargs: None,
         stream_options: None,
@@ -767,6 +767,7 @@ mod tests {
             })]),
             tool_choice: Some(json!("auto")),
             response_format: None,
+            grammar: None,
             user: None,
         }
     }

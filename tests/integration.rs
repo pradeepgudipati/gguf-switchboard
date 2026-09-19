@@ -239,6 +239,7 @@ fn test_response_request_serialization() {
         tools: None,
         tool_choice: None,
         response_format: None,
+        grammar: None,
         user: None,
     };
 
@@ -421,4 +422,11 @@ fn test_chat_request_forwards_grammar_and_response_format() {
     assert_eq!(out["response_format"]["schema"]["type"], "object");
     assert_eq!(out["grammar"], "root ::= \"a\"");
     assert_eq!(out["json_schema"]["type"], "object");
+}
+
+#[test]
+fn test_responses_request_accepts_grammar() {
+    let body = serde_json::json!({"model": "m", "input": "hi", "grammar": "root ::= \"a\""});
+    let request: ResponseRequest = serde_json::from_value(body).unwrap();
+    assert_eq!(request.grammar.as_deref(), Some("root ::= \"a\""));
 }
