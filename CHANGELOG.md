@@ -4,6 +4,14 @@ Release notes for each version live in [`releases/`](releases/) and on [GitHub R
 
 ## Unreleased
 
+## [v0.2.0](https://github.com/pradeepgudipati/gguf-switchboard/releases/tag/v0.2.0) — 2026-09-19
+
+- **`ggs models register` / `ggs models clean`** — register unregistered GGUF files found on disk (stale same-alias entries are replaced) and delete unregistered duplicate copies; `deploy.sh` now registers new GGUF files automatically.
+- **Constrained output passthrough** — chat completions forward `grammar` and `json_schema` to llama.cpp alongside `response_format`; the Responses API forwards `grammar`.
+- **Streaming usage** — token usage is reported on all streaming endpoints.
+- **Deploy hardening** — stash dirty llama.cpp trees, keep the existing runtime when an update fails, repair root-owned `ggs` paths, real-file writability probe, no lingering `newgrp` subshell.
+- **Fit planner** — flag values are stripped as pairs and stale batch flags deduped on expand.
+
 ## [v0.1.9](https://github.com/pradeepgudipati/gguf-switchboard/releases/tag/v0.1.9) — 2026-09-13
 
 - **Release preflight + local release driver** — `scripts/check-release-preflight.sh` fails fast on malformed tags, missing/empty `releases/<tag>.md` notes, and `Cargo.toml`/tag version drift; covered by `scripts/test-release-preflight.sh` (now part of `ci.sh`/`precommit.sh`). New `scripts/release.sh vX.Y.Z` runs preflight + gate + tag + build + publish locally, and `.forgejo/workflows/release.yml` runs preflight before the Forgejo release build/publish (replaces Woodpecker).
