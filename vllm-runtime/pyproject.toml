@@ -6,7 +6,7 @@ version = "0.1.0"
 # tokenspeed-triton post-releases), and 3.12 is the best-supported floor.
 requires-python = ">=3.10,<3.13"
 dependencies = [
-  "vllm>=0.28,<0.29",
+  "vllm>=0.29.0,<0.30",
 ]
 
 [tool.uv]

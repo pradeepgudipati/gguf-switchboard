@@ -5,8 +5,8 @@ resolution-markers = [
     "python_full_version >= '3.12' and sys_platform == 'darwin'",
     "python_full_version >= '3.12' and sys_platform != 'darwin'",
     "python_full_version == '3.11.*' and sys_platform == 'darwin'",
-    "python_full_version < '3.11' and sys_platform == 'darwin'",
     "python_full_version == '3.11.*' and sys_platform != 'darwin'",
+    "python_full_version < '3.11' and sys_platform == 'darwin'",
     "python_full_version < '3.11' and sys_platform != 'darwin'",
 ]
 
@@ -924,7 +924,7 @@ wheels = [
 
 [[package]]
 name = "flashinfer-python"
-version = "0.6.16.post3"
+version = "0.6.18"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "apache-tvm-ffi" },
@@ -945,9 +945,9 @@ dependencies = [
     { name = "torch" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/c2/46/17045cb47b7b93fcb4e5303e398e6b129b86239930ac0875942a83d8b962/flashinfer_python-0.6.16.post3.tar.gz", hash = "sha256:9b146cfcc1454c80f3f99444db48013b3eadaeb32f2a399bd76c9471ecb72f04", size = 11076656, upload-time = "2026-08-08T01:14:16.408Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/3e/72/12066c5f42a49e7eabe6ec445ac73c59785480bba1b763bd7e0a512f13c1/flashinfer_python-0.6.18.tar.gz", hash = "sha256:70a2074d78cb17ed39c98e5ed47f626c6e8bb29015cf028c49cbf8f2629405a1", size = 13286160, upload-time = "2026-08-29T02:09:18.376Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/9d/dc/5367cb601fc9190cc75b4c141f5f7e9a224d1c26a1e983151823e02a25b3/flashinfer_python-0.6.16.post3-py3-none-any.whl", hash = "sha256:caf686b9b079abe1c9d65ab505698bd325e8072de40afd822f2c74f2ac3bc601", size = 15836034, upload-time = "2026-08-08T01:14:13.709Z" },
+    { url = "https://files.pythonhosted.org/packages/31/7d/3dae45fc293cd5f16cefe4dcf59683d964ca8faf2303ed7fff54f4bca490/flashinfer_python-0.6.18-py3-none-any.whl", hash = "sha256:d5d26edb48f8def0bf28b2c94415aef7f0754e2cd9e3cb3d6e7081262d068aad", size = 18347767, upload-time = "2026-08-29T02:09:15.868Z" },
 ]
 
 [[package]]
@@ -1025,7 +1025,7 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "vllm", specifier = ">=0.28,<0.29" }]
+requires-dist = [{ name = "vllm", specifier = ">=0.29.0,<0.30" }]
 
 [[package]]
 name = "googleapis-common-protos"
@@ -1311,6 +1311,23 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/2e/3e/0248fd00746731074ca01365a25d8aa3c4d54642c8a14490d94f7550bda9/ijson-3.5.1-pp311-pypy311_pp73-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:aa7a2c94e43c02e0482088e6ff997e2bd7b9a76e6f1d0fd70891b4b5ff51318f", size = 71335, upload-time = "2026-07-06T17:37:39.965Z" },
     { url = "https://files.pythonhosted.org/packages/7a/b9/1f1259546cc875adad240c468515f428d3a79b3def3ced17be3cdfe29146/ijson-3.5.1-pp311-pypy311_pp73-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:69b5eef70240e9734c5a2fb5cc3742cae411fc833a66b9a50722b9eedb1e27de", size = 68728, upload-time = "2026-07-06T17:37:40.928Z" },
     { url = "https://files.pythonhosted.org/packages/ea/02/aafbf0c3e1468c7c0f607065363b49c381de7e4bb43ae6674684a3fafe92/ijson-3.5.1-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:4b75b6bf4b0dbb0df24947db6722cd5723ce8d6e6b13fddbfc98db312ba82237", size = 54922, upload-time = "2026-07-06T17:37:41.879Z" },
+]
+
+[[package]]
+name = "instanttensor"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/27/8e/b209471a5a73a7ef1dad7365e05adf4c95b20fadc16fc9aea10ceaba1fc8/instanttensor-0.2.0.tar.gz", hash = "sha256:acafa964f9ba6d2e342d8ffcb7e68bacc6d59d60e2fda222dc1333045cd50c9c", size = 3112592, upload-time = "2026-09-13T19:10:18.043Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7b/04/2dfe624dc0fa0551e9299610f3e0f4e3002dc8b5478632c5d1b0d91c3a59/instanttensor-0.2.0-cp310-cp310-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:f843b236ba6b46f85b3b6e777f5ba4d2f8bf10caeeeea4b3b94adf1618200d85", size = 6018388, upload-time = "2026-09-13T19:09:48.749Z" },
+    { url = "https://files.pythonhosted.org/packages/e4/2e/95c3cbbd0230605cc811904fc6288bc543ebfbca17898a33a73eea08f784/instanttensor-0.2.0-cp310-cp310-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:39b8d36bbf3507ea0d67afb200f8de444c17094fafc4ac5e399c05a6a0a14873", size = 6059653, upload-time = "2026-09-13T19:09:51.651Z" },
+    { url = "https://files.pythonhosted.org/packages/a7/aa/23f1a6a7eb32f9c86251abfd652334460497af421cd29f43b676304174d2/instanttensor-0.2.0-cp311-cp311-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:1dcd47626c9af89b35c8ca53703c59f8aee5666445894e0d38d13a02304140c8", size = 6062188, upload-time = "2026-09-13T19:09:54.536Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/79/07331d1832f7b98b00e78665b79accf59e0b12acb867ff798dc1bdc9d7e9/instanttensor-0.2.0-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:17d16691399bc41fd66d2046f10ae6f5d0f84058b0f1283ed80fe8ebc804a886", size = 6118855, upload-time = "2026-09-13T19:09:57.452Z" },
+    { url = "https://files.pythonhosted.org/packages/77/10/23c738a0b3568a4dadd7604ffe1f47612969b74db1e6708b074625b83838/instanttensor-0.2.0-cp312-cp312-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:eefde9b121cd3a2699bd079a19cba5c0a74f23cc1fa2dd8e186a12910f89408e", size = 6089973, upload-time = "2026-09-13T19:10:00.355Z" },
+    { url = "https://files.pythonhosted.org/packages/f8/02/90a64c81360d473d07f36dde68eb47d043bf442a24c9c91232643f8c0928/instanttensor-0.2.0-cp312-cp312-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:879e8b524b391ed916b8412ef82c3ab40d933ad8d038f40b340d0bd58b7894d3", size = 6178704, upload-time = "2026-09-13T19:10:03.313Z" },
 ]
 
 [[package]]
@@ -4107,7 +4124,7 @@ wheels = [
 
 [[package]]
 name = "vllm"
-version = "0.28.0"
+version = "0.29.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -4127,6 +4144,7 @@ dependencies = [
     { name = "huggingface-hub" },
     { name = "humming-kernels", extra = ["cu13"] },
     { name = "ijson" },
+    { name = "instanttensor" },
     { name = "jsonschema" },
     { name = "lark" },
     { name = "llguidance", marker = "platform_machine == 'aarch64' or platform_machine == 'arm64' or platform_machine == 'ppc64le' or platform_machine == 's390x' or platform_machine == 'x86_64'" },
@@ -4186,10 +4204,10 @@ dependencies = [
     { name = "watchfiles" },
     { name = "xgrammar", marker = "platform_machine == 'aarch64' or platform_machine == 'arm64' or platform_machine == 'ppc64le' or platform_machine == 's390x' or platform_machine == 'x86_64'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/22/39/096d88cfe34ee43a8b6e7c957d1ad6338fa5256474d6ff9a32008c6f8cd6/vllm-0.28.0.tar.gz", hash = "sha256:ac96dd0ec5be9c13f2aa4bfb50498c4727110406f6e4980b58a4097e4d18634a", size = 39991441, upload-time = "2026-08-26T10:08:30.56Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/88/fe/d87b6daf7f02a16464b50685dcf8e0ee7c6e12ad4d2b7107c41717d8566c/vllm-0.29.0.tar.gz", hash = "sha256:c03feb07943ecae9e69e7dc424d7c5569ecf8d1292513aef2a4de67af381cd97", size = 40906181, upload-time = "2026-09-09T08:59:18.353Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b4/31/007ac11dc756f7e69600b90b08e39f573eed9aaee6258198f9d9a2b06355/vllm-0.28.0-cp38-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:817b8181f7f61b4a62dc1d5d9ab39f2bfb60a6cb86c29879a78a147b85756787", size = 308873410, upload-time = "2026-08-26T10:08:13.738Z" },
-    { url = "https://files.pythonhosted.org/packages/87/d7/97f6ecc2ae883e601e08d7cef87cb54ececeefcfe6b5e12d5d92f8d06d6b/vllm-0.28.0-cp38-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:addb0ffdaafd8155d75e9b3f5ddb3da28fdee9e8a7097ede91f7db2e9e1a3889", size = 314500103, upload-time = "2026-08-26T10:07:25.091Z" },
+    { url = "https://files.pythonhosted.org/packages/b3/dc/de2ca88cfb6539c987bc4f6a69887deaa53eb5c4fd483e0923ca00ebd60a/vllm-0.29.0-cp38-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:e6b0dfc2b6fd307315e9b34b73cd2bfe7b6b08958eda721828e61732bba426b0", size = 310033787, upload-time = "2026-09-09T08:58:32.315Z" },
+    { url = "https://files.pythonhosted.org/packages/ca/09/7f79450e21bd1c2a0897ab946a544816a4f7e04c54f0ca49849b14b12d6a/vllm-0.29.0-cp38-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:09d48617fc2be9c6cdcd5db480651ab0d84817b257204f2cc2e3ecbb70bbb635", size = 315961042, upload-time = "2026-09-09T08:59:00.747Z" },
 ]
 
 [[package]]
