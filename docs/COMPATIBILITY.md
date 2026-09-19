@@ -35,7 +35,7 @@ gguf-switchboard forwards requests to the selected llama.cpp or vLLM process. Co
 | Responses function tools | Supported | Function definitions and `tool_choice` translated to Chat Completions; function calls returned as top-level output items |
 | Anthropic Messages API tool calling | Supported | Tool definitions, tool calls, and content blocks translated bidirectionally to/from OpenAI format |
 | Responses built-in/hosted tools | Not supported | Function tools only |
-| `response_format` / JSON mode | Untested | Depends on the selected backend and model |
+| `response_format` / JSON mode | Forwarded | Passed unchanged to the backend; llama.cpp also accepts top-level `grammar` and `json_schema`, which are forwarded too |
 | Structured outputs | Not supported | — |
 | Reasoning fields | Partial | `reasoning_content` promoted in chat types; when `max_tokens` is too low and reasoning consumes the budget, `reasoning_content` is promoted into `content` |
 | Streaming usage counts | Not supported | Usage recorded as zero for streams |

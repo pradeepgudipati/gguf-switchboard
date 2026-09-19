@@ -107,6 +107,12 @@ pub struct ChatCompletionRequest {
     pub seed: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_format: Option<serde_json::Value>,
+    /// llama.cpp GBNF grammar; forwarded unchanged so generation is constrained.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grammar: Option<String>,
+    /// llama.cpp top-level JSON schema constraint; forwarded unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub json_schema: Option<serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_template_kwargs: Option<serde_json::Value>,
     /// Ask the backend to send a terminal usage chunk in stream mode

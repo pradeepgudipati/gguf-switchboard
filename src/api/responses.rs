@@ -157,6 +157,8 @@ fn to_chat_request(request: &ResponseRequest) -> Result<ChatCompletionRequest, R
         tool_choice,
         seed: None,
         response_format: request.response_format.clone(),
+        grammar: None,
+        json_schema: None,
         chat_template_kwargs: None,
         stream_options: None,
     })

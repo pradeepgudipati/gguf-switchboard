@@ -247,6 +247,8 @@ fn parallel_tool_calls_request(model: &str) -> ChatCompletionRequest {
         tool_choice: Some(Value::String("required".to_string())),
         seed: None,
         response_format: None,
+        grammar: None,
+        json_schema: None,
         chat_template_kwargs: None,
         stream_options: None,
     }
@@ -295,6 +297,8 @@ fn tool_call_with_reasoning_request(model: &str) -> ChatCompletionRequest {
         tool_choice: Some(Value::String("required".to_string())),
         seed: None,
         response_format: None,
+        grammar: None,
+        json_schema: None,
         chat_template_kwargs: None,
         stream_options: None,
     }
@@ -367,6 +371,8 @@ fn multi_turn_tool_result_request(model: &str) -> ChatCompletionRequest {
         tool_choice: None,
         seed: None,
         response_format: None,
+        grammar: None,
+        json_schema: None,
         chat_template_kwargs: None,
         stream_options: None,
     }

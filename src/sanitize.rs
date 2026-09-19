@@ -154,6 +154,8 @@ mod tests {
             tool_choice: Some(serde_json::Value::String("string".to_string())),
             seed: Some(SWAGGER_MAX_INT),
             response_format: Some(serde_json::Value::String("string".to_string())),
+            grammar: None,
+            json_schema: None,
             chat_template_kwargs: None,
             stream_options: None,
         };
@@ -198,6 +200,8 @@ mod tests {
             tool_choice: None,
             seed: None,
             response_format: None,
+            grammar: None,
+            json_schema: None,
             chat_template_kwargs: None,
             stream_options: None,
         };

@@ -119,6 +119,8 @@ fn test_chat_request_serialization() {
         tool_choice: None,
         seed: None,
         response_format: None,
+        grammar: None,
+        json_schema: None,
         chat_template_kwargs: None,
         stream_options: None,
     };
@@ -402,4 +404,21 @@ models_file = "models.toml"
     assert!(model.priority);
 
     std::fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn test_chat_request_forwards_grammar_and_response_format() {
+    let body = serde_json::json!({
+        "model": "m",
+        "messages": [{"role": "user", "content": "hi"}],
+        "response_format": {"type": "json_object", "schema": {"type": "object"}},
+        "grammar": "root ::= \"a\"",
+        "json_schema": {"type": "object"}
+    });
+    let request: ChatCompletionRequest = serde_json::from_value(body).unwrap();
+    let out = serde_json::to_value(&request).unwrap();
+    assert_eq!(out["response_format"]["type"], "json_object");
+    assert_eq!(out["response_format"]["schema"]["type"], "object");
+    assert_eq!(out["grammar"], "root ::= \"a\"");
+    assert_eq!(out["json_schema"]["type"], "object");
 }

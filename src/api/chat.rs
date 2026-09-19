@@ -236,6 +236,8 @@ mod tool_gate_tests {
             tool_choice: None,
             seed: None,
             response_format: None,
+            grammar: None,
+            json_schema: None,
             chat_template_kwargs: None,
             stream_options: None,
         }
