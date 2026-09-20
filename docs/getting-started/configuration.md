@@ -500,7 +500,8 @@ priority = false
 | `switch_drain_timeout_secs` | Seconds to wait for in-flight requests before switching models (default `120`) |
 | `switch_strategy` | `unload_first` (default): stop the resident model before starting the next so it gets the whole GPU; previous model is re-loaded if the switch fails. `load_first`: start the next model while the previous is still resident — only sensible when VRAM can hold both, otherwise the new model OOMs into the fallback ladder and loads slowly / partly on CPU |
 | `prewarm_recent_models` | After each load, re-read the GGUF files of the N most recently used other models into the OS page cache (background, cancelled when a real load starts). Speeds up switching back when RAM ≫ combined model sizes. Default `0` (off) |
-| `priority_load_cooldown_secs` | Seconds to skip priority-model reload after a failed load (default `300`) |
+| `priority_autoload` | When `true`, the `priority = true` model is loaded at startup and whenever the server has been idle for `idle_timeout`. Default `false`: the loaded model stays resident until a request names a different model. |
+| `priority_load_cooldown_secs` | Seconds to skip priority-model reload after a failed load (default `300`). Only used when `priority_autoload = true`. |
 | `models_rescan_interval_secs` | Seconds between automatic model-directory rescans (default `86400` = daily). `0` disables. |
 
 ### Context size (`-c`)
@@ -621,10 +622,12 @@ ubatch_size = 2048         # physical micro-batch size (-ub); must be <= batch_s
 | `[[models]].gpu_fit` | Override the fit planner's GPU strategy for this model: `"auto"` (use planner) or `"manual"` (skip planning). |
 | `[[models]].split_mode` | Per-model GPU split mode override: `"layer"`, `"row"`, or `"none"`. Overrides `fit.split_mode`. |
 | `[[models]].kv_cache_type` | Per-model KV cache type override: `"q8_0"`, `"q4_0"`, etc. Overrides the planner's KV cache recommendation. |
-| `[[models]].batch_size` | Logical batch size (`-b`). Controls maximum tokens processed in a single batch. Important for embedding models with large inputs. Default: llama.cpp built-in. |
-| `[[models]].ubatch_size` | Physical micro-batch size (`-ub`). Must be `<= batch_size`. Critical for embedding models. Default: llama.cpp built-in. |
+| `[[models]].batch_size` | Logical batch size (`-b`). Cap on the tokens `llama-server` accepts across one request. Default: 2048 for embedding and reranker models, llama.cpp built-in otherwise. |
+| `[[models]].ubatch_size` | Physical micro-batch size (`-ub`). Clamped to `<= batch_size`. Cap on the tokens in a *single* input. Default: 2048 for embedding and reranker models, llama.cpp built-in otherwise. |
 
-`batch_size` and `ubatch_size` are primarily useful for embedding models where large input arrays need to be split into manageable batches. When set, they are passed as `-b` and `-ub` flags to `llama-server`.
+`batch_size` and `ubatch_size` are primarily useful for embedding models. When set, they are passed as `-b` and `-ub` flags to `llama-server`. Either can be set on its own; the other falls back to its default.
+
+`ubatch_size` is a correctness knob, not a throughput knob. llama.cpp embeds a sequence in one micro-batch, so `-ub` is a hard ceiling on the token count of a single input — a 530-token chunk sent to a server started with `-ub 512` comes back as `input is too large to process. increase the physical batch size`, and older llama.cpp builds assert and exit instead of returning the error. For that reason both values have a **floor of 2048** for pooling models: the VRAM planner may raise them, never lower them, and relieves VRAM pressure through context, KV quantization, and `-ngl` instead. Requests that still exceed the live `-ub` are rejected by the router with `400` before they reach the backend.
 
 ### Balanced embedding VRAM profiles
 
@@ -641,10 +644,12 @@ queue_timeout_secs = 30
 
 | Headroom after reserve and weights | Context ceiling | Batch | Micro-batch | Request concurrency |
 |---:|---:|---:|---:|---:|
-| under 1.5 GB | 2048 | 256 | 128 | 1 |
-| 1.5–3 GB | 4096 | 512 | 256 | 1 |
-| 3–5 GB | 8192 | 1024 | 512 | 1 |
-| 5–8 GB | 8192 | 2048 | 1024 | 2 |
-| over 8 GB | 16384 | 4096 | 2048 | 2 |
+| under 1.5 GB | 2048 | 2048 | 2048 | 1 |
+| 1.5–3 GB | 4096 | 2048 | 2048 | 1 |
+| 3–5 GB | 8192 | 2048 | 2048 | 1 |
+| 5–8 GB | 8192 | 2048 | 2048 | 1 |
+| over 8 GB | 16384 | 4096 | 4096 | 2 |
+
+Context is what scales with headroom; batch and micro-batch only ever scale *up*, for the reason given above. The OOM fallback ladder follows the same rule — it steps context, KV cache type, and `-ngl` down, and leaves the batch sizes alone.
 
 Requests beyond the active model's concurrency enter a bounded in-process queue. When `queue_timeout_secs` expires, the API returns `429` with `Retry-After` instead of forwarding more simultaneous work to `llama-server`. The active runtime profile reports `batch_size`, `ubatch_size`, and `embedding_concurrency`; Prometheus exports queue depth, queue wait, and rejected-request metrics.

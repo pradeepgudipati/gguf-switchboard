@@ -69,8 +69,14 @@ impl EmbeddingAdmission {
     }
 }
 
+/// How many embedding requests the balanced profile lets run at once.
+///
+/// Keyed on batch size *above* [`crate::batch::EMBEDDING_BATCH_FLOOR`], not at
+/// it: every pooling model is now floored to that batch size for correctness,
+/// so `>=` would read the floor as roomy hardware and admit two concurrent
+/// full-size batches on a GPU that has no headroom for them.
 pub fn balanced_concurrency(batch_size: Option<u32>) -> usize {
-    if batch_size.is_some_and(|batch| batch >= 2048) {
+    if batch_size.is_some_and(|batch| batch > crate::batch::EMBEDDING_BATCH_FLOOR) {
         2
     } else {
         1
@@ -96,6 +102,9 @@ mod tests {
     #[test]
     fn balanced_concurrency_is_one_below_large_batch_tier() {
         assert_eq!(balanced_concurrency(Some(1024)), 1);
-        assert_eq!(balanced_concurrency(Some(2048)), 2);
+        // The floor itself is the constrained tier: reaching 2048 only means
+        // the correctness minimum was applied, not that VRAM is plentiful.
+        assert_eq!(balanced_concurrency(Some(2048)), 1);
+        assert_eq!(balanced_concurrency(Some(4096)), 2);
     }
 }

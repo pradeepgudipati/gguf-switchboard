@@ -41,14 +41,38 @@ pub fn with_ubatch_size(args: &[String], size: u32) -> Vec<String> {
     updated
 }
 
+/// Floor for `-b`/`-ub` on pooling (embedding / reranker) models.
+///
+/// llama.cpp embeds a sequence in a single micro-batch, so `n_ubatch` is a hard
+/// ceiling on the token count of one input — anything longer is rejected with
+/// "input is too large to process. increase the physical batch size", and on
+/// older builds trips a `GGML_ASSERT` that takes the server process down.
+///
+/// That makes `-ub` a correctness knob, not a throughput knob: shrinking it to
+/// save VRAM buys a few hundred MB and permanently breaks every input longer
+/// than the new value. 2048 covers the dense-markdown chunks RAG indexers
+/// produce; VRAM pressure is relieved via context / KV quant / `-ngl` instead.
+pub const EMBEDDING_BATCH_FLOOR: u32 = 2048;
+
 /// Compute default batch and micro-batch sizes for embedding models.
 ///
-/// Returns `(batch_size, ubatch_size)` suitable for Nomic and similar embedding models.
-/// The defaults are chosen to handle large inputs without exceeding physical limits:
-/// - batch_size: 2048 (logical batch size for token processing)
-/// - ubatch_size: 2048 (physical micro-batch size for prompt processing)
+/// Returns `(batch_size, ubatch_size)` suitable for Nomic, Qwen3-Embedding and
+/// similar pooling models. Both default to [`EMBEDDING_BATCH_FLOOR`]; see that
+/// constant for why `-ub` is never scaled down to fit VRAM.
 pub fn embedding_batch_defaults() -> (u32, u32) {
-    (2048, 2048)
+    (EMBEDDING_BATCH_FLOOR, EMBEDDING_BATCH_FLOOR)
+}
+
+/// Clamp a planner-computed `(batch, ubatch)` pair to what a pooling model can
+/// actually serve: both at least [`EMBEDDING_BATCH_FLOOR`], and `ubatch <= batch`.
+///
+/// Only for values derived from hardware. Explicit per-model pins in
+/// `models.toml` are the operator's call and get the `ubatch <= batch` clamp
+/// alone (llama-server rejects `-ub` larger than `-b`).
+pub fn clamp_embedding_batch(batch: u32, ubatch: u32) -> (u32, u32) {
+    let batch = batch.max(EMBEDDING_BATCH_FLOOR);
+    let ubatch = ubatch.max(EMBEDDING_BATCH_FLOOR).min(batch);
+    (batch, ubatch)
 }
 
 /// Check if the args already have batch/ubatch flags configured.
@@ -148,6 +172,26 @@ mod tests {
         let args = vec!["-m".to_string(), "model.gguf".to_string()];
         let updated = with_ubatch_size(&args, 1024);
         assert_eq!(get_ubatch_size(&updated), Some(1024));
+    }
+
+    #[test]
+    fn clamp_raises_small_pairs_to_the_floor() {
+        // The VRAM tier that produced (512, 256) is what rejected a 530-token
+        // chunk in production; both values must come back up to the floor.
+        assert_eq!(clamp_embedding_batch(512, 256), (2048, 2048));
+        assert_eq!(clamp_embedding_batch(256, 128), (2048, 2048));
+    }
+
+    #[test]
+    fn clamp_keeps_headroom_above_the_floor() {
+        assert_eq!(clamp_embedding_batch(4096, 4096), (4096, 4096));
+    }
+
+    #[test]
+    fn clamp_never_lets_ubatch_exceed_batch() {
+        let (batch, ubatch) = clamp_embedding_batch(2048, 8192);
+        assert_eq!((batch, ubatch), (2048, 2048));
+        assert!(ubatch <= batch);
     }
 
     #[test]

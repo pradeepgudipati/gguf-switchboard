@@ -62,9 +62,15 @@ auto_discover = true
 # extra_args = ["--chat-template", "llama3"]  # Llama 3.1 plain-text chat (auto for llama-3.1)
 # extra_args = ["--jinja"]                    # use GGUF tool-calling template instead
 #
-# Embedding model batch size overrides (for large input handling):
-# batch_size = 2048          # logical batch size (-b); default for embedding models
-# ubatch_size = 2048         # physical micro-batch size (-ub); must be <= batch_size
+# Embedding model batch size overrides (for large input handling). Both default
+# to 2048 for embedding/reranker models and may be set independently.
+# batch_size = 2048          # logical batch size (-b): token cap for one request
+# ubatch_size = 2048         # physical micro-batch (-ub): token cap for ONE input;
+#                            # clamped to <= batch_size. This is a correctness knob:
+#                            # llama.cpp embeds a sequence in a single micro-batch, so
+#                            # an input longer than -ub is rejected outright ("input is
+#                            # too large to process"). 2048 is a floor for pooling
+#                            # models — the VRAM planner raises it, never lowers it.
 #
 # Enrich empty metadata fields from Hugging Face (does not overwrite explicit pins):
 #   ./gguf-switchboard sync-hf-metadata models.toml

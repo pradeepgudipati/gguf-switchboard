@@ -7,8 +7,12 @@ bind = "0.0.0.0:9090"
 # Maximum seconds to wait for a backend to become healthy
 startup_timeout = 60
 
-# Seconds of idle time before the priority model auto-loads
+# Seconds of idle time before the priority model auto-loads (only when priority_autoload = true)
 idle_timeout = 600
+
+# Load the `priority = true` model automatically when idle. Default false: whatever is
+# loaded stays resident until a request names a different model.
+priority_autoload = false
 
 # Default backend engine
 default_backend = "llama.cpp"

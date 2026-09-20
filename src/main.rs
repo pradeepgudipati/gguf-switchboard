@@ -36,6 +36,7 @@ Commands:
   ggs models pull <repo-id> --quant Q4_K_M  Download and register a GGUF model
   ggs models pull vllm <repo-id>             Download and register a vLLM model
   ggs discover-models <models-dir>           Discover local GGUF models
+  ggs check-models [<models-dir>]            Find truncated/damaged GGUF files
   ggs sync-hf-metadata                       Refresh Hugging Face metadata
   ggs export-registry <models.toml>          Export a registry as JSON
   ggs status                                 Show whether the system service is running
@@ -139,6 +140,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     if args.len() >= 2 && args[1] == "discover-models" {
         return run_discover_models(&args).map_err(add_help_to_cli_usage_error);
+    }
+
+    if args.len() >= 2 && args[1] == "check-models" {
+        return run_check_models(&args);
     }
 
     if args.len() >= 2 && args[1] == "sync-hf-metadata" {
@@ -459,6 +464,35 @@ fn run_service_ctl(action: &str) -> Result<(), Box<dyn std::error::Error>> {
         println!("{SERVICE_NAME}: {action} OK");
         Ok(())
     }
+}
+
+/// `ggs check-models [dir]`: verify every GGUF is complete; exit 1 if any is not.
+fn run_check_models(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let dir = args
+        .get(2)
+        .cloned()
+        .or_else(|| std::env::var("MODELS_DIR").ok())
+        .unwrap_or_else(|| "/var/lib/gguf-switchboard/models".to_string());
+    let results = gguf_switchboard::gguf_integrity::scan_dir(std::path::Path::new(&dir));
+    if results.is_empty() {
+        println!("No .gguf files found under {dir}");
+        return Ok(());
+    }
+    let mut bad = 0usize;
+    for (path, result) in &results {
+        match result {
+            Ok(()) => println!("ok       {}", path.display()),
+            Err(e) => {
+                bad += 1;
+                println!("DAMAGED  {}\n           {e}", path.display());
+            }
+        }
+    }
+    println!("\n{} checked, {bad} damaged", results.len());
+    if bad > 0 {
+        return Err(format!("{bad} damaged GGUF file(s); re-download them").into());
+    }
+    Ok(())
 }
 
 fn run_discover_models(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {

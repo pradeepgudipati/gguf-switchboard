@@ -1894,13 +1894,16 @@ impl ModelsRegistry {
                         // Add batch size flags for pooling models if not already configured.
                         // This prevents "input exceeds physical batch size" errors with large inputs.
                         if !crate::batch::has_batch_flags(&args) {
-                            let (batch_size, ubatch_size) = if let (Some(b), Some(ub)) =
-                                (entry.batch_size, entry.ubatch_size)
-                            {
-                                (b, ub)
-                            } else {
-                                crate::batch::embedding_batch_defaults()
-                            };
+                            // Each override stands on its own: pinning only
+                            // `batch_size` used to silently discard it and fall
+                            // back to both defaults, because the old match
+                            // required `ubatch_size` to be set as well.
+                            let (default_batch, default_ubatch) =
+                                crate::batch::embedding_batch_defaults();
+                            let batch_size = entry.batch_size.unwrap_or(default_batch);
+                            // llama-server rejects `-ub` larger than `-b`.
+                            let ubatch_size =
+                                entry.ubatch_size.unwrap_or(default_ubatch).min(batch_size);
                             args.push("-b".to_string());
                             args.push(batch_size.to_string());
                             args.push("-ub".to_string());

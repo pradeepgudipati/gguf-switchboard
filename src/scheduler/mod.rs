@@ -232,9 +232,14 @@ impl Scheduler {
             return Ok(backend);
         }
 
-        if !self.inner.models.read().contains_key(model_id) {
+        let Some(target_cfg) = self.inner.models.read().get(model_id).cloned() else {
             return Err(RuntimeError::ModelNotFound(model_id.to_string()));
-        }
+        };
+
+        // Refuse a truncated or damaged GGUF *before* touching the resident model.
+        // Otherwise a broken file costs an unload → failed start → reload of a
+        // healthy model on every request.
+        self.preflight_model_file(model_id, &target_cfg).await?;
 
         // A load is about to hit the disk; make sure a background prewarm is not
         // competing with it for I/O bandwidth.
@@ -420,6 +425,46 @@ impl Scheduler {
                 self.finish_switch(report, switch_started, &from_label, metrics::result::ERROR)
                     .await;
                 Err(e)
+            }
+        }
+    }
+
+    /// Verify the GGUF behind a llama.cpp model is complete before any switch begins.
+    async fn preflight_model_file(
+        &self,
+        model_id: &str,
+        cfg: &ModelConfig,
+    ) -> Result<(), RuntimeError> {
+        if cfg.backend != "llama.cpp" {
+            return Ok(());
+        }
+        let Some(path) = crate::gguf_integrity::model_path_from_args(&cfg.args) else {
+            return Ok(());
+        };
+        let path = std::path::PathBuf::from(path);
+        let check_path = path.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            crate::gguf_integrity::check_gguf_integrity(&check_path)
+        })
+        .await
+        .map_err(|e| RuntimeError::InternalError(format!("GGUF check task failed: {e}")))?;
+        match result {
+            Ok(()) => Ok(()),
+            // A missing file keeps its dedicated error from the backend.
+            Err(crate::gguf_integrity::GgufIntegrityError::Unreadable(_)) => Ok(()),
+            Err(e) => {
+                warn!(
+                    model = %model_id,
+                    path = %path.display(),
+                    error = %e,
+                    "Refusing to load model: GGUF failed integrity check; resident model left running"
+                );
+                Err(RuntimeError::ModelLoadingFailed(format!(
+                    "Model '{model_id}' cannot be loaded: {} is not a complete GGUF: {e}. \
+                     Re-download it (`ggs models pull …`) or run `ggs check-models` to list damaged files. \
+                     The currently loaded model was not touched.",
+                    path.display()
+                )))
             }
         }
     }
@@ -772,6 +817,13 @@ impl Scheduler {
         let scheduler = Arc::clone(self);
 
         tokio::spawn(async move {
+            if !inner.config.priority_autoload {
+                info!(
+                    "Priority model auto-load is disabled (priority_autoload = false); \
+                     models load only on request"
+                );
+                return;
+            }
             info!(
                 timeout_secs = idle_timeout.as_secs(),
                 "Priority model watcher started"
@@ -1095,14 +1147,14 @@ impl SchedulerInner {
             return self.load_vllm_model_with_fit(model_id).await;
         }
 
-        // Embedding models use the balanced VRAM planner by default. Other model
+        // Pooling models use the balanced VRAM planner by default. Other model
         // kinds retain the opt-in global fit behavior.
         let embedding_fit = self.config.embedding_fit.enabled
             && self
                 .models
                 .read()
                 .get(model_id)
-                .is_some_and(|cfg| cfg.kind == "embedding");
+                .is_some_and(|cfg| is_pooling_kind(&cfg.kind));
         if self.config.fit.enabled || embedding_fit {
             return self.load_model_with_fit_planner(model_id).await;
         }
@@ -1304,9 +1356,13 @@ impl SchedulerInner {
         )
         .with_kind(&model_cfg.kind)
         .with_context_floor(model_cfg.ctx_floor);
-        if model_cfg.kind == "embedding" && self.config.embedding_fit.enabled {
+        if is_pooling_kind(&model_cfg.kind) && self.config.embedding_fit.enabled {
+            // The `-vN` suffix is a cache epoch. Bump it whenever the planner's
+            // embedding sizing changes so profiles cached under the old rules
+            // are ignored rather than replayed — v1 profiles could pin `-ub` as
+            // low as 128, which rejects any input longer than 128 tokens.
             model.model_fingerprint = format!(
-                "{}:embedding-{}-v1",
+                "{}:embedding-{}-v2",
                 model.model_fingerprint, self.config.embedding_fit.profile
             );
         }
@@ -1403,7 +1459,7 @@ impl SchedulerInner {
 
         // Build and run the fit planner.
         let embedding_reserve =
-            if model_cfg.kind == "embedding" && self.config.embedding_fit.enabled {
+            if is_pooling_kind(&model_cfg.kind) && self.config.embedding_fit.enabled {
                 let percentage = hardware
                     .free_vram_mb
                     .saturating_mul(u64::from(self.config.embedding_fit.vram_reserve_percent))
@@ -1917,6 +1973,14 @@ impl SchedulerInner {
 
 fn millis(d: Duration) -> u64 {
     u64::try_from(d.as_millis()).unwrap_or(u64::MAX)
+}
+
+/// True for the pooling kinds llama-server serves through `--embeddings`.
+///
+/// Rerankers (cross-encoders) share the embedding path, including the `n_ubatch`
+/// ceiling on a single input, so they get the same balanced planner treatment.
+fn is_pooling_kind(kind: &str) -> bool {
+    matches!(kind, "embedding" | "reranker")
 }
 
 fn load_error_label(e: &RuntimeError) -> &'static str {

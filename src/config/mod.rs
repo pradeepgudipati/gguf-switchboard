@@ -65,6 +65,11 @@ pub struct Config {
     /// Seconds to wait for in-flight requests to finish before switching models.
     #[serde(default = "default_switch_drain_timeout_secs")]
     pub switch_drain_timeout_secs: u64,
+    /// When true, the priority model (`priority = true` in models.toml) is loaded
+    /// automatically at startup and whenever the server has been idle for
+    /// `idle_timeout`. Off by default: models load only when a request asks for them.
+    #[serde(default)]
+    pub priority_autoload: bool,
     /// Seconds to skip priority-model reload after a failed priority load.
     #[serde(default = "default_priority_load_cooldown_secs")]
     pub priority_load_cooldown_secs: u64,

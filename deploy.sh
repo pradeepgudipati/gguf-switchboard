@@ -249,6 +249,7 @@ default_backend = "llama.cpp"
 vram_gb = 12
 auto_ngl = false
 switch_drain_timeout_secs = 120
+priority_autoload = false
 priority_load_cooldown_secs = 300
 models_rescan_interval_secs = 86400
 database_path = "${STATE_DIR}/usage.db"

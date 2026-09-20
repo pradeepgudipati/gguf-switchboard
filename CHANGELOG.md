@@ -4,6 +4,10 @@ Release notes for each version live in [`releases/`](releases/) and on [GitHub R
 
 ## Unreleased
 
+- **Embedding batch floor** — embedding and reranker models are always served with `-b`/`-ub` ≥ 2048. The VRAM planner used to shrink them to as little as 512/256, which made llama-server reject any input longer than `-ub` ("input is too large to process"). Tight VRAM now sheds context / KV quant / `-ngl` instead. The profile cache epoch moved to `v2` so old small-batch profiles are ignored. `batch_size` and `ubatch_size` now work independently, and `/v1/embeddings` returns `400` (naming the input index) for inputs over the live `-ub` instead of forwarding them.
+- **GGUF integrity preflight** — before any switch begins, the scheduler reads the GGUF header and tensor table and refuses a truncated/damaged file with a clear error, leaving the resident model untouched. Previously a broken file cost an unload → failed start → reload of a healthy model on every request. New `ggs check-models [dir]` lists damaged files.
+- **`priority_autoload` (default `false`)** — the idle-timeout auto-load of the `priority = true` model is now opt-in. The loaded model stays resident until a request names another model.
+
 ## [v0.2.0](https://github.com/pradeepgudipati/gguf-switchboard/releases/tag/v0.2.0) — 2026-09-19
 
 - **`ggs models register` / `ggs models clean`** — register unregistered GGUF files found on disk (stale same-alias entries are replaced) and delete unregistered duplicate copies; `deploy.sh` now registers new GGUF files automatically.

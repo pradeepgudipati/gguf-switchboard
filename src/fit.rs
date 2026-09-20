@@ -847,12 +847,20 @@ fn build_fallback_ladder(
             };
 
             // Compute batch size for this attempt (embedding models only).
+            //
+            // `-ub` tracks `-b` rather than halving it: for a pooling model the
+            // micro-batch has to hold one whole input, so a smaller `-ub` is a
+            // smaller maximum input, not just less throughput.
             let (batch_size, ubatch_size) = if default_batch.is_some() {
                 let step_idx = plans.len().min(batch_steps.len().saturating_sub(1));
-                let batch = batch_steps.get(step_idx).copied().unwrap_or(256);
-                let ubatch = default_ubatch
-                    .map(|default| default.min((batch / 2).max(128)))
-                    .unwrap_or(128);
+                let batch = batch_steps
+                    .get(step_idx)
+                    .copied()
+                    .unwrap_or(crate::batch::EMBEDDING_BATCH_FLOOR);
+                let (batch, ubatch) = crate::batch::clamp_embedding_batch(
+                    batch,
+                    default_ubatch.unwrap_or(batch).min(batch),
+                );
                 (Some(batch), Some(ubatch))
             } else {
                 (None, None)
@@ -925,20 +933,21 @@ fn compute_embedding_batch_sizes(
         .usable_vram_mb(reserve_mb)
         .saturating_sub(model.file_size_mb);
 
-    // Determine base batch size from VRAM tier.
+    // Determine base batch size from VRAM tier. Tiers only ever grant *extra*
+    // headroom above `EMBEDDING_BATCH_FLOOR` — a pooling model served below the
+    // floor rejects ordinary RAG chunks, so the low tiers relieve VRAM pressure
+    // through context / KV quant / `-ngl` instead of through `-ub`.
     let (base_batch, base_ubatch) = if headroom_mb > 8 * 1024 {
-        (4096, 2048)
-    } else if headroom_mb >= 5 * 1024 {
-        (2048, 1024)
-    } else if headroom_mb >= 3 * 1024 {
-        (1024, 512)
-    } else if headroom_mb >= 1536 {
-        (512, 256)
+        (4096, 4096)
     } else {
-        (256, 128)
+        crate::batch::embedding_batch_defaults()
     };
+    let (base_batch, base_ubatch) = crate::batch::clamp_embedding_batch(base_batch, base_ubatch);
 
-    // Build fallback steps: base, 75%, 50%, 25% (clamped to 256 minimum).
+    // Build fallback steps: base, 75%, 50%, 25%, each clamped to the floor.
+    // Below the top tier these collapse to a single step, which is the point:
+    // shrinking `-b` on an embedding model trades a load-time OOM for a server
+    // that runs but 500s on every long input.
     let steps = vec![
         base_batch,
         (base_batch * 3) / 4,
@@ -947,7 +956,7 @@ fn compute_embedding_batch_sizes(
     ];
     let steps: Vec<u32> = steps
         .into_iter()
-        .map(|s| s.max(256))
+        .map(|s| s.max(crate::batch::EMBEDDING_BATCH_FLOOR))
         .collect::<std::collections::HashSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
@@ -1356,7 +1365,9 @@ mod tests {
         let plan = planner.current_plan();
         // A small embedding model leaves more than 8 GB headroom.
         assert_eq!(plan.batch_size, Some(4096));
-        assert_eq!(plan.ubatch_size, Some(2048));
+        // `-ub` tracks `-b` rather than halving it: on a pooling model the
+        // micro-batch is the ceiling on a single input's token count.
+        assert_eq!(plan.ubatch_size, Some(4096));
     }
 
     #[test]
@@ -1372,8 +1383,11 @@ mod tests {
     }
 
     #[test]
-    fn embedding_batch_scales_with_headroom_after_model_residency() {
-        // 4 GB free - 2 GB reserve - 0.5 GB weights leaves about 1.5 GB.
+    fn embedding_batch_scales_up_but_never_below_the_floor() {
+        // 4 GB free - 2 GB reserve - 0.5 GB weights leaves about 1.5 GB. The
+        // old tiering dropped this to -b 512 / -ub 256, which then rejected
+        // every chunk over 256 tokens. Headroom now buys extra batch, never
+        // less than the floor; tight VRAM is handled by context/KV/-ngl.
         let hw_small = HardwareSummary {
             gpus: vec![fake_gpu("GTX 1650", 4096, 4096)],
             total_vram_mb: 4096,
@@ -1385,8 +1399,8 @@ mod tests {
         let config = FitConfig::default();
         let planner = FitPlanner::new(hw_small, model.clone(), config.clone());
         let plan = planner.current_plan();
-        assert_eq!(plan.batch_size, Some(512));
-        assert_eq!(plan.ubatch_size, Some(256));
+        assert_eq!(plan.batch_size, Some(2048));
+        assert_eq!(plan.ubatch_size, Some(2048));
 
         // 8 GB free - 2 GB reserve - 0.5 GB weights leaves 5.5 GB.
         let hw_medium = HardwareSummary {
@@ -1399,14 +1413,14 @@ mod tests {
         let planner = FitPlanner::new(hw_medium, model.clone(), config.clone());
         let plan = planner.current_plan();
         assert_eq!(plan.batch_size, Some(2048));
-        assert_eq!(plan.ubatch_size, Some(1024));
+        assert_eq!(plan.ubatch_size, Some(2048));
 
-        // Large VRAM (24 GB) -> 4096 batch
+        // Large VRAM (24 GB) -> the one tier above the floor.
         let hw_large = single_gpu_hardware();
         let planner = FitPlanner::new(hw_large, model, config);
         let plan = planner.current_plan();
         assert_eq!(plan.batch_size, Some(4096));
-        assert_eq!(plan.ubatch_size, Some(2048));
+        assert_eq!(plan.ubatch_size, Some(4096));
     }
 
     #[test]
@@ -1427,8 +1441,9 @@ mod tests {
         let plan = planner.current_plan();
 
         assert_eq!(plan.context_size, 8192);
-        assert_eq!(plan.batch_size, Some(1024));
-        assert_eq!(plan.ubatch_size, Some(512));
+        // Context comes down under pressure; the batch floor does not.
+        assert_eq!(plan.batch_size, Some(2048));
+        assert_eq!(plan.ubatch_size, Some(2048));
     }
 
     #[test]
@@ -1463,7 +1478,7 @@ mod tests {
 
         assert_eq!(plan.context_size, 16384);
         assert_eq!(plan.batch_size, Some(4096));
-        assert_eq!(plan.ubatch_size, Some(2048));
+        assert_eq!(plan.ubatch_size, Some(4096));
         assert!(plan.tensor_split.is_some());
     }
 
@@ -1490,8 +1505,10 @@ mod tests {
     }
 
     #[test]
-    fn embedding_batch_minimum_is_256() {
-        // Very small VRAM (1 GB) -> 512 base, 25% = 128 clamped to 256
+    fn embedding_batch_never_descends_below_the_floor() {
+        // Even on 1 GB of VRAM, no rung of the ladder may serve a pooling
+        // model below the floor — a loaded server that 500s on a 600-token
+        // chunk is worse than one that had to shed context to start.
         let hw_tiny = HardwareSummary {
             gpus: vec![fake_gpu("GT 730", 1024, 800)],
             total_vram_mb: 1024,
@@ -1503,9 +1520,13 @@ mod tests {
         let config = FitConfig::default();
         let planner = FitPlanner::new(hw_tiny, model, config);
 
+        let floor = crate::batch::EMBEDDING_BATCH_FLOOR;
         for plan in planner.all_plans() {
             let batch = plan.batch_size.unwrap();
-            assert!(batch >= 256, "batch {batch} < 256 minimum");
+            let ubatch = plan.ubatch_size.unwrap();
+            assert!(batch >= floor, "batch {batch} < {floor} floor");
+            assert!(ubatch >= floor, "ubatch {ubatch} < {floor} floor");
+            assert!(ubatch <= batch, "ubatch {ubatch} > batch {batch}");
         }
     }
 
