@@ -2565,7 +2565,7 @@ async fn refresh_running_server(
 }
 
 /// Returns true when a running gguf-switchboard accepted the registry refresh.
-async fn refresh_after_pull() -> bool {
+pub(crate) async fn refresh_after_pull() -> bool {
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
@@ -3002,7 +3002,7 @@ fn sanitize_repo_dirname(repo: &str) -> String {
 /// `qwen2.5-7b-instruct`). Unlike `alias_from_filename`, this doesn't treat
 /// `.` as an extension separator — repo names routinely contain literal dots
 /// (version numbers) that `Path::file_stem()` would otherwise mis-split on.
-fn alias_from_repo(repo: &str) -> String {
+pub(crate) fn alias_from_repo(repo: &str) -> String {
     let name = repo.rsplit('/').next().unwrap_or(repo);
     let lower = name.to_ascii_lowercase().replace('_', "-");
     let alias: String = lower

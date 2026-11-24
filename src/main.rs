@@ -8,7 +8,8 @@ use std::path::PathBuf;
 use gguf_switchboard::api;
 use gguf_switchboard::config::{
     Config, ModelsRegistry, cmd_check_updates, cmd_clean_local, cmd_delete_local, cmd_files,
-    cmd_list_local, cmd_pull, cmd_register_local, cmd_search, cmd_update, sync_registry_from_hf,
+    cmd_list_local, cmd_pull, cmd_register_all_local, cmd_register_local, cmd_search, cmd_update,
+    sync_registry_from_hf,
 };
 use gguf_switchboard::conformance::ConformanceHistory;
 use gguf_switchboard::db::TokenDb;
@@ -31,6 +32,7 @@ Commands:
   ggs models files <repo-id>                List files in a Hugging Face repository
   ggs models list                           List GGUF/safetensors models on disk
   ggs models register [<name|#>...]         Register unregistered GGUF files on disk
+  ggs models register-all                   Register everything unregistered (GGUF + safetensors)
   ggs models clean [--yes]                  Delete unregistered duplicate copies
   ggs models delete <name|#>                Delete a model (file + registry entry)
   ggs models check-updates [--verify]       Check installed models against Hugging Face
@@ -68,6 +70,7 @@ Examples:
   # List and manage models
   ggs models list
   ggs models list --json
+  ggs models register-all
   ggs models delete qwen3-embedding-4b
   ggs models delete 2 --yes
 
@@ -712,10 +715,11 @@ async fn run_models_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error
         "delete" => cmd_delete_local(&sub_args).await,
         "clean" => cmd_clean_local(&sub_args).await,
         "register" => cmd_register_local(&sub_args).await,
+        "register-all" => cmd_register_all_local(&sub_args).await,
         "check-updates" => cmd_check_updates(&sub_args).await,
         "update" => cmd_update(&sub_args).await,
         other => Err(format!(
-            "models: unknown subcommand '{other}'\n\nUsage:\n  gguf-switchboard models search <query> [--limit N]\n  gguf-switchboard models search vllm <query> [--limit N]\n  gguf-switchboard models files <repo-id>\n  gguf-switchboard models list [--dir PATH] [--registry models.toml] [--json]\n  gguf-switchboard models register [<name|#>...] [--dir PATH] [--registry models.toml]\n  gguf-switchboard models clean [--yes] [--dir PATH] [--registry models.toml]\n  gguf-switchboard models delete <name|#> [--yes] [--dir PATH] [--registry models.toml]\n  gguf-switchboard models check-updates [--dir PATH] [--registry models.toml] [--json] [--verify] [target]\n  gguf-switchboard models update <name|#|all> [--yes] [--dir PATH] [--registry models.toml] [--connections N] [--no-bench]\n  gguf-switchboard models pull <repo-id> [--quant QUANT] [--dir PATH] [--connections N] [--no-bench]\n  gguf-switchboard models pull vllm <repo-id> [--dir PATH] [--draft <repo>] [--num-speculative-tokens N] [--attention-backend NAME] [--tensor-parallel-size N] [--gpu-memory-utilization F] [--served-model-name NAME] [--force]"
+            "models: unknown subcommand '{other}'\n\nUsage:\n  gguf-switchboard models search <query> [--limit N]\n  gguf-switchboard models search vllm <query> [--limit N]\n  gguf-switchboard models files <repo-id>\n  gguf-switchboard models list [--dir PATH] [--registry models.toml] [--json]\n  gguf-switchboard models register [<name|#>...] [--dir PATH] [--registry models.toml]\n  gguf-switchboard models register-all [--dir PATH] [--registry models.toml]\n  gguf-switchboard models clean [--yes] [--dir PATH] [--registry models.toml]\n  gguf-switchboard models delete <name|#> [--yes] [--dir PATH] [--registry models.toml]\n  gguf-switchboard models check-updates [--dir PATH] [--registry models.toml] [--json] [--verify] [target]\n  gguf-switchboard models update <name|#|all> [--yes] [--dir PATH] [--registry models.toml] [--connections N] [--no-bench]\n  gguf-switchboard models pull <repo-id> [--quant QUANT] [--dir PATH] [--connections N] [--no-bench]\n  gguf-switchboard models pull vllm <repo-id> [--dir PATH] [--draft <repo>] [--num-speculative-tokens N] [--attention-backend NAME] [--tensor-parallel-size N] [--gpu-memory-utilization F] [--served-model-name NAME] [--force]"
         ).into()),
     }
 }
@@ -782,6 +786,7 @@ fn is_cli_usage_error(message: &str) -> bool {
         || (message.starts_with("models files") && message.contains("missing"))
         || message.starts_with("models list:")
         || message.starts_with("models delete:")
+        || message.starts_with("models register")
         || message.starts_with("models check-updates")
         || message.starts_with("models update")
         || (message.starts_with("models pull")

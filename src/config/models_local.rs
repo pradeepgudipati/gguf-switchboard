@@ -1,11 +1,13 @@
-//! `ggs models list` / `ggs models delete` — filesystem-level model inventory.
+//! `ggs models list` / `ggs models delete` / `ggs models register-all` —
+//! filesystem-level model inventory.
 //!
 //! `discover-models` scans the model directories only as a side effect of
-//! writing a registry file. These two commands expose the scan directly:
+//! writing a registry file. These commands expose the scan directly:
 //! `list` prints a numbered inventory of every GGUF file and safetensors model
-//! directory found on disk (with the registered alias, if any), and `delete`
+//! directory found on disk (with the registered alias, if any), `delete`
 //! removes one of them — the file/dir **and** the matching `models.toml`
-//! entry — targeted by that number or by name.
+//! entry — targeted by that number or by name, and `register-all` registers
+//! everything unregistered (GGUF files plus safetensors directories).
 
 use std::error::Error;
 use std::io::{IsTerminal, Write};
@@ -370,11 +372,15 @@ fn resolve_config_toml_path() -> PathBuf {
     PathBuf::from("config.toml")
 }
 
+/// Resolve the scan roots: explicit `--dir` values, else the registry's
+/// `models_dir` with common-location fallback — plus the `vllm-models`
+/// sibling of each root (the canonical `models pull vllm` destination), so
+/// GGUF and safetensors inventories cover the same ground.
 pub(crate) fn resolve_scan_dirs(
     overrides: &[String],
     registry: Option<&ModelsRegistry>,
 ) -> Result<Vec<PathBuf>, String> {
-    if !overrides.is_empty() {
+    let mut dirs = if !overrides.is_empty() {
         let dirs: Vec<PathBuf> = overrides
             .iter()
             .flat_map(|s| parse_models_dirs(s))
@@ -383,13 +389,25 @@ pub(crate) fn resolve_scan_dirs(
         if dirs.is_empty() {
             return Err("models list: no existing directory among --dir values".to_string());
         }
-        return Ok(dirs);
+        dirs
+    } else {
+        let configured = registry
+            .map(|r| r.defaults.models_dir.clone())
+            .unwrap_or_default();
+        resolve_models_dirs_with_fallback(&configured).map_err(|e| {
+            format!("models list: could not resolve a model directory ({e}); pass --dir")
+        })?
+    };
+    for dir in dirs.clone() {
+        let Some(parent) = dir.parent() else {
+            continue;
+        };
+        let sibling = parent.join("vllm-models");
+        if sibling.is_dir() && !dirs.iter().any(|d| canonical(d) == canonical(&sibling)) {
+            dirs.push(sibling);
+        }
     }
-    let configured = registry
-        .map(|r| r.defaults.models_dir.clone())
-        .unwrap_or_default();
-    resolve_models_dirs_with_fallback(&configured)
-        .map_err(|e| format!("models list: could not resolve a model directory ({e}); pass --dir"))
+    Ok(dirs)
 }
 
 fn json_sibling(toml_path: &str) -> String {
@@ -463,7 +481,7 @@ pub async fn cmd_list_local(args: &[String]) -> Result<(), Box<dyn Error>> {
         );
     }
     println!();
-    println!("Register with:  ggs models register [<#|name>...]");
+    println!("Register with:  ggs models register [<#|name>...]  (or register-all for everything)");
     println!("Delete one with:  ggs models delete <#|name> [--yes]");
     Ok(())
 }
@@ -561,6 +579,158 @@ pub async fn cmd_register_local(args: &[String]) -> Result<(), Box<dyn Error>> {
         println!("  {a}");
     }
     println!("\nRestart the service or POST /v1/models/refresh to load them.");
+    Ok(())
+}
+
+// ── ggs models register-all ────────────────────────────────────────────────
+
+/// Reverse `sanitize_repo_dirname` (`org/name` → `org__name`): a local
+/// safetensors dir holding exactly one `__` was almost certainly created by
+/// `ggs models pull vllm <org>/<name>`, so the upstream repo is recoverable.
+/// Anything else (no `__`, or several) gets no repo linkage rather than a guess.
+fn reverse_repo_dirname(dirname: &str) -> Option<String> {
+    if dirname.matches("__").count() == 1 {
+        Some(dirname.replacen("__", "/", 1))
+    } else {
+        None
+    }
+}
+
+/// Alias + optional upstream repo for an unregistered safetensors directory.
+fn vllm_dir_identity(dirname: &str) -> (String, Option<String>) {
+    match reverse_repo_dirname(dirname) {
+        Some(repo) => (super::models_cmd::alias_from_repo(&repo), Some(repo)),
+        None => (super::models_cmd::alias_from_repo(dirname), None),
+    }
+}
+
+/// Register everything unregistered in the scan roots: GGUF files (same as
+/// bare `models register`) plus safetensors model directories, which plain
+/// `register` refuses. Covers the canonical GGUF dir and its `vllm-models`
+/// sibling (see `resolve_scan_dirs`).
+pub async fn cmd_register_all_local(args: &[String]) -> Result<(), Box<dyn Error>> {
+    let parsed = parse_common(args, false)?;
+    if !parsed.positional.is_empty() {
+        return Err(
+            "models register-all: takes no targets; it registers everything unregistered".into(),
+        );
+    }
+    let registry = resolve_registry(parsed.registry_path.as_deref());
+    let dirs = resolve_scan_dirs(&parsed.dir_overrides, registry.as_ref().map(|(_, r)| r))?;
+    let entries = scan_local_models(&dirs, registry.as_ref().map(|(_, r)| r));
+
+    let (path, existing) = match registry {
+        Some((p, r)) => (p, Some(r)),
+        None => (
+            parsed
+                .registry_path
+                .clone()
+                .unwrap_or_else(|| "models.toml".to_string()),
+            None,
+        ),
+    };
+    let dirs_str = super::models_registry::format_models_dirs(&dirs);
+    let mut merged = ModelsRegistry::discover_with_merge(&dirs_str, existing.as_ref())?;
+
+    // GGUF part: same known/retain logic as `models register` with no targets.
+    let known: Vec<(String, String)> = existing
+        .iter()
+        .flat_map(|r| {
+            r.models
+                .iter()
+                .map(|m| (m.alias.to_ascii_lowercase(), m.file.clone()))
+        })
+        .collect();
+    let mut added_gguf = Vec::new();
+    merged.models.retain(|m| {
+        if known.contains(&(m.alias.to_ascii_lowercase(), m.file.clone())) {
+            return true;
+        }
+        let keep = resolve_model_path(&dirs, &m.file).is_ok();
+        if keep {
+            added_gguf.push(m.alias.clone());
+        }
+        keep
+    });
+
+    // Safetensors part: one entry per unregistered model dir.
+    let mut added_vllm = Vec::new();
+    for entry in entries
+        .iter()
+        .filter(|e| e.is_safetensors_dir && e.alias.is_none())
+    {
+        let dirname = entry
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| entry.path.display().to_string());
+        let (mut alias, hf_repo) = vllm_dir_identity(&dirname);
+        let dir_str = entry.path.to_string_lossy().into_owned();
+        if let Some(existing) = merged
+            .models
+            .iter_mut()
+            .find(|e| e.alias.eq_ignore_ascii_case(&alias))
+        {
+            if existing.vllm_file.is_some() {
+                continue; // same alias already has a vLLM source
+            }
+            existing.vllm_file = Some(dir_str);
+            if existing.vllm_hf_repo.is_none() {
+                existing.vllm_hf_repo = hf_repo;
+            }
+            added_vllm.push(existing.alias.clone());
+            continue;
+        }
+        let used: std::collections::HashSet<String> =
+            merged.models.iter().map(|e| e.alias.clone()).collect();
+        if used.contains(&alias) {
+            let mut counter = 2;
+            loop {
+                let candidate = format!("{alias}-{counter}");
+                if !used.contains(&candidate) {
+                    alias = candidate;
+                    break;
+                }
+                counter += 1;
+            }
+        }
+        let name_for_kind = hf_repo.clone().unwrap_or_else(|| dirname.clone());
+        merged.models.push(super::models_registry::RegistryEntry {
+            alias: alias.clone(),
+            display_name: None,
+            kind: Some(infer_kind(&name_for_kind).to_string()),
+            enabled: true,
+            vllm_file: Some(dir_str),
+            vllm_hf_repo: hf_repo,
+            min_vram_gb: Some(((entry.size_bytes as f64 / 1_000_000_000.0).ceil() as u32).max(1)),
+            ..Default::default()
+        });
+        added_vllm.push(alias);
+    }
+
+    if added_gguf.is_empty() && added_vllm.is_empty() {
+        println!("Nothing to register.");
+        return Ok(());
+    }
+    merged.models.sort_by(|a, b| a.alias.cmp(&b.alias));
+    merged.write(&path)?;
+    let _ = merged.write_json(&json_sibling(&path));
+    if !added_gguf.is_empty() {
+        println!("Registered {} GGUF model(s) in {path}:", added_gguf.len());
+        for a in &added_gguf {
+            println!("  {a}");
+        }
+    }
+    if !added_vllm.is_empty() {
+        println!("Registered {} vLLM model(s) in {path}:", added_vllm.len());
+        for a in &added_vllm {
+            println!(
+                "  {a}  (no auto-detected quantization — `pull vllm` fills that in on download)"
+            );
+        }
+    }
+    // Best-effort live refresh (prints its own warning on failure).
+    super::models_cmd::refresh_after_pull().await;
     Ok(())
 }
 
@@ -847,6 +1017,28 @@ mod tests {
         assert_eq!(infer_kind("Qwen2.5-VL-7B"), "vision");
         assert_eq!(infer_kind("qwen2.5-coder-7b"), "coder");
         assert_eq!(infer_kind("gemma-3-12b-it"), "chat");
+    }
+
+    #[test]
+    fn reverse_repo_dirname_recovers_pull_layout_only() {
+        assert_eq!(
+            reverse_repo_dirname("Qwen__Qwen2.5-7B-Instruct"),
+            Some("Qwen/Qwen2.5-7B-Instruct".to_string())
+        );
+        // No separator, or several: no guess.
+        assert_eq!(reverse_repo_dirname("DirectModel"), None);
+        assert_eq!(reverse_repo_dirname("a__b__c"), None);
+    }
+
+    #[test]
+    fn vllm_dir_identity_prefers_recovered_repo() {
+        let (alias, repo) = vllm_dir_identity("Qwen__Qwen2.5-7B-Instruct");
+        assert_eq!(alias, "qwen2.5-7b-instruct");
+        assert_eq!(repo.as_deref(), Some("Qwen/Qwen2.5-7B-Instruct"));
+
+        let (alias, repo) = vllm_dir_identity("DirectModel");
+        assert_eq!(alias, "directmodel");
+        assert!(repo.is_none());
     }
 
     #[test]
