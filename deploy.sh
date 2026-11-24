@@ -1182,10 +1182,27 @@ fi
 # declares `rerun-if-changed=swagger-ui-overrides/`, so cargo's own
 # fingerprinting rebuilds exactly when needed. The forced clean made every
 # deploy pay for a full swagger-dependency rebuild + LTO relink.
-if [[ "$SKIP_GGS_INSTALL" == "true" && -x "$BIN" && -f "${SOURCE_DIR}/target/release/gguf-switchboard" ]]; then
-    echo "==> No changes in git pull and installed binary is cached; skipping rebuild."
+# Skip rebuild AND reinstall when git reported no changes, the installed
+# binary reports the current package version, and a cached artifact exists.
+# The version check is load-bearing: without it a stale target/ cache would
+# be re-installed over a newer binary and pinned there forever (every later
+# deploy would keep skipping the rebuild that would have fixed it).
+BIN_VERSION_OK=false
+if [[ -x "$BIN" ]]; then
+    installed_version="$("$BIN" version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)"
+    package_version="$(awk -F'"' '/^version[[:space:]]*=/ { print $2; exit }' "$SOURCE_DIR/Cargo.toml")"
+    if [[ -n "${installed_version:-}" && "${installed_version:-}" == "${package_version:-}" ]]; then
+        BIN_VERSION_OK=true
+    fi
+fi
+if [[ "$SKIP_GGS_INSTALL" == "true" && "$BIN_VERSION_OK" == "true" && -f "${SOURCE_DIR}/target/release/gguf-switchboard" ]]; then
+    echo "==> No changes in git pull and installed binary ($installed_version) is current; skipping rebuild."
 else
     cargo build --release
+    echo "==> Installing binary → $BIN..."
+    sudo install -o root -g root -m 755 \
+        "${SOURCE_DIR}/target/release/gguf-switchboard" \
+        "$BIN"
 fi
 
 sync_project_to_install "$SOURCE_DIR"
@@ -1210,11 +1227,6 @@ else
     echo "==> Skipping vLLM setup (--skip-vllm)."
     VLLM_DEPLOY_STATUS="skipped; $VLLM_RELEASE_CHANNEL"
 fi
-
-echo "==> Installing binary → $BIN..."
-sudo install -o root -g root -m 755 \
-    "${SOURCE_DIR}/target/release/gguf-switchboard" \
-    "$BIN"
 
 if [[ "$MODELS_CREATED" == "true" ]] || ! sudo test -f "$MODELS_FILE"; then
     generate_models_toml true
