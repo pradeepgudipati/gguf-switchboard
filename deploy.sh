@@ -1086,7 +1086,7 @@ maybe_migrate_legacy_etc_config
 maybe_migrate_legacy_models "$MIGRATE_MODELS"
 
 if command -v apt-get >/dev/null 2>&1; then
-    APT_PKGS=(libssl-dev pkg-config build-essential cmake curl git jq aria2 patchelf)
+    APT_PKGS=(libssl-dev pkg-config build-essential cmake curl git jq aria2 patchelf ccache)
     NEED_APT=false
     for pkg in "${APT_PKGS[@]}"; do
         if ! dpkg -s "$pkg" >/dev/null 2>&1; then
@@ -1177,8 +1177,16 @@ if [[ -d "${SOURCE_DIR}/target" ]]; then
         sudo rm -rf "${SOURCE_DIR}/target"
     fi
 fi
-cargo clean -p utoipa-swagger-ui --release 2>/dev/null || true
-cargo build --release
+# NOTE: no `cargo clean -p utoipa-swagger-ui` here on purpose. Nothing
+# consumes SWAGGER_UI_OVERWRITE_FOLDER at build time and build.rs already
+# declares `rerun-if-changed=swagger-ui-overrides/`, so cargo's own
+# fingerprinting rebuilds exactly when needed. The forced clean made every
+# deploy pay for a full swagger-dependency rebuild + LTO relink.
+if [[ "$SKIP_GGS_INSTALL" == "true" && -x "$BIN" && -f "${SOURCE_DIR}/target/release/gguf-switchboard" ]]; then
+    echo "==> No changes in git pull and installed binary is cached; skipping rebuild."
+else
+    cargo build --release
+fi
 
 sync_project_to_install "$SOURCE_DIR"
 write_system_config

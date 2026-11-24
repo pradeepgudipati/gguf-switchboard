@@ -179,6 +179,13 @@ nvcc --version
 nvidia-smi
 
 echo "==> Configuring CUDA build"
+# ccache turns tag-to-tag llama.cpp rebuilds from from-scratch into
+# incremental (only changed translation units recompile). deploy.sh installs
+# it; standalone runs without it simply don't get the cache. An explicit
+# GGML_CCACHE=0 opts out.
+if command -v ccache >/dev/null 2>&1; then
+  export GGML_CCACHE="${GGML_CCACHE:-ON}"
+fi
 # A previous `sudo cmake --build` (or sudo invocation of this script) leaves a
 # root-owned build/ tree that a plain `rm -rf` cannot remove (Permission
 # denied). Retry with sudo so a normal-user re-run self-heals instead of
