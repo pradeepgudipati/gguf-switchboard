@@ -16,6 +16,9 @@ target
 # Benchmark scratch dir (scripts/bench-vs-llama-swap.sh): downloaded binaries + results
 .bench/
 
+# Release binaries staged by scripts/release.sh (uploaded to GH/Forgejo Releases, never committed)
+/dist/
+
 # Runtime config created from *.example.toml by deploy / local setup (not committed)
 /config.toml
 /models.toml
