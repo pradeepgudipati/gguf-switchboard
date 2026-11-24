@@ -1,14 +1,17 @@
-//! CLI handlers for `gguf-switchboard models {search,files,pull}`.
+//! CLI handlers for `gguf-switchboard models {search,files,pull,check-updates,update}`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
+use std::io::IsTerminal as _;
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 
 use futures::{StreamExt, stream};
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 
 use super::hf_download::{self, HfTreeEntry, format_bytes};
+use super::models_local::{resolve_registry, resolve_scan_dirs, resolve_target, scan_local_models};
 use super::models_registry::{
     ModelsRegistry, RegistryEntry, alias_from_filename, validate_gguf_model,
 };
@@ -1352,6 +1355,938 @@ async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     Ok(())
 }
 
+// ── models check-updates / update ────────────────────────────────────────────
+
+/// Upstream comparison result for one on-disk model.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum UpdateStatus {
+    UpToDate,
+    UpdateAvailable,
+    NewFiles,
+    MissingRemote,
+    SkippedNoRepo,
+    Error,
+}
+
+impl UpdateStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::UpToDate => "up-to-date",
+            Self::UpdateAvailable => "update-available",
+            Self::NewFiles => "new-files",
+            Self::MissingRemote => "missing-remote",
+            Self::SkippedNoRepo => "skipped-no-repo",
+            Self::Error => "error",
+        }
+    }
+}
+
+struct UpdateRow {
+    index: usize,
+    alias: String,
+    path: PathBuf,
+    local_bytes: u64,
+    remote_bytes: Option<u64>,
+    status: UpdateStatus,
+    detail: String,
+    repo: Option<String>,
+    remote_file: Option<String>,
+    is_safetensors_dir: bool,
+}
+
+struct CheckUpdatesOptions {
+    dir_overrides: Vec<String>,
+    registry_path: Option<String>,
+    json: bool,
+    verify: bool,
+    target: Option<String>,
+}
+
+fn parse_check_updates_args(args: &[String]) -> Result<CheckUpdatesOptions, String> {
+    let mut out = CheckUpdatesOptions {
+        dir_overrides: Vec::new(),
+        registry_path: None,
+        json: false,
+        verify: false,
+        target: None,
+    };
+    let mut i = 1; // args[0] is "check-updates"
+    while i < args.len() {
+        match args[i].as_str() {
+            "--dir" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| "models check-updates: missing value for --dir".to_string())?;
+                out.dir_overrides.push(v.clone());
+                i += 2;
+            }
+            "--registry" => {
+                let v = args.get(i + 1).ok_or_else(|| {
+                    "models check-updates: missing value for --registry".to_string()
+                })?;
+                out.registry_path = Some(v.clone());
+                i += 2;
+            }
+            "--json" => {
+                out.json = true;
+                i += 1;
+            }
+            "--verify" => {
+                out.verify = true;
+                i += 1;
+            }
+            flag if flag.starts_with('-') => {
+                return Err(format!("models check-updates: unknown flag '{flag}'"));
+            }
+            other => {
+                if out.target.is_some() {
+                    return Err("models check-updates: expected at most one target".to_string());
+                }
+                out.target = Some(other.to_string());
+                i += 1;
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Normalize an HF LFS oid (`sha256:<hex>` or bare hex) for comparison.
+fn normalize_oid(oid: &str) -> String {
+    oid.trim()
+        .strip_prefix("sha256:")
+        .unwrap_or_else(|| oid.trim())
+        .trim()
+        .to_ascii_lowercase()
+}
+
+/// Stream a local file through SHA-256 without loading it into memory.
+fn sha256_hex_file(path: &Path) -> Result<String, String> {
+    use std::io::Read as _;
+    let file =
+        std::fs::File::open(path).map_err(|e| format!("cannot read '{}': {e}", path.display()))?;
+    let mut reader = std::io::BufReader::new(file);
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 1024 * 1024];
+    loop {
+        let read = reader
+            .read(&mut buf)
+            .map_err(|e| format!("cannot hash '{}': {e}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+    }
+    Ok(hasher
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>())
+}
+
+fn remote_oid(entry: &HfTreeEntry) -> Option<String> {
+    entry
+        .lfs
+        .as_ref()
+        .and_then(|lfs| lfs.oid.as_deref())
+        .map(normalize_oid)
+        .filter(|oid| !oid.is_empty())
+}
+
+/// Classify one GGUF file against its remote tree entry.
+///
+/// Size mismatch is always an update. When sizes match, only `--verify`
+/// (local SHA-256 vs the remote LFS oid) can catch a same-size content
+/// change; without it the file reports up-to-date.
+fn classify_gguf_update(
+    local_bytes: u64,
+    local_path: &Path,
+    remote: Option<&HfTreeEntry>,
+    verify: bool,
+) -> (UpdateStatus, Option<u64>, String) {
+    let Some(remote) = remote else {
+        return (
+            UpdateStatus::MissingRemote,
+            None,
+            "local file no longer exists upstream".to_string(),
+        );
+    };
+    if remote.size != local_bytes {
+        return (
+            UpdateStatus::UpdateAvailable,
+            Some(remote.size),
+            format!(
+                "size changed: {} -> {}",
+                format_bytes(local_bytes),
+                format_bytes(remote.size)
+            ),
+        );
+    }
+    if verify {
+        match (remote_oid(remote), sha256_hex_file(local_path)) {
+            (Some(expected), Ok(actual)) if expected != actual => {
+                return (
+                    UpdateStatus::UpdateAvailable,
+                    Some(remote.size),
+                    "content hash changed (same size)".to_string(),
+                );
+            }
+            (None, _) => {
+                return (
+                    UpdateStatus::UpToDate,
+                    Some(remote.size),
+                    "same size (no upstream checksum to verify)".to_string(),
+                );
+            }
+            (Some(_), Err(reason)) => {
+                return (UpdateStatus::Error, Some(remote.size), reason);
+            }
+            _ => {}
+        }
+    }
+    (
+        UpdateStatus::UpToDate,
+        Some(remote.size),
+        "matches upstream".to_string(),
+    )
+}
+
+fn gguf_basename(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// `ggs models check-updates [--dir PATH] [--registry FILE] [--json] [--verify] [target]`
+pub async fn cmd_check_updates(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let opts =
+        parse_check_updates_args(args).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let rows = collect_update_rows(
+        &opts.dir_overrides,
+        opts.registry_path.as_deref(),
+        opts.target.as_deref(),
+        opts.verify,
+    )
+    .await?;
+
+    if opts.json {
+        let arr: Vec<_> = rows
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "index": r.index,
+                    "alias": r.alias,
+                    "path": r.path.to_string_lossy(),
+                    "local_bytes": r.local_bytes,
+                    "remote_bytes": r.remote_bytes,
+                    "status": r.status.as_str(),
+                    "detail": r.detail,
+                    "repo": r.repo,
+                    "remote_file": r.remote_file,
+                    "safetensors_dir": r.is_safetensors_dir,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&arr)?);
+        return Ok(());
+    }
+
+    if rows.is_empty() {
+        println!("No GGUF files or safetensors model directories found.");
+        return Ok(());
+    }
+
+    println!();
+    println!(
+        "  {:>3}  {:<28}  {:<16}  {:>10}  {:>10}  DETAIL",
+        "#", "ALIAS / NAME", "STATUS", "LOCAL", "REMOTE"
+    );
+    for r in &rows {
+        let remote = r
+            .remote_bytes
+            .map(format_bytes)
+            .unwrap_or_else(|| "-".to_string());
+        println!(
+            "  {:>3}  {:<28}  {:<16}  {:>10}  {:>10}  {}",
+            r.index,
+            truncate_update_name(&r.alias, 28),
+            r.status.as_str(),
+            format_bytes(r.local_bytes),
+            remote,
+            r.detail
+        );
+    }
+    println!();
+    let updates = rows
+        .iter()
+        .filter(|r| r.status == UpdateStatus::UpdateAvailable)
+        .count();
+    let up_to_date = rows
+        .iter()
+        .filter(|r| r.status == UpdateStatus::UpToDate || r.status == UpdateStatus::NewFiles)
+        .count();
+    let skipped = rows
+        .iter()
+        .filter(|r| {
+            r.status == UpdateStatus::SkippedNoRepo
+                || r.status == UpdateStatus::MissingRemote
+                || r.status == UpdateStatus::Error
+        })
+        .count();
+    println!("{updates} update(s) available, {up_to_date} up-to-date, {skipped} skipped/error.");
+    if updates > 0 {
+        println!("Update with:  ggs models update <#|name|all> [--yes]");
+    }
+    Ok(())
+}
+
+fn truncate_update_name(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let head: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{head}…")
+    }
+}
+
+/// Shared scan + upstream comparison used by `check-updates` and `update ... all`.
+async fn collect_update_rows(
+    dir_overrides: &[String],
+    registry_path: Option<&str>,
+    target: Option<&str>,
+    verify: bool,
+) -> Result<Vec<UpdateRow>, Box<dyn std::error::Error>> {
+    let registry = resolve_registry(registry_path);
+    let dirs = resolve_scan_dirs(dir_overrides, registry.as_ref().map(|(_, r)| r))
+        .map_err(|e| e.replace("models list:", "models check-updates:"))?;
+    let entries = scan_local_models(&dirs, registry.as_ref().map(|(_, r)| r));
+
+    let wanted: Vec<super::models_local::LocalModelEntry> = match target {
+        Some(t) => vec![
+            resolve_target(t, &entries)
+                .map_err(|e| e.replace("models delete", "models check-updates"))?
+                .clone(),
+        ],
+        None => entries,
+    };
+
+    // Alias -> (hf_repo, vllm_hf_repo).
+    let mut repos: HashMap<String, (Option<String>, Option<String>)> = HashMap::new();
+    if let Some((_, ref reg)) = registry {
+        for e in &reg.models {
+            repos.insert(e.alias.clone(), (e.hf_repo.clone(), e.vllm_hf_repo.clone()));
+        }
+    }
+
+    // Distinct upstream repos to fetch once.
+    let mut fetch_jobs: Vec<(String, bool)> = Vec::new(); // (repo, full_tree)
+    for entry in &wanted {
+        let (hf_repo, vllm_repo) = entry
+            .alias
+            .as_deref()
+            .and_then(|a| repos.get(a))
+            .map(|(h, v)| (h.clone(), v.clone()))
+            .unwrap_or((None, None));
+        if entry.is_safetensors_dir {
+            if let Some(repo) = vllm_repo
+                && !fetch_jobs.iter().any(|(r, full)| r == &repo && *full)
+            {
+                fetch_jobs.push((repo, true));
+            }
+        } else if let Some(repo) = hf_repo
+            && !fetch_jobs.iter().any(|(r, _)| r == &repo)
+        {
+            fetch_jobs.push((repo, false));
+        }
+    }
+
+    let client = hf_download::build_hf_client().await?;
+    let trees: HashMap<String, Result<Vec<HfTreeEntry>, String>> =
+        stream::iter(fetch_jobs.into_iter().map(|(repo, full)| {
+            let client = client.clone();
+            async move {
+                let result = if full {
+                    hf_download::fetch_repo_tree_all(&client, &repo).await
+                } else {
+                    hf_download::fetch_repo_tree(&client, &repo).await
+                }
+                .map_err(|e| e.to_string());
+                (repo, result)
+            }
+        }))
+        .buffer_unordered(8)
+        .collect()
+        .await;
+
+    // Local basenames per repo, for new-file detection.
+    let mut local_names: HashSet<String> = HashSet::new();
+    for e in &wanted {
+        if !e.is_safetensors_dir {
+            local_names.insert(gguf_basename(&e.path).to_ascii_lowercase());
+        }
+    }
+
+    let mut rows = Vec::with_capacity(wanted.len());
+    for entry in wanted {
+        let alias = entry
+            .alias
+            .clone()
+            .unwrap_or_else(|| "(unregistered)".to_string());
+        let (hf_repo, vllm_repo) = entry
+            .alias
+            .as_deref()
+            .and_then(|a| repos.get(a))
+            .map(|(h, v)| (h.clone(), v.clone()))
+            .unwrap_or((None, None));
+
+        if entry.is_safetensors_dir {
+            let Some(repo) = vllm_repo else {
+                rows.push(UpdateRow {
+                    index: entry.index,
+                    alias,
+                    path: entry.path.clone(),
+                    local_bytes: entry.size_bytes,
+                    remote_bytes: None,
+                    status: UpdateStatus::SkippedNoRepo,
+                    detail: "no vllm_hf_repo recorded; cannot check".to_string(),
+                    repo: None,
+                    remote_file: None,
+                    is_safetensors_dir: true,
+                });
+                continue;
+            };
+            match trees.get(&repo) {
+                Some(Ok(tree)) => {
+                    let serving: Vec<&HfTreeEntry> = tree
+                        .iter()
+                        .filter(|e| super::vllm_meta::is_vllm_serving_file(&e.path))
+                        .collect();
+                    let mut changed = Vec::new();
+                    let mut total_remote: u64 = 0;
+                    for remote in &serving {
+                        total_remote += remote.size;
+                        let name = gguf_basename(Path::new(&remote.path));
+                        let local = entry.path.join(&name);
+                        let local_size = std::fs::metadata(&local).map(|m| m.len());
+                        match local_size {
+                            Ok(size) if size == remote.size => {
+                                if verify
+                                    && let Some(expected) = remote_oid(remote)
+                                    && let Ok(actual) = sha256_hex_file(&local)
+                                    && expected != actual
+                                {
+                                    changed.push(format!("{name} (hash changed)"));
+                                }
+                            }
+                            Ok(size) => changed.push(format!(
+                                "{name} ({} -> {})",
+                                format_bytes(size),
+                                format_bytes(remote.size)
+                            )),
+                            Err(_) => changed.push(format!("{name} (missing locally)")),
+                        }
+                    }
+                    if changed.is_empty() {
+                        rows.push(UpdateRow {
+                            index: entry.index,
+                            alias,
+                            path: entry.path.clone(),
+                            local_bytes: entry.size_bytes,
+                            remote_bytes: Some(total_remote),
+                            status: UpdateStatus::UpToDate,
+                            detail: format!("{} file(s) match upstream", serving.len()),
+                            repo: Some(repo),
+                            remote_file: None,
+                            is_safetensors_dir: true,
+                        });
+                    } else {
+                        rows.push(UpdateRow {
+                            index: entry.index,
+                            alias,
+                            path: entry.path.clone(),
+                            local_bytes: entry.size_bytes,
+                            remote_bytes: Some(total_remote),
+                            status: UpdateStatus::UpdateAvailable,
+                            detail: format!("{} changed: {}", changed.len(), changed.join(", ")),
+                            repo: Some(repo),
+                            remote_file: None,
+                            is_safetensors_dir: true,
+                        });
+                    }
+                }
+                Some(Err(reason)) => rows.push(UpdateRow {
+                    index: entry.index,
+                    alias,
+                    path: entry.path.clone(),
+                    local_bytes: entry.size_bytes,
+                    remote_bytes: None,
+                    status: UpdateStatus::Error,
+                    detail: reason.clone(),
+                    repo: Some(repo),
+                    remote_file: None,
+                    is_safetensors_dir: true,
+                }),
+                None => rows.push(UpdateRow {
+                    index: entry.index,
+                    alias,
+                    path: entry.path.clone(),
+                    local_bytes: entry.size_bytes,
+                    remote_bytes: None,
+                    status: UpdateStatus::Error,
+                    detail: "upstream fetch missing".to_string(),
+                    repo: Some(repo),
+                    remote_file: None,
+                    is_safetensors_dir: true,
+                }),
+            }
+            continue;
+        }
+
+        let Some(repo) = hf_repo else {
+            rows.push(UpdateRow {
+                index: entry.index,
+                alias,
+                path: entry.path.clone(),
+                local_bytes: entry.size_bytes,
+                remote_bytes: None,
+                status: UpdateStatus::SkippedNoRepo,
+                detail: "no hf_repo recorded; cannot check".to_string(),
+                repo: None,
+                remote_file: None,
+                is_safetensors_dir: false,
+            });
+            continue;
+        };
+        let name = gguf_basename(&entry.path);
+        let remote = trees
+            .get(&repo)
+            .and_then(|r| r.as_ref().ok())
+            .and_then(|tree| {
+                tree.iter()
+                    .find(|e| gguf_basename(Path::new(&e.path)).eq_ignore_ascii_case(&name))
+            });
+        match trees.get(&repo) {
+            Some(Err(reason)) => rows.push(UpdateRow {
+                index: entry.index,
+                alias,
+                path: entry.path.clone(),
+                local_bytes: entry.size_bytes,
+                remote_bytes: None,
+                status: UpdateStatus::Error,
+                detail: reason.clone(),
+                repo: Some(repo),
+                remote_file: Some(name),
+                is_safetensors_dir: false,
+            }),
+            _ => {
+                let (status, remote_bytes, mut detail) =
+                    classify_gguf_update(entry.size_bytes, &entry.path, remote, verify);
+                // New-file hint: same file matches but the repo ships other
+                // quants not present locally.
+                if status == UpdateStatus::UpToDate
+                    && let Some(Ok(tree)) = trees.get(&repo)
+                {
+                    let others = tree
+                        .iter()
+                        .filter(|e| {
+                            super::models_local::is_model_gguf_public(&e.path)
+                                && !local_names.contains(
+                                    &gguf_basename(Path::new(&e.path)).to_ascii_lowercase(),
+                                )
+                        })
+                        .count();
+                    if others > 0 {
+                        detail =
+                            format!("matches upstream; {others} other file(s) in repo not on disk");
+                        rows.push(UpdateRow {
+                            index: entry.index,
+                            alias,
+                            path: entry.path.clone(),
+                            local_bytes: entry.size_bytes,
+                            remote_bytes,
+                            status: UpdateStatus::NewFiles,
+                            detail,
+                            repo: Some(repo),
+                            remote_file: Some(name),
+                            is_safetensors_dir: false,
+                        });
+                        continue;
+                    }
+                }
+                rows.push(UpdateRow {
+                    index: entry.index,
+                    alias,
+                    path: entry.path.clone(),
+                    local_bytes: entry.size_bytes,
+                    remote_bytes,
+                    status,
+                    detail,
+                    repo: Some(repo),
+                    remote_file: Some(name),
+                    is_safetensors_dir: false,
+                });
+            }
+        }
+    }
+    rows.sort_by_key(|r| r.index);
+    Ok(rows)
+}
+
+struct UpdateOptions {
+    dir_overrides: Vec<String>,
+    registry_path: Option<String>,
+    connections: u16,
+    no_bench: bool,
+    yes: bool,
+    target: String,
+}
+
+fn parse_update_args(args: &[String]) -> Result<UpdateOptions, String> {
+    let mut out = UpdateOptions {
+        dir_overrides: Vec::new(),
+        registry_path: None,
+        connections: 8,
+        no_bench: false,
+        yes: false,
+        target: String::new(),
+    };
+    let mut i = 1; // args[0] is "update"
+    while i < args.len() {
+        match args[i].as_str() {
+            "--dir" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| "models update: missing value for --dir".to_string())?;
+                out.dir_overrides.push(v.clone());
+                i += 2;
+            }
+            "--registry" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| "models update: missing value for --registry".to_string())?;
+                out.registry_path = Some(v.clone());
+                i += 2;
+            }
+            "--connections" => {
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| "models update: missing value for --connections".to_string())?;
+                out.connections = parse_connections(v).map_err(str::to_string)?;
+                i += 2;
+            }
+            "--no-bench" => {
+                out.no_bench = true;
+                i += 1;
+            }
+            "--yes" | "-y" => {
+                out.yes = true;
+                i += 1;
+            }
+            flag if flag.starts_with('-') => {
+                return Err(format!("models update: unknown flag '{flag}'"));
+            }
+            other => {
+                if !out.target.is_empty() {
+                    return Err("models update: expected exactly one target".to_string());
+                }
+                out.target = other.to_string();
+                i += 1;
+            }
+        }
+    }
+    if out.target.is_empty() {
+        return Err(
+            "models update: missing target — pass a name, the number from `ggs models list`, or `all`"
+                .to_string(),
+        );
+    }
+    Ok(out)
+}
+
+fn confirm_update(count: usize, yes: bool) -> Result<bool, String> {
+    if yes {
+        return Ok(true);
+    }
+    if !std::io::stdin().is_terminal() {
+        return Err(
+            "models update: refusing to replace files without --yes in a non-interactive shell"
+                .to_string(),
+        );
+    }
+    let noun = if count == 1 {
+        "this file"
+    } else {
+        "these files"
+    };
+    print!("Replace {noun} with the upstream version? [y/N] ");
+    std::io::Write::flush(&mut std::io::stdout()).map_err(|e| e.to_string())?;
+    let mut line = String::new();
+    std::io::stdin()
+        .read_line(&mut line)
+        .map_err(|e| e.to_string())?;
+    Ok(matches!(
+        line.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
+}
+
+/// `ggs models update <name|#|all> [--yes] [--connections N] [--no-bench]
+/// [--dir PATH] [--registry FILE]`
+pub async fn cmd_update(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    let opts = parse_update_args(args).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
+    let update_all = opts.target.eq_ignore_ascii_case("all");
+
+    // Resolve the target set. `all` reuses the check-updates comparison so a
+    // single invocation never mixes stale decisions across repos.
+    let targets: Vec<UpdateRow> = if update_all {
+        collect_update_rows(
+            &opts.dir_overrides,
+            opts.registry_path.as_deref(),
+            None,
+            false,
+        )
+        .await?
+        .into_iter()
+        .filter(|r| r.status == UpdateStatus::UpdateAvailable)
+        .collect()
+    } else {
+        collect_update_rows(
+            &opts.dir_overrides,
+            opts.registry_path.as_deref(),
+            Some(opts.target.as_str()),
+            false,
+        )
+        .await?
+    };
+
+    if targets.is_empty() {
+        if update_all {
+            println!("All models are up to date.");
+            return Ok(());
+        }
+        return Err("models update: no matching model found".into());
+    }
+    if update_all {
+        println!("Update available for {} model(s):", targets.len());
+        for t in &targets {
+            println!("  #{} {} ({})", t.index, t.alias, t.detail);
+        }
+    } else {
+        let t = &targets[0];
+        if t.status == UpdateStatus::SkippedNoRepo {
+            return Err(format!(
+                "models update: '{}' has no upstream repo recorded (hf_repo/vllm_hf_repo); cannot update",
+                t.alias
+            )
+            .into());
+        }
+        if t.status == UpdateStatus::MissingRemote {
+            return Err(format!(
+                "models update: '{}' no longer exists upstream; not updating",
+                t.alias
+            )
+            .into());
+        }
+        if t.status == UpdateStatus::Error {
+            return Err(format!("models update: upstream check failed: {}", t.detail).into());
+        }
+        if t.status == UpdateStatus::UpToDate || t.status == UpdateStatus::NewFiles {
+            println!("'{}' is already up to date ({}).", t.alias, t.detail);
+            return Ok(());
+        }
+    }
+
+    if !confirm_update(targets.len(), opts.yes)
+        .map_err(|e| -> Box<dyn std::error::Error> { e.into() })?
+    {
+        println!("Aborted; nothing was updated.");
+        return Ok(());
+    }
+
+    let client = hf_download::build_hf_client().await?;
+    let mut updated = 0usize;
+    for t in &targets {
+        let repo = t
+            .repo
+            .clone()
+            .ok_or_else(|| -> Box<dyn std::error::Error> {
+                format!("models update: '{}' has no upstream repo recorded", t.alias).into()
+            })?;
+        if t.is_safetensors_dir {
+            update_vllm_dir(&client, t, &repo, opts.connections).await?;
+        } else {
+            update_gguf_file(&client, t, &repo, opts.connections).await?;
+        }
+        updated += 1;
+        // Refresh + bench for single GGUF targets, like `models pull`.
+        if !update_all && !t.is_safetensors_dir {
+            let kind = infer_kind_from_filename(t.remote_file.as_deref().unwrap_or_default());
+            let refreshed = refresh_after_pull().await;
+            maybe_bench_after_pull(&t.alias, &kind, opts.no_bench, refreshed).await;
+        }
+    }
+    if update_all {
+        refresh_after_pull().await;
+    }
+    println!("Updated {updated} model(s).");
+    Ok(())
+}
+
+/// Replace one GGUF file with its upstream entry, atomically.
+///
+/// Downloads into a staging directory on the same filesystem, validates the
+/// GGUF header, then renames over the original — the old file stays intact
+/// until the new one is known good.
+async fn update_gguf_file(
+    client: &reqwest::Client,
+    target: &UpdateRow,
+    repo: &str,
+    connections: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let entries = hf_download::fetch_repo_tree(client, repo).await?;
+    let name = target
+        .remote_file
+        .clone()
+        .unwrap_or_else(|| gguf_basename(&target.path));
+    let remote = entries
+        .iter()
+        .find(|e| gguf_basename(Path::new(&e.path)).eq_ignore_ascii_case(&name))
+        .ok_or_else(|| format!("'{repo}' no longer contains '{name}'; not updating"))?;
+    let parent = target
+        .path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let staging = parent.join(format!(".ggs-update-{}", std::process::id()));
+    std::fs::create_dir_all(&staging)?;
+    let staged = staging.join(&name);
+    // A stale staged file from an aborted run must not be resumed into.
+    let _ = std::fs::remove_file(&staged);
+    let downloaded =
+        hf_download::download_file_auto(client, repo, remote, &staging, connections).await?;
+    if let Err(reason) = validate_gguf_model(&downloaded) {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(format!("Downloaded file is not a valid GGUF model: {reason}").into());
+    }
+    // Persist the rename first so a registry-write failure never loses data.
+    std::fs::rename(&downloaded, &target.path)?;
+    let _ = std::fs::remove_dir_all(&staging);
+
+    let new_bytes = std::fs::metadata(&target.path)
+        .map(|m| m.len())
+        .unwrap_or(remote.size);
+    println!(
+        "✓ Updated {}: {} -> {}",
+        target.alias,
+        format_bytes(target.local_bytes),
+        format_bytes(new_bytes)
+    );
+    update_registry_size(&target.alias, &target.path, new_bytes);
+    Ok(())
+}
+
+/// Re-download the changed shards of one safetensors directory.
+async fn update_vllm_dir(
+    client: &reqwest::Client,
+    target: &UpdateRow,
+    repo: &str,
+    connections: u16,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let entries = hf_download::fetch_repo_tree_all(client, repo).await?;
+    let serving: Vec<&HfTreeEntry> = entries
+        .iter()
+        .filter(|e| super::vllm_meta::is_vllm_serving_file(&e.path))
+        .collect();
+    if serving.is_empty() {
+        return Err(format!("'{repo}' has no servable safetensors files; not updating").into());
+    }
+    let mut refreshed = 0usize;
+    for remote in serving {
+        let name = gguf_basename(Path::new(&remote.path));
+        let local = target.path.join(&name);
+        let stale = match std::fs::metadata(&local).map(|m| m.len()) {
+            Ok(size) if size != remote.size => true,
+            Ok(_) => match (remote_oid(remote), sha256_hex_file(&local)) {
+                (Some(expected), Ok(actual)) => expected != actual,
+                _ => false,
+            },
+            Err(_) => true,
+        };
+        if !stale {
+            continue;
+        }
+        // Remove first: the native downloader resumes partial files, which
+        // would corrupt a same-size content change or a shrunk shard.
+        let _ = std::fs::remove_file(&local);
+        hf_download::download_file_auto(client, repo, remote, &target.path, connections).await?;
+        refreshed += 1;
+    }
+    println!("✓ Updated {}: {refreshed} file(s) refreshed", target.alias);
+    let weights_mb: u64 = std::fs::read_dir(&target.path)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.ends_with(".safetensors") {
+                e.metadata().ok().map(|m| m.len())
+            } else {
+                None
+            }
+        })
+        .sum::<u64>()
+        / (1024 * 1024);
+    let new_gb = ((weights_mb as f64 / 1024.0).ceil() as u32).max(1);
+    update_registry_vram(&target.alias, new_gb);
+    Ok(())
+}
+
+/// Best-effort registry size update after a GGUF replace. Warns instead of
+/// failing the update when the registry cannot be read or written.
+fn update_registry_size(alias: &str, local_path: &Path, new_bytes: u64) {
+    let Some((path, mut registry)) = resolve_registry(None) else {
+        return;
+    };
+    let file_key = gguf_basename(local_path).to_ascii_lowercase();
+    let mut changed = false;
+    for entry in &mut registry.models {
+        if !entry.alias.eq_ignore_ascii_case(alias) {
+            continue;
+        }
+        let registered = Path::new(&entry.file)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if registered != file_key && !entry.file.is_empty() {
+            continue;
+        }
+        let new_gb = ((new_bytes as f64 / 1_000_000_000.0).ceil() as u32).max(1);
+        if entry.min_vram_gb != Some(new_gb) {
+            entry.min_vram_gb = Some(new_gb);
+            changed = true;
+        }
+    }
+    if changed && let Err(e) = registry.write(&path) {
+        eprintln!("Warning: updated file but could not write registry '{path}': {e}");
+    }
+}
+
+/// Best-effort vLLM VRAM update after a shard refresh.
+fn update_registry_vram(alias: &str, new_gb: u32) {
+    let Some((path, mut registry)) = resolve_registry(None) else {
+        return;
+    };
+    let mut changed = false;
+    for entry in &mut registry.models {
+        if entry.alias.eq_ignore_ascii_case(alias) && entry.min_vram_gb != Some(new_gb) {
+            entry.min_vram_gb = Some(new_gb);
+            changed = true;
+        }
+    }
+    if changed && let Err(e) = registry.write(&path) {
+        eprintln!("Warning: updated files but could not write registry '{path}': {e}");
+    }
+}
+
 /// Shift-and-fetch the value following a flag, advancing `i` by 2. Errors
 /// with a `models pull vllm: missing value for <flag>` message when absent.
 fn require_val(args: &[String], i: &mut usize, flag: &str) -> Result<String, String> {
@@ -2310,11 +3245,12 @@ fn dedupe_alias(alias: &str, used: &HashSet<String>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelOption, QuantRecommendation, SearchAssessment, assess_repository, balanced_quant,
-        chat_url_from_config, complete_model_options, extract_quant, extract_speed_stats,
-        format_hardware_summary, is_standalone_model, is_supported, parse_connections,
-        refresh_url_from_config, render_search_table, resolve_vllm_registry_path,
-        sample_pull_command, select_quant_entry,
+        ModelOption, QuantRecommendation, SearchAssessment, UpdateStatus, assess_repository,
+        balanced_quant, chat_url_from_config, classify_gguf_update, complete_model_options,
+        extract_quant, extract_speed_stats, format_hardware_summary, is_standalone_model,
+        is_supported, normalize_oid, parse_check_updates_args, parse_connections,
+        parse_update_args, refresh_url_from_config, render_search_table,
+        resolve_vllm_registry_path, sample_pull_command, select_quant_entry, sha256_hex_file,
     };
     use crate::config::hf_download::HfTreeEntry;
     use crate::quant_profile;
@@ -2988,5 +3924,121 @@ mod tests {
         assert!(stats.from_timings);
         assert!((stats.prompt_tps - 400.0).abs() < 0.01);
         assert!((stats.gen_tps - 50.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn normalize_oid_strips_sha256_prefix_and_lowercases() {
+        assert_eq!(normalize_oid("sha256:ABC123"), "abc123");
+        assert_eq!(normalize_oid("ABC123"), "abc123");
+        assert_eq!(normalize_oid("  sha256:def  "), "def");
+    }
+
+    #[test]
+    fn sha256_hex_file_hashes_without_loading() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.bin");
+        std::fs::write(&path, b"gguf-update-check").unwrap();
+        let hex = sha256_hex_file(&path).expect("hash");
+        assert_eq!(hex.len(), 64);
+        // Same content hashes the same; different content differs.
+        let other = dir.path().join("other.bin");
+        std::fs::write(&other, b"gguf-update-check!").unwrap();
+        assert_ne!(hex, sha256_hex_file(&other).expect("hash"));
+        assert!(sha256_hex_file(&dir.path().join("missing.bin")).is_err());
+    }
+
+    #[test]
+    fn classify_gguf_update_detects_size_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("model-Q4_K_M.gguf");
+        std::fs::write(&local, vec![0u8; 1024]).unwrap();
+
+        let smaller = tree_entry("model-Q4_K_M.gguf", 512);
+        let (status, remote, _) = classify_gguf_update(1024, &local, Some(&smaller), false);
+        assert_eq!(status, UpdateStatus::UpdateAvailable);
+        assert_eq!(remote, Some(512));
+
+        let same = tree_entry("model-Q4_K_M.gguf", 1024);
+        let (status, _, _) = classify_gguf_update(1024, &local, Some(&same), false);
+        assert_eq!(status, UpdateStatus::UpToDate);
+
+        let (status, remote, _) = classify_gguf_update(1024, &local, None, false);
+        assert_eq!(status, UpdateStatus::MissingRemote);
+        assert_eq!(remote, None);
+    }
+
+    #[test]
+    fn classify_gguf_update_verify_catches_same_size_content_change() {
+        use crate::config::hf_download::HfLfsMeta;
+
+        let dir = tempfile::tempdir().unwrap();
+        let local = dir.path().join("model-Q4_K_M.gguf");
+        std::fs::write(&local, b"local-bytes!").unwrap();
+        let actual = sha256_hex_file(&local).expect("hash");
+
+        // Wrong oid with the same size is an update only under --verify.
+        let changed = HfTreeEntry {
+            r#type: "file".to_string(),
+            path: "model-Q4_K_M.gguf".to_string(),
+            size: 12,
+            lfs: Some(HfLfsMeta {
+                oid: Some(format!("sha256:{}", "0".repeat(64))),
+                size: Some(12),
+            }),
+        };
+        let (status, _, _) = classify_gguf_update(12, &local, Some(&changed), false);
+        assert_eq!(status, UpdateStatus::UpToDate);
+        let (status, _, detail) = classify_gguf_update(12, &local, Some(&changed), true);
+        assert_eq!(status, UpdateStatus::UpdateAvailable);
+        assert!(detail.contains("hash"), "{detail}");
+
+        // Matching oid stays up-to-date even under --verify.
+        let same = HfTreeEntry {
+            lfs: Some(HfLfsMeta {
+                oid: Some(format!("sha256:{actual}")),
+                size: Some(12),
+            }),
+            ..changed
+        };
+        let (status, _, _) = classify_gguf_update(12, &local, Some(&same), true);
+        assert_eq!(status, UpdateStatus::UpToDate);
+    }
+
+    #[test]
+    fn check_updates_args_parse_flags_and_target() {
+        let args = vec![
+            "check-updates".to_string(),
+            "--verify".to_string(),
+            "--json".to_string(),
+        ];
+        let opts = parse_check_updates_args(&args).expect("parse");
+        assert!(opts.verify && opts.json && opts.target.is_none());
+
+        let args = vec!["check-updates".to_string(), "2".to_string()];
+        let opts = parse_check_updates_args(&args).expect("parse");
+        assert_eq!(opts.target.as_deref(), Some("2"));
+
+        let args = vec!["check-updates".to_string(), "--bogus".to_string()];
+        assert!(parse_check_updates_args(&args).is_err());
+    }
+
+    #[test]
+    fn update_args_require_exactly_one_target() {
+        let args = vec!["update".to_string(), "--yes".to_string()];
+        assert!(parse_update_args(&args).is_err());
+
+        let args = vec!["update".to_string(), "a".to_string(), "b".to_string()];
+        assert!(parse_update_args(&args).is_err());
+
+        let args = vec![
+            "update".to_string(),
+            "all".to_string(),
+            "--yes".to_string(),
+            "--connections".to_string(),
+            "4".to_string(),
+        ];
+        let opts = parse_update_args(&args).expect("parse");
+        assert_eq!(opts.target, "all");
+        assert!(opts.yes && opts.connections == 4);
     }
 }

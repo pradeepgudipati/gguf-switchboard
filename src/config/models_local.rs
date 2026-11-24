@@ -74,6 +74,20 @@ fn canonical(path: &Path) -> PathBuf {
 
 /// A safetensors model dir = contains `config.json` and at least one
 /// `*.safetensors` file.
+/// Return true if the filename looks like a main model GGUF (not mmproj/lora/projector).
+/// `pub(crate)` mirror of the same-named helper in `models_cmd` for use by
+/// `check-updates` new-file detection.
+pub(crate) fn is_model_gguf_public(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    !(lower.contains("mmproj")
+        || lower.contains("-lora")
+        || lower.contains("-projector")
+        || lower.contains("projector")
+        || lower.contains("-adapter")
+        || lower.contains("tokenizer")
+        || lower.contains("vocab"))
+}
+
 fn is_safetensors_model_dir(dir: &Path) -> bool {
     if !dir.join("config.json").is_file() {
         return false;
@@ -256,13 +270,13 @@ fn parse_common(args: &[String], allow_yes: bool) -> Result<CommonArgs, String> 
     Ok(out)
 }
 
-/// Resolve the registry `list`/`delete` read, mirroring the order `models
+/// Resolve the registry `list`/`delete`/`check-updates`/`update` read, mirroring the order `models
 /// pull` writes with (`resolve_vllm_registry_path` in `models_cmd.rs`):
 /// explicit `--registry` → the canonical deployed registry → a
 /// `models.toml` sibling to the scan dir → `./models.toml` → config.toml's
 /// `models_file`. Previously this only checked `./models.toml`, so models
 /// pulled into the deployed registry showed as `(unregistered)`.
-fn resolve_registry(explicit: Option<&str>) -> Option<(String, ModelsRegistry)> {
+pub(crate) fn resolve_registry(explicit: Option<&str>) -> Option<(String, ModelsRegistry)> {
     let path = match explicit {
         Some(p) => p.to_string(),
         None => default_local_registry_path()?,
@@ -339,7 +353,7 @@ fn resolve_config_toml_path() -> PathBuf {
     PathBuf::from("config.toml")
 }
 
-fn resolve_scan_dirs(
+pub(crate) fn resolve_scan_dirs(
     overrides: &[String],
     registry: Option<&ModelsRegistry>,
 ) -> Result<Vec<PathBuf>, String> {
@@ -714,7 +728,7 @@ pub async fn cmd_delete_local(args: &[String]) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn resolve_target<'a>(
+pub(crate) fn resolve_target<'a>(
     target: &str,
     entries: &'a [LocalModelEntry],
 ) -> Result<&'a LocalModelEntry, String> {

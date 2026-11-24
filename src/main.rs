@@ -7,8 +7,8 @@ use std::path::PathBuf;
 
 use gguf_switchboard::api;
 use gguf_switchboard::config::{
-    Config, ModelsRegistry, cmd_clean_local, cmd_delete_local, cmd_files, cmd_list_local, cmd_pull,
-    cmd_register_local, cmd_search, sync_registry_from_hf,
+    Config, ModelsRegistry, cmd_check_updates, cmd_clean_local, cmd_delete_local, cmd_files,
+    cmd_list_local, cmd_pull, cmd_register_local, cmd_search, cmd_update, sync_registry_from_hf,
 };
 use gguf_switchboard::conformance::ConformanceHistory;
 use gguf_switchboard::db::TokenDb;
@@ -33,6 +33,8 @@ Commands:
   ggs models register [<name|#>...]         Register unregistered GGUF files on disk
   ggs models clean [--yes]                  Delete unregistered duplicate copies
   ggs models delete <name|#>                Delete a model (file + registry entry)
+  ggs models check-updates [--verify]       Check installed models against Hugging Face
+  ggs models update <name|#|all> [--yes]     Replace a model file with the upstream version
   ggs models pull <repo-id> --quant Q4_K_M  Download and register a GGUF model
   ggs models pull vllm <repo-id>             Download and register a vLLM model
   ggs discover-models <models-dir>           Discover local GGUF models
@@ -710,8 +712,10 @@ async fn run_models_cmd(args: &[String]) -> Result<(), Box<dyn std::error::Error
         "delete" => cmd_delete_local(&sub_args).await,
         "clean" => cmd_clean_local(&sub_args).await,
         "register" => cmd_register_local(&sub_args).await,
+        "check-updates" => cmd_check_updates(&sub_args).await,
+        "update" => cmd_update(&sub_args).await,
         other => Err(format!(
-            "models: unknown subcommand '{other}'\n\nUsage:\n  gguf-switchboard models search <query> [--limit N]\n  gguf-switchboard models search vllm <query> [--limit N]\n  gguf-switchboard models files <repo-id>\n  gguf-switchboard models list [--dir PATH] [--registry models.toml] [--json]\n  gguf-switchboard models register [<name|#>...] [--dir PATH] [--registry models.toml]\n  gguf-switchboard models clean [--yes] [--dir PATH] [--registry models.toml]\n  gguf-switchboard models delete <name|#> [--yes] [--dir PATH] [--registry models.toml]\n  gguf-switchboard models pull <repo-id> [--quant QUANT] [--dir PATH] [--connections N] [--no-bench]\n  gguf-switchboard models pull vllm <repo-id> [--dir PATH] [--draft <repo>] [--num-speculative-tokens N] [--attention-backend NAME] [--tensor-parallel-size N] [--gpu-memory-utilization F] [--served-model-name NAME] [--force]"
+            "models: unknown subcommand '{other}'\n\nUsage:\n  gguf-switchboard models search <query> [--limit N]\n  gguf-switchboard models search vllm <query> [--limit N]\n  gguf-switchboard models files <repo-id>\n  gguf-switchboard models list [--dir PATH] [--registry models.toml] [--json]\n  gguf-switchboard models register [<name|#>...] [--dir PATH] [--registry models.toml]\n  gguf-switchboard models clean [--yes] [--dir PATH] [--registry models.toml]\n  gguf-switchboard models delete <name|#> [--yes] [--dir PATH] [--registry models.toml]\n  gguf-switchboard models check-updates [--dir PATH] [--registry models.toml] [--json] [--verify] [target]\n  gguf-switchboard models update <name|#|all> [--yes] [--dir PATH] [--registry models.toml] [--connections N] [--no-bench]\n  gguf-switchboard models pull <repo-id> [--quant QUANT] [--dir PATH] [--connections N] [--no-bench]\n  gguf-switchboard models pull vllm <repo-id> [--dir PATH] [--draft <repo>] [--num-speculative-tokens N] [--attention-backend NAME] [--tensor-parallel-size N] [--gpu-memory-utilization F] [--served-model-name NAME] [--force]"
         ).into()),
     }
 }
@@ -778,6 +782,8 @@ fn is_cli_usage_error(message: &str) -> bool {
         || (message.starts_with("models files") && message.contains("missing"))
         || message.starts_with("models list:")
         || message.starts_with("models delete:")
+        || message.starts_with("models check-updates")
+        || message.starts_with("models update")
         || (message.starts_with("models pull")
             && (message.contains("missing")
                 || message.contains("unknown flag")
