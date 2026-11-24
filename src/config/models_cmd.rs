@@ -1362,6 +1362,7 @@ async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>
 enum UpdateStatus {
     UpToDate,
     UpdateAvailable,
+    Renamed,
     NewFiles,
     MissingRemote,
     SkippedNoRepo,
@@ -1373,6 +1374,7 @@ impl UpdateStatus {
         match self {
             Self::UpToDate => "up-to-date",
             Self::UpdateAvailable => "update-available",
+            Self::Renamed => "renamed",
             Self::NewFiles => "new-files",
             Self::MissingRemote => "missing-remote",
             Self::SkippedNoRepo => "skipped-no-repo",
@@ -1511,13 +1513,17 @@ fn classify_gguf_update(
         );
     };
     if remote.size != local_bytes {
+        let diff = remote.size as i64 - local_bytes as i64;
         return (
             UpdateStatus::UpdateAvailable,
             Some(remote.size),
             format!(
-                "size changed: {} -> {}",
+                "size changed: {} ({} B) -> {} ({} B), diff {:+} B",
                 format_bytes(local_bytes),
-                format_bytes(remote.size)
+                local_bytes,
+                format_bytes(remote.size),
+                remote.size,
+                diff
             ),
         );
     }
@@ -1554,6 +1560,20 @@ fn gguf_basename(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Upstream files that could be the renamed successor of a local GGUF: same
+/// quantization label, main model files only (no mmproj/lora/projector or
+/// auxiliary dspark/mtp shards).
+fn find_renamed_matches<'a>(local_name: &str, tree: &'a [HfTreeEntry]) -> Vec<&'a HfTreeEntry> {
+    let quant = extract_quant(local_name);
+    if quant.is_empty() {
+        return Vec::new();
+    }
+    tree.iter()
+        .filter(|e| is_model_gguf(&e.path) && !is_auxiliary_model_file(&e.path))
+        .filter(|e| extract_quant(&gguf_basename(Path::new(&e.path))) == quant)
+        .collect()
 }
 
 /// `ggs models check-updates [--dir PATH] [--registry FILE] [--json] [--verify] [target]`
@@ -1618,7 +1638,7 @@ pub async fn cmd_check_updates(args: &[String]) -> Result<(), Box<dyn std::error
     println!();
     let updates = rows
         .iter()
-        .filter(|r| r.status == UpdateStatus::UpdateAvailable)
+        .filter(|r| r.status == UpdateStatus::UpdateAvailable || r.status == UpdateStatus::Renamed)
         .count();
     let up_to_date = rows
         .iter()
@@ -1778,9 +1798,11 @@ async fn collect_update_rows(
                                 }
                             }
                             Ok(size) => changed.push(format!(
-                                "{name} ({} -> {})",
+                                "{name} ({} ({} B) -> {} ({} B))",
                                 format_bytes(size),
-                                format_bytes(remote.size)
+                                size,
+                                format_bytes(remote.size),
+                                remote.size
                             )),
                             Err(_) => changed.push(format!("{name} (missing locally)")),
                         }
@@ -1857,13 +1879,20 @@ async fn collect_update_rows(
             continue;
         };
         let name = gguf_basename(&entry.path);
-        let remote = trees
-            .get(&repo)
-            .and_then(|r| r.as_ref().ok())
-            .and_then(|tree| {
-                tree.iter()
-                    .find(|e| gguf_basename(Path::new(&e.path)).eq_ignore_ascii_case(&name))
-            });
+        let tree = trees.get(&repo).and_then(|r| r.as_ref().ok());
+        let remote = tree.and_then(|tree| {
+            tree.iter()
+                .find(|e| gguf_basename(Path::new(&e.path)).eq_ignore_ascii_case(&name))
+        });
+        // Renamed upstream? Fall back to the unique same-quant file.
+        let (remote, renamed_from) = match (remote, tree) {
+            (Some(r), _) => (Some(r), None),
+            (None, Some(tree)) => match find_renamed_matches(&name, tree).as_slice() {
+                [one] => (Some(*one), Some(name.clone())),
+                _ => (None, None),
+            },
+            (None, None) => (None, None),
+        };
         match trees.get(&repo) {
             Some(Err(reason)) => rows.push(UpdateRow {
                 index: entry.index,
@@ -1880,6 +1909,64 @@ async fn collect_update_rows(
             _ => {
                 let (status, remote_bytes, mut detail) =
                     classify_gguf_update(entry.size_bytes, &entry.path, remote, verify);
+                let mut remote_name = name.clone();
+                if let (Some(old), Some(matched)) = (renamed_from, remote) {
+                    let new = gguf_basename(Path::new(&matched.path));
+                    remote_name = new.clone();
+                    let size_note = match remote_bytes {
+                        Some(rb) if rb != entry.size_bytes => format!(
+                            "; size {} ({} B) -> {} ({} B)",
+                            format_bytes(entry.size_bytes),
+                            entry.size_bytes,
+                            format_bytes(rb),
+                            rb
+                        ),
+                        _ => "; same size".to_string(),
+                    };
+                    detail = format!(
+                        "renamed upstream: '{old}' -> '{new}' (same {quant}{size_note})",
+                        quant = extract_quant(&old),
+                    );
+                    rows.push(UpdateRow {
+                        index: entry.index,
+                        alias,
+                        path: entry.path.clone(),
+                        local_bytes: entry.size_bytes,
+                        remote_bytes,
+                        status: UpdateStatus::Renamed,
+                        detail,
+                        repo: Some(repo),
+                        remote_file: Some(remote_name),
+                        is_safetensors_dir: false,
+                    });
+                    continue;
+                }
+                if status == UpdateStatus::MissingRemote {
+                    detail = match tree {
+                        Some(tree) => {
+                            let mut cands: Vec<String> = tree
+                                .iter()
+                                .filter(|e| super::models_local::is_model_gguf_public(&e.path))
+                                .take(5)
+                                .map(|e| gguf_basename(Path::new(&e.path)))
+                                .collect();
+                            if cands.is_empty() {
+                                format!(
+                                    "local file '{name}' not in upstream repo '{repo}' and no same-quant match; repo has no model files"
+                                )
+                            } else {
+                                cands.sort();
+                                format!(
+                                    "local file '{name}' not in upstream repo '{repo}' and no unique same-quant match; upstream has: {} (see `ggs models files {repo}`)",
+                                    cands.join(", ")
+                                )
+                            }
+                        }
+                        None => format!(
+                            "local file '{name}' not in upstream repo '{repo}' (renamed or removed); see `ggs models files {repo}`"
+                        ),
+                    };
+                }
                 // New-file hint: same file matches but the repo ships other
                 // quants not present locally.
                 if status == UpdateStatus::UpToDate
@@ -1921,7 +2008,7 @@ async fn collect_update_rows(
                     status,
                     detail,
                     repo: Some(repo),
-                    remote_file: Some(name),
+                    remote_file: Some(remote_name),
                     is_safetensors_dir: false,
                 });
             }
@@ -2046,7 +2133,7 @@ pub async fn cmd_update(args: &[String]) -> Result<(), Box<dyn std::error::Error
         )
         .await?
         .into_iter()
-        .filter(|r| r.status == UpdateStatus::UpdateAvailable)
+        .filter(|r| r.status == UpdateStatus::UpdateAvailable || r.status == UpdateStatus::Renamed)
         .collect()
     } else {
         collect_update_rows(
@@ -2080,11 +2167,7 @@ pub async fn cmd_update(args: &[String]) -> Result<(), Box<dyn std::error::Error
             .into());
         }
         if t.status == UpdateStatus::MissingRemote {
-            return Err(format!(
-                "models update: '{}' no longer exists upstream; not updating",
-                t.alias
-            )
-            .into());
+            return Err(format!("models update: '{}': {}", t.alias, t.detail).into());
         }
         if t.status == UpdateStatus::Error {
             return Err(format!("models update: upstream check failed: {}", t.detail).into());
@@ -2112,9 +2195,23 @@ pub async fn cmd_update(args: &[String]) -> Result<(), Box<dyn std::error::Error
                 format!("models update: '{}' has no upstream repo recorded", t.alias).into()
             })?;
         if t.is_safetensors_dir {
-            update_vllm_dir(&client, t, &repo, opts.connections).await?;
+            update_vllm_dir(
+                &client,
+                t,
+                &repo,
+                opts.connections,
+                opts.registry_path.as_deref(),
+            )
+            .await?;
         } else {
-            update_gguf_file(&client, t, &repo, opts.connections).await?;
+            update_gguf_file(
+                &client,
+                t,
+                &repo,
+                opts.connections,
+                opts.registry_path.as_deref(),
+            )
+            .await?;
         }
         updated += 1;
         // Refresh + bench for single GGUF targets, like `models pull`.
@@ -2134,13 +2231,16 @@ pub async fn cmd_update(args: &[String]) -> Result<(), Box<dyn std::error::Error
 /// Replace one GGUF file with its upstream entry, atomically.
 ///
 /// Downloads into a staging directory on the same filesystem, validates the
-/// GGUF header, then renames over the original — the old file stays intact
-/// until the new one is known good.
+/// GGUF header, then renames into place — the old file stays intact until
+/// the new one is known good. When upstream renamed the file (check-updates
+/// `renamed`), the download lands under the new name, the registry `file`
+/// field follows it, and the old file is removed.
 async fn update_gguf_file(
     client: &reqwest::Client,
     target: &UpdateRow,
     repo: &str,
     connections: u16,
+    registry_path: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entries = hf_download::fetch_repo_tree(client, repo).await?;
     let name = target
@@ -2167,20 +2267,40 @@ async fn update_gguf_file(
         let _ = std::fs::remove_dir_all(&staging);
         return Err(format!("Downloaded file is not a valid GGUF model: {reason}").into());
     }
-    // Persist the rename first so a registry-write failure never loses data.
-    std::fs::rename(&downloaded, &target.path)?;
+    let local_name = gguf_basename(&target.path);
+    let renamed = !name.eq_ignore_ascii_case(&local_name);
+    // Persist the file move first so a registry-write failure never loses data.
+    if renamed {
+        std::fs::rename(&downloaded, parent.join(&name))?;
+    } else {
+        std::fs::rename(&downloaded, &target.path)?;
+    }
     let _ = std::fs::remove_dir_all(&staging);
 
-    let new_bytes = std::fs::metadata(&target.path)
+    let final_path = parent.join(&name);
+    let new_bytes = std::fs::metadata(&final_path)
         .map(|m| m.len())
         .unwrap_or(remote.size);
-    println!(
-        "✓ Updated {}: {} -> {}",
-        target.alias,
-        format_bytes(target.local_bytes),
-        format_bytes(new_bytes)
-    );
-    update_registry_size(&target.alias, &target.path, new_bytes);
+    if renamed {
+        // Old file is superseded only now that the new one is in place.
+        let _ = std::fs::remove_file(&target.path);
+        println!(
+            "✓ Updated {}: renamed '{}' -> '{}' ({} -> {})",
+            target.alias,
+            local_name,
+            name,
+            format_bytes(target.local_bytes),
+            format_bytes(new_bytes)
+        );
+    } else {
+        println!(
+            "✓ Updated {}: {} -> {}",
+            target.alias,
+            format_bytes(target.local_bytes),
+            format_bytes(new_bytes)
+        );
+    }
+    update_registry_after_gguf(&target.alias, &local_name, &name, new_bytes, registry_path);
     Ok(())
 }
 
@@ -2190,6 +2310,7 @@ async fn update_vllm_dir(
     target: &UpdateRow,
     repo: &str,
     connections: u16,
+    registry_path: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let entries = hf_download::fetch_repo_tree_all(client, repo).await?;
     let serving: Vec<&HfTreeEntry> = entries
@@ -2236,17 +2357,26 @@ async fn update_vllm_dir(
         .sum::<u64>()
         / (1024 * 1024);
     let new_gb = ((weights_mb as f64 / 1024.0).ceil() as u32).max(1);
-    update_registry_vram(&target.alias, new_gb);
+    update_registry_vram(&target.alias, new_gb, registry_path);
     Ok(())
 }
 
-/// Best-effort registry size update after a GGUF replace. Warns instead of
-/// failing the update when the registry cannot be read or written.
-fn update_registry_size(alias: &str, local_path: &Path, new_bytes: u64) {
-    let Some((path, mut registry)) = resolve_registry(None) else {
+/// Best-effort registry update after a GGUF replace or rename. Follows the
+/// `file` field to the new basename on renames so future checks keep
+/// matching. Warns instead of failing the update when the registry cannot
+/// be read or written.
+fn update_registry_after_gguf(
+    alias: &str,
+    old_basename: &str,
+    new_basename: &str,
+    new_bytes: u64,
+    registry_path: Option<&str>,
+) {
+    let Some((path, mut registry)) = resolve_registry(registry_path) else {
         return;
     };
-    let file_key = gguf_basename(local_path).to_ascii_lowercase();
+    let old_key = old_basename.to_ascii_lowercase();
+    let new_gb = ((new_bytes as f64 / 1_000_000_000.0).ceil() as u32).max(1);
     let mut changed = false;
     for entry in &mut registry.models {
         if !entry.alias.eq_ignore_ascii_case(alias) {
@@ -2256,10 +2386,24 @@ fn update_registry_size(alias: &str, local_path: &Path, new_bytes: u64) {
             .file_name()
             .map(|n| n.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
-        if registered != file_key && !entry.file.is_empty() {
+        if registered != old_key && !entry.file.is_empty() {
             continue;
         }
-        let new_gb = ((new_bytes as f64 / 1_000_000_000.0).ceil() as u32).max(1);
+        if entry.file != *new_basename && !new_basename.eq_ignore_ascii_case(&registered) {
+            // Adopt the upstream filename (bare or relative form preserved).
+            entry.file = if entry.file.contains('/') || entry.file.contains('\\') {
+                let p = Path::new(&entry.file);
+                match p.parent() {
+                    Some(dir) if !dir.as_os_str().is_empty() => {
+                        dir.join(new_basename).to_string_lossy().into_owned()
+                    }
+                    _ => new_basename.to_string(),
+                }
+            } else {
+                new_basename.to_string()
+            };
+            changed = true;
+        }
         if entry.min_vram_gb != Some(new_gb) {
             entry.min_vram_gb = Some(new_gb);
             changed = true;
@@ -2271,8 +2415,8 @@ fn update_registry_size(alias: &str, local_path: &Path, new_bytes: u64) {
 }
 
 /// Best-effort vLLM VRAM update after a shard refresh.
-fn update_registry_vram(alias: &str, new_gb: u32) {
-    let Some((path, mut registry)) = resolve_registry(None) else {
+fn update_registry_vram(alias: &str, new_gb: u32, registry_path: Option<&str>) {
+    let Some((path, mut registry)) = resolve_registry(registry_path) else {
         return;
     };
     let mut changed = false;
@@ -3247,9 +3391,9 @@ mod tests {
     use super::{
         ModelOption, QuantRecommendation, SearchAssessment, UpdateStatus, assess_repository,
         balanced_quant, chat_url_from_config, classify_gguf_update, complete_model_options,
-        extract_quant, extract_speed_stats, format_hardware_summary, is_standalone_model,
-        is_supported, normalize_oid, parse_check_updates_args, parse_connections,
-        parse_update_args, refresh_url_from_config, render_search_table,
+        extract_quant, extract_speed_stats, find_renamed_matches, format_hardware_summary,
+        is_standalone_model, is_supported, normalize_oid, parse_check_updates_args,
+        parse_connections, parse_update_args, refresh_url_from_config, render_search_table,
         resolve_vllm_registry_path, sample_pull_command, select_quant_entry, sha256_hex_file,
     };
     use crate::config::hf_download::HfTreeEntry;
@@ -3954,9 +4098,11 @@ mod tests {
         std::fs::write(&local, vec![0u8; 1024]).unwrap();
 
         let smaller = tree_entry("model-Q4_K_M.gguf", 512);
-        let (status, remote, _) = classify_gguf_update(1024, &local, Some(&smaller), false);
+        let (status, remote, detail) = classify_gguf_update(1024, &local, Some(&smaller), false);
         assert_eq!(status, UpdateStatus::UpdateAvailable);
         assert_eq!(remote, Some(512));
+        assert!(detail.contains("(1024 B) -> 512 B (512 B)"), "{detail}");
+        assert!(detail.contains("diff -512 B"), "{detail}");
 
         let same = tree_entry("model-Q4_K_M.gguf", 1024);
         let (status, _, _) = classify_gguf_update(1024, &local, Some(&same), false);
@@ -4020,6 +4166,31 @@ mod tests {
 
         let args = vec!["check-updates".to_string(), "--bogus".to_string()];
         assert!(parse_check_updates_args(&args).is_err());
+    }
+
+    #[test]
+    fn find_renamed_matches_unique_same_quant() {
+        let tree = [
+            tree_entry("Org-Model-Q4_K_M.gguf", 4_000),
+            tree_entry("Org-Model-Q8_0.gguf", 8_000),
+            tree_entry("Org-Model-mmproj.gguf", 100),
+        ];
+        // Unique same-quant match despite a different name prefix.
+        let one = find_renamed_matches("Old-Name-Q8_0.gguf", &tree);
+        assert_eq!(one.len(), 1);
+        assert_eq!(one[0].path, "Org-Model-Q8_0.gguf");
+
+        // Ambiguous when two files share the quant.
+        let tree2 = [
+            tree_entry("A-Q4_K_M.gguf", 4_000),
+            tree_entry("B-Q4_K_M.gguf", 4_100),
+        ];
+        assert_eq!(find_renamed_matches("Old-Q4_K_M.gguf", &tree2).len(), 2);
+
+        // No quant in the local name means no match.
+        assert!(find_renamed_matches("model.gguf", &tree).is_empty());
+        // Auxiliary files never match.
+        assert!(find_renamed_matches("old-mmproj.gguf", &tree).is_empty());
     }
 
     #[test]
