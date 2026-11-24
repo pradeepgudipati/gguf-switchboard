@@ -76,6 +76,10 @@ pub async fn cmd_search(args: &[String]) -> Result<(), Box<dyn std::error::Error
         println!("No GGUF models found for \"{query}\"");
         return Ok(());
     }
+    // `org/model` queries mean the org's own releases — drop third-party
+    // repacks (e.g. `Qwen/Qwen3` hides `bartowski/*`). Applied before the
+    // per-repo tree fetches below so hidden repos cost no network.
+    let (hits, org_note) = filter_hits_by_org(&query, hits);
 
     let total_ram_mb = crate::memory::check_memory()
         .map(|stats| stats.total_mb)
@@ -131,6 +135,10 @@ pub async fn cmd_search(args: &[String]) -> Result<(), Box<dyn std::error::Error
         );
     }
     println!();
+    if let Some(note) = org_note {
+        println!("{note}");
+        println!();
+    }
     print!("{}", render_search_table(&hits, &assessments));
     println!(
         "FIT: 0-100 memory-fit score (100 = comfortable headroom; 0 = does not fit RAM+VRAM). \
@@ -199,6 +207,45 @@ fn search_commands_help() -> String {
         .to_string()
 }
 
+/// When the query names an org (`org/model`), keep only that org's repos so
+/// third-party repacks don't drown out first-party releases.
+///
+/// Returns the filtered hits plus a display note (None when nothing was
+/// filtered). When no repo of that org matches, the original hits are
+/// returned with a note instead of an empty table — the query may still be
+/// useful as a fuzzy search.
+fn filter_hits_by_org(query: &str, hits: Vec<Value>) -> (Vec<Value>, Option<String>) {
+    let Some(slash) = query.find('/') else {
+        return (hits, None);
+    };
+    let org = query[..slash].trim();
+    if org.is_empty() || org.contains(char::is_whitespace) {
+        return (hits, None);
+    }
+    let prefix = format!("{}/", org.to_ascii_lowercase());
+    let total = hits.len();
+    let (kept, _dropped): (Vec<Value>, Vec<Value>) = hits.into_iter().partition(|hit| {
+        hit.get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| id.to_ascii_lowercase().starts_with(&prefix))
+    });
+    match (kept.len(), total) {
+        (0, _) => (
+            _dropped,
+            Some(format!(
+                "No '{org}/*' repos matched \"{query}\"; showing closest matches across all orgs."
+            )),
+        ),
+        (k, t) if k < t => (
+            kept,
+            Some(format!(
+                "Filtered to '{org}/*' ({k} of {t} repos shown); search without the org prefix to see all publishers."
+            )),
+        ),
+        _ => (kept, None),
+    }
+}
+
 /// `gguf-switchboard models search vllm <query> [--limit N]` — searches for
 /// safetensors repos vLLM can serve directly, showing quantization and
 /// speculative-decoding (dspark draft model) pairing instead of GGUF quants.
@@ -251,6 +298,14 @@ async fn cmd_search_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Erro
         return Err(format!("HF API search failed: HTTP {}", resp.status()).into());
     }
     let hits: Vec<Value> = resp.json().await.map_err(RuntimeError::from)?;
+
+    // `org/model` queries mean the org's own releases — same rule as the
+    // GGUF path, applied before the per-repo tree fetches below.
+    let (hits, org_note) = filter_hits_by_org(&query, hits);
+    if let Some(note) = &org_note {
+        println!("{note}");
+        println!();
+    }
 
     // Keep only repos that actually look like servable safetensors models
     // (has weights + config.json), fetching each repo's tree to check.
@@ -922,7 +977,7 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
         config_path.as_path(),
         Path::new("/opt/gguf-switchboard/models.toml"),
     );
-    warn_on_stray_registries(&registry_path, config_path.as_path());
+    warn_on_stray_registries(&registry_path);
 
     let mut registry = if Path::new(&registry_path).is_file() {
         ModelsRegistry::load(&registry_path)?
@@ -1580,7 +1635,7 @@ fn find_renamed_matches<'a>(local_name: &str, tree: &'a [HfTreeEntry]) -> Vec<&'
 pub async fn cmd_check_updates(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
     let opts =
         parse_check_updates_args(args).map_err(|e| -> Box<dyn std::error::Error> { e.into() })?;
-    let rows = collect_update_rows(
+    let (rows, registry_path) = collect_update_rows(
         &opts.dir_overrides,
         opts.registry_path.as_deref(),
         opts.target.as_deref(),
@@ -1613,6 +1668,10 @@ pub async fn cmd_check_updates(args: &[String]) -> Result<(), Box<dyn std::error
     if rows.is_empty() {
         println!("No GGUF files or safetensors model directories found.");
         return Ok(());
+    }
+    match &registry_path {
+        Some(path) => println!("Registry: {path}"),
+        None => println!("Registry: (none found — every entry shows as unregistered)"),
     }
 
     println!();
@@ -1669,13 +1728,15 @@ fn truncate_update_name(s: &str, max: usize) -> String {
 }
 
 /// Shared scan + upstream comparison used by `check-updates` and `update ... all`.
+/// Returns the rows plus the registry path they were resolved against (for display).
 async fn collect_update_rows(
     dir_overrides: &[String],
     registry_path: Option<&str>,
     target: Option<&str>,
     verify: bool,
-) -> Result<Vec<UpdateRow>, Box<dyn std::error::Error>> {
+) -> Result<(Vec<UpdateRow>, Option<String>), Box<dyn std::error::Error>> {
     let registry = resolve_registry(registry_path);
+    let resolved_registry_path = registry.as_ref().map(|(p, _)| p.clone());
     let dirs = resolve_scan_dirs(dir_overrides, registry.as_ref().map(|(_, r)| r))
         .map_err(|e| e.replace("models list:", "models check-updates:"))?;
     let entries = scan_local_models(&dirs, registry.as_ref().map(|(_, r)| r));
@@ -2015,7 +2076,7 @@ async fn collect_update_rows(
         }
     }
     rows.sort_by_key(|r| r.index);
-    Ok(rows)
+    Ok((rows, resolved_registry_path))
 }
 
 struct UpdateOptions {
@@ -2132,6 +2193,7 @@ pub async fn cmd_update(args: &[String]) -> Result<(), Box<dyn std::error::Error
             false,
         )
         .await?
+        .0
         .into_iter()
         .filter(|r| r.status == UpdateStatus::UpdateAvailable || r.status == UpdateStatus::Renamed)
         .collect()
@@ -2143,6 +2205,7 @@ pub async fn cmd_update(args: &[String]) -> Result<(), Box<dyn std::error::Error
             false,
         )
         .await?
+        .0
     };
 
     if targets.is_empty() {
@@ -2698,8 +2761,25 @@ async fn bench_pulled_model(alias: &str) -> Result<(), String> {
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-/// Find the default models directory from an existing registry, or fall back to common paths.
+/// Find the default models directory for `models pull` downloads.
+///
+/// Order: the canonical deployed registry first (whenever it exists, so
+/// pulls from a source checkout land where the running server reads them —
+/// mirroring registry resolution), then `./models.toml`, then
+/// `$MODELS_DIR`, then `~/models`.
 fn resolve_default_models_dir() -> Result<PathBuf, RuntimeError> {
+    resolve_default_models_dir_inner(Path::new("/opt/gguf-switchboard/models.toml"))
+}
+
+fn resolve_default_models_dir_inner(deployed_registry: &Path) -> Result<PathBuf, RuntimeError> {
+    if deployed_registry.is_file()
+        && let Ok(registry) = ModelsRegistry::load(&deployed_registry.to_string_lossy())
+        && let Ok(dirs) = super::models_registry::resolve_models_dirs(&registry.defaults.models_dir)
+        && let Some(dir) = dirs.first()
+    {
+        return Ok(dir.clone());
+    }
+
     // Try loading models.toml from the current directory.
     if Path::new("models.toml").is_file()
         && let Ok(registry) = ModelsRegistry::load("models.toml")
@@ -2770,11 +2850,19 @@ fn server_registry_path(config_path: &Path) -> PathBuf {
     PathBuf::from("/opt/gguf-switchboard/models.toml")
 }
 
-/// Warn when the registry we're about to write is not the one the running server
-/// reads, and list any other stray `models.toml` files found in common spots so
-/// the user can consolidate. Deploy-time consolidation lives in `deploy.sh`.
-fn warn_on_stray_registries(resolved: &str, config_path: &Path) {
-    let canonical = server_registry_path(config_path);
+/// The config the running service actually reads: the deployed one when this
+/// machine has a system install, else the same lookup `models pull` uses.
+/// (Resolving `./config.toml` from a source checkout is what produced the
+/// misleading "server reads 'models.toml'" warning.)
+fn resolve_server_config_path() -> PathBuf {
+    let deployed = PathBuf::from("/opt/gguf-switchboard/config.toml");
+    if deployed.is_file() {
+        return deployed;
+    }
+    resolve_config_toml_path()
+}
+fn warn_on_stray_registries(resolved: &str) {
+    let canonical = server_registry_path(&resolve_server_config_path());
     let resolved_abs = std::fs::canonicalize(resolved).unwrap_or_else(|_| PathBuf::from(resolved));
     let canonical_abs = std::fs::canonicalize(&canonical).unwrap_or_else(|_| canonical.clone());
 
@@ -2858,7 +2946,15 @@ fn resolve_vllm_registry_path(
     if let Some(path) = explicit {
         return path.to_string();
     }
-    if deployed_registry.is_file() {
+    // Exists but not a readable file (permissions, broken symlink): saying so
+    // now beats silently writing pulls into a fallback registry that the
+    // server never reads.
+    if deployed_registry.symlink_metadata().is_ok() && !deployed_registry.is_file() {
+        eprintln!(
+            "warning: deployed registry '{}' exists but is not readable; falling back — check group/permissions before pulling",
+            deployed_registry.display()
+        );
+    } else if deployed_registry.is_file() {
         return deployed_registry.to_string_lossy().into_owned();
     }
     if let Some(destination) = destination {
@@ -3391,10 +3487,11 @@ mod tests {
     use super::{
         ModelOption, QuantRecommendation, SearchAssessment, UpdateStatus, assess_repository,
         balanced_quant, chat_url_from_config, classify_gguf_update, complete_model_options,
-        extract_quant, extract_speed_stats, find_renamed_matches, format_hardware_summary,
-        is_standalone_model, is_supported, normalize_oid, parse_check_updates_args,
-        parse_connections, parse_update_args, refresh_url_from_config, render_search_table,
-        resolve_vllm_registry_path, sample_pull_command, select_quant_entry, sha256_hex_file,
+        extract_quant, extract_speed_stats, filter_hits_by_org, find_renamed_matches,
+        format_hardware_summary, is_standalone_model, is_supported, normalize_oid,
+        parse_check_updates_args, parse_connections, parse_update_args, refresh_url_from_config,
+        render_search_table, resolve_vllm_registry_path, sample_pull_command, select_quant_entry,
+        sha256_hex_file,
     };
     use crate::config::hf_download::HfTreeEntry;
     use crate::quant_profile;
@@ -4191,6 +4288,60 @@ mod tests {
         assert!(find_renamed_matches("model.gguf", &tree).is_empty());
         // Auxiliary files never match.
         assert!(find_renamed_matches("old-mmproj.gguf", &tree).is_empty());
+    }
+
+    #[test]
+    fn org_filter_keeps_only_that_org() {
+        let hits = vec![
+            serde_json::json!({"id": "Qwen/Qwen3-8B-GGUF"}),
+            serde_json::json!({"id": "bartowski/Qwen_Qwen3.5-9B-GGUF"}),
+            serde_json::json!({"id": "Qwen/Qwen3-0.6B-GGUF"}),
+        ];
+        let (kept, note) = filter_hits_by_org("Qwen/Qwen3", hits);
+        assert_eq!(kept.len(), 2);
+        assert!(
+            kept.iter()
+                .all(|h| h["id"].as_str().is_some_and(|id| id.starts_with("Qwen/")))
+        );
+        let note = note.expect("filtering dropped repos, note expected");
+        assert!(note.contains("2 of 3"), "{note}");
+
+        // Org match is case-insensitive.
+        let hits = vec![serde_json::json!({"id": "QWEN/Qwen3-8B-GGUF"})];
+        let (kept, _) = filter_hits_by_org("qwen/qwen3", hits);
+        assert_eq!(kept.len(), 1);
+    }
+
+    #[test]
+    fn org_filter_falls_back_when_org_has_no_repos() {
+        let hits = vec![serde_json::json!({"id": "bartowski/Qwen_Qwen3.5-9B-GGUF"})];
+        let (kept, note) = filter_hits_by_org("Qwen/Qwen3", hits);
+        assert_eq!(kept.len(), 1);
+        let note = note.expect("fallback note expected");
+        assert!(note.contains("No 'Qwen/*' repos matched"), "{note}");
+    }
+
+    #[test]
+    fn org_filter_ignores_plain_and_malformed_queries() {
+        let hits = vec![
+            serde_json::json!({"id": "Qwen/Qwen3-8B-GGUF"}),
+            serde_json::json!({"id": "bartowski/Qwen_Qwen3.5-9B-GGUF"}),
+        ];
+        // No slash: no filtering.
+        let (kept, note) = filter_hits_by_org("Qwen3", hits.clone());
+        assert_eq!(kept.len(), 2);
+        assert!(note.is_none());
+        // Empty org or whitespace in org: no filtering.
+        for query in ["/Qwen3", "foo bar/baz", " /x"] {
+            let (kept, note) = filter_hits_by_org(query, hits.clone());
+            assert_eq!(kept.len(), 2, "{query}");
+            assert!(note.is_none(), "{query}");
+        }
+        // Everything already the org's: no note needed.
+        let hits = vec![serde_json::json!({"id": "Qwen/Qwen3-8B-GGUF"})];
+        let (kept, note) = filter_hits_by_org("Qwen/Qwen3", hits);
+        assert_eq!(kept.len(), 1);
+        assert!(note.is_none());
     }
 
     #[test]

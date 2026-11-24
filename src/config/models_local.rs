@@ -277,33 +277,50 @@ fn parse_common(args: &[String], allow_yes: bool) -> Result<CommonArgs, String> 
 /// `models_file`. Previously this only checked `./models.toml`, so models
 /// pulled into the deployed registry showed as `(unregistered)`.
 pub(crate) fn resolve_registry(explicit: Option<&str>) -> Option<(String, ModelsRegistry)> {
-    let path = match explicit {
-        Some(p) => p.to_string(),
-        None => default_local_registry_path()?,
-    };
-    match ModelsRegistry::load(&path) {
-        Ok(reg) => Some((path, reg)),
-        Err(e) => {
-            eprintln!("warning: could not load registry '{path}': {e}");
-            None
+    if let Some(p) = explicit {
+        return match ModelsRegistry::load(p) {
+            Ok(reg) => Some((p.to_string(), reg)),
+            Err(e) => {
+                eprintln!("warning: could not load registry '{p}': {e}");
+                None
+            }
+        };
+    }
+    // Ordered candidates; the first loadable wins. A candidate that exists
+    // but cannot be loaded (usually permissions on the deployed registry, or
+    // a corrupt file) warns loudly instead of silently splitting brain
+    // across two registries — that failure mode shows pulled models as
+    // `(unregistered)`.
+    let mut candidates = vec![
+        "/opt/gguf-switchboard/models.toml".to_string(),
+        "models.toml".to_string(),
+    ];
+    if let Some(via_config) = config_registry_path()
+        && !candidates.contains(&via_config)
+    {
+        candidates.push(via_config);
+    }
+    let mut unloadable: Vec<(String, String)> = Vec::new();
+    for path in candidates {
+        if Path::new(&path).symlink_metadata().is_err() {
+            continue; // absent — try the next candidate
+        }
+        match ModelsRegistry::load(&path) {
+            Ok(reg) => {
+                for (bad, reason) in &unloadable {
+                    eprintln!(
+                        "warning: registry '{bad}' exists but could not be loaded ({reason}); using '{path}' instead"
+                    );
+                }
+                return Some((path, reg));
+            }
+            Err(e) => unloadable.push((path, e.to_string())),
         }
     }
-}
-
-/// Default registry lookup for `list`/`delete` when `--registry` is absent.
-/// Order matches `resolve_vllm_registry_path`: deployed registry first
-/// (whenever it exists), then the scan-dir sibling, then `./models.toml`,
-/// then config.toml's `models_file` — so the inventory reads the same file
-/// `models pull` writes.
-fn default_local_registry_path() -> Option<String> {
-    let deployed = Path::new("/opt/gguf-switchboard/models.toml");
-    if deployed.is_file() {
-        return Some(deployed.to_string_lossy().into_owned());
+    for (bad, reason) in &unloadable {
+        eprintln!("warning: could not load registry '{bad}': {reason}");
     }
-    if Path::new("models.toml").is_file() {
-        return Some("models.toml".to_string());
-    }
-    config_registry_path()
+    None
 }
 
 /// `models_file` from the resolved `config.toml`, as `models pull` falls back
@@ -409,6 +426,10 @@ pub async fn cmd_list_local(args: &[String]) -> Result<(), Box<dyn Error>> {
         return Ok(());
     }
 
+    match &registry {
+        Some((path, _)) => println!("Registry: {path}"),
+        None => println!("Registry: (none found — every entry shows as unregistered)"),
+    }
     println!(
         "Scanned: {}",
         dirs.iter()
