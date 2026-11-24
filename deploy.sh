@@ -963,6 +963,7 @@ Environment:
   MODELS_DIR / DISCOVER_MODELS_DIR   Override discover scan dirs (comma-separated)
   GGUF_SWITCHBOARD_DIR               Source checkout for clone/bootstrap only
   LLAMA_RELEASE_CHANNEL              stable (default) or nightly
+  LLAMA_BUILD_UI / LLAMA_USE_PREBUILT_UI  ON to embed llama-server's web UI (default OFF)
   VLLM_RELEASE_CHANNEL               stable (default, locked) or nightly (re-resolve vs PyPI)
 
 Post-install:

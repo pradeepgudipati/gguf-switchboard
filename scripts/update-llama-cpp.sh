@@ -14,6 +14,11 @@
 #   FORCE_REBUILD=1 Rebuild even when the installed release is current
 #   LLAMA_RELEASE_CHANNEL=stable  Track manual vMAJOR.MINOR.PATCH releases (default)
 #   LLAMA_RELEASE_CHANNEL=nightly Track automated bNNNNN snapshots
+#   LLAMA_BUILD_UI=ON             Build the bundled llama-server web UI (default OFF —
+#                                 the switchboard proxies the API and serves its own UI, so the
+#                                 embedded one is dead weight; OFF also dodges upstream
+#                                 UI-asset provisioning failures, e.g. v1.0.0 #32780)
+#   LLAMA_USE_PREBUILT_UI=ON      Embed prebuilt UI assets from tools/ui/dist (default OFF)
 set -euo pipefail
 
 # If invoked via sudo, keep the invoking user's home for LLAMA_DIR defaults.
@@ -186,7 +191,9 @@ if [[ -d build ]]; then
 fi
 cmake -B build \
   -DGGML_CUDA=ON \
-  -DCMAKE_BUILD_TYPE=Release
+  -DCMAKE_BUILD_TYPE=Release \
+  -DLLAMA_BUILD_UI="${LLAMA_BUILD_UI:-OFF}" \
+  -DLLAMA_USE_PREBUILT_UI="${LLAMA_USE_PREBUILT_UI:-OFF}"
 
 echo "==> Building"
 cmake --build build -j"$(nproc)"
