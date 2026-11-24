@@ -922,7 +922,15 @@ fn infer_kind(alias: &str, file: &str) -> String {
 
 fn dedupe_registry_entries(entries: &mut Vec<RegistryEntry>) {
     let mut by_file = HashMap::new();
+    let mut without_file = Vec::new();
     for entry in entries.drain(..) {
+        // Empty `file` means "no GGUF source" (vLLM-only entries carry theirs
+        // in `vllm_file`). They must never share a file-dedupe key — an empty
+        // key would fold every vLLM-only entry into one.
+        if entry.file.is_empty() {
+            without_file.push(entry);
+            continue;
+        }
         let key = file_dedupe_key(&entry.file);
         by_file
             .entry(key)
@@ -933,7 +941,7 @@ fn dedupe_registry_entries(entries: &mut Vec<RegistryEntry>) {
     }
 
     let mut by_alias = HashMap::new();
-    for entry in by_file.into_values() {
+    for entry in by_file.into_values().chain(without_file) {
         let key = entry.alias.clone();
         by_alias
             .entry(key)
@@ -1021,6 +1029,36 @@ fn merge_registry_entry(target: &mut RegistryEntry, incoming: &RegistryEntry) {
     }
     if target.hf_repo.is_none() {
         target.hf_repo = incoming.hf_repo.clone();
+    }
+    // One alias can carry both a GGUF source (`file`/`hf_repo`) and a vLLM
+    // source (`vllm_file`/`vllm_hf_repo`, …) — fill whichever side is missing
+    // so load-time dedupe never silently drops a serving source.
+    if target.vllm_file.is_none() {
+        target.vllm_file = incoming.vllm_file.clone();
+    }
+    if target.vllm_hf_repo.is_none() {
+        target.vllm_hf_repo = incoming.vllm_hf_repo.clone();
+    }
+    if target.quantization.is_none() {
+        target.quantization = incoming.quantization.clone();
+    }
+    if target.attention_backend.is_none() {
+        target.attention_backend = incoming.attention_backend.clone();
+    }
+    if target.draft_model.is_none() {
+        target.draft_model = incoming.draft_model.clone();
+    }
+    if target.num_speculative_tokens.is_none() {
+        target.num_speculative_tokens = incoming.num_speculative_tokens;
+    }
+    if target.tensor_parallel_size.is_none() {
+        target.tensor_parallel_size = incoming.tensor_parallel_size;
+    }
+    if target.gpu_memory_utilization.is_none() {
+        target.gpu_memory_utilization = incoming.gpu_memory_utilization;
+    }
+    if target.served_model_name.is_none() {
+        target.served_model_name = incoming.served_model_name.clone();
     }
 }
 
@@ -3514,6 +3552,65 @@ mod tests {
             1,
             "relative + absolute path to same file should be deduplicated"
         );
+    }
+
+    #[test]
+    fn dedupe_keeps_distinct_vllm_only_entries() {
+        // Empty `file` means "no GGUF source". Two vLLM-only entries must not
+        // fold into one through the shared empty key.
+        let mut entries = vec![
+            RegistryEntry {
+                alias: "qwen2.5-7b-instruct".to_string(),
+                vllm_file: Some("/vllm/Qwen__Qwen2.5-7B-Instruct".to_string()),
+                enabled: true,
+                ..Default::default()
+            },
+            RegistryEntry {
+                alias: "customdir".to_string(),
+                vllm_file: Some("/vllm/CustomDir".to_string()),
+                enabled: true,
+                ..Default::default()
+            },
+        ];
+
+        dedupe_registry_entries(&mut entries);
+
+        assert_eq!(entries.len(), 2);
+        assert!(
+            entries
+                .iter()
+                .all(|e| e.file.is_empty() && e.vllm_file.is_some()),
+            "vLLM sources must survive load-time dedupe"
+        );
+    }
+
+    #[test]
+    fn merge_carries_vllm_source_across_same_alias() {
+        let mut target = RegistryEntry {
+            alias: "qwen2.5-7b-instruct".to_string(),
+            file: "Qwen2.5-7B-Instruct-Q4_K_M.gguf".to_string(),
+            enabled: true,
+            ..Default::default()
+        };
+        let incoming = RegistryEntry {
+            alias: "qwen2.5-7b-instruct".to_string(),
+            vllm_file: Some("/vllm/Qwen__Qwen2.5-7B-Instruct".to_string()),
+            vllm_hf_repo: Some("Qwen/Qwen2.5-7B-Instruct".to_string()),
+            enabled: true,
+            ..Default::default()
+        };
+
+        merge_registry_entry(&mut target, &incoming);
+
+        assert_eq!(
+            target.vllm_file.as_deref(),
+            Some("/vllm/Qwen__Qwen2.5-7B-Instruct")
+        );
+        assert_eq!(
+            target.vllm_hf_repo.as_deref(),
+            Some("Qwen/Qwen2.5-7B-Instruct")
+        );
+        assert!(!target.file.is_empty(), "GGUF source must be kept");
     }
 
     #[test]
