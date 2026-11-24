@@ -66,7 +66,7 @@ pub async fn cmd_search(args: &[String]) -> Result<(), Box<dyn std::error::Error
 
     let query = query.ok_or("models search: missing search query")?;
 
-    let client = hf_download::build_hf_client()?;
+    let client = hf_download::build_hf_client().await?;
     let hits = search_hf_models_with_siblings(&client, &query, limit).await?;
 
     if hits.is_empty() {
@@ -231,7 +231,7 @@ async fn cmd_search_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Erro
     }
     let query = query.ok_or("models search vllm: missing search query")?;
 
-    let client = hf_download::build_hf_client()?;
+    let client = hf_download::build_hf_client().await?;
     let url = reqwest::Url::parse_with_params(
         HF_MODELS_API,
         &[
@@ -570,7 +570,7 @@ pub async fn cmd_files(args: &[String]) -> Result<(), Box<dyn std::error::Error>
         .get(1)
         .ok_or("models files: missing repository id (e.g. bartowski/Qwen3.5-9B-GGUF)")?;
 
-    let client = hf_download::build_hf_client()?;
+    let client = hf_download::build_hf_client().await?;
     let entries = hf_download::fetch_repo_tree(&client, repo).await?;
 
     if entries.is_empty() {
@@ -690,7 +690,7 @@ pub async fn cmd_pull(args: &[String]) -> Result<(), Box<dyn std::error::Error>>
     let repo = repo.ok_or("models pull: missing repository id (e.g. bartowski/Qwen3.5-9B-GGUF)")?;
 
     // 1. Fetch repo tree.
-    let client = hf_download::build_hf_client()?;
+    let client = hf_download::build_hf_client().await?;
 
     // vLLM preference: this exact repo may ship both GGUF and safetensors
     // (some repos bundle both formats). If so, nudge toward vLLM before
@@ -1170,7 +1170,7 @@ async fn cmd_pull_vllm(args: &[String]) -> Result<(), Box<dyn std::error::Error>
     }
 
     // 3. Fetch repo tree and validate it's a servable safetensors repo.
-    let client = hf_download::build_hf_client()?;
+    let client = hf_download::build_hf_client().await?;
     let entries = hf_download::fetch_repo_tree_all(&client, &repo).await?;
     if !super::vllm_meta::is_safetensors_repo(&entries) {
         return Err(format!(

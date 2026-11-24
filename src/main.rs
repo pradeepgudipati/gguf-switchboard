@@ -152,6 +152,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(add_help_to_cli_usage_error);
     }
 
+    if args.len() >= 3 && args[1] == "add" && args[2] == "hf_token" {
+        if args.len() < 4 {
+            return Err(cli_error("ggs add hf_token requires a token argument"));
+        }
+        let token = args[3].clone();
+        add_hf_token(&token)
+            .await
+            .map_err(add_help_to_cli_usage_error)?;
+        println!("HF token saved successfully");
+        println!("Token will be used by ggs models pull and ggs models search");
+        return Ok(());
+    }
+
     if args.len() >= 2 && args[1] == "export-registry" {
         return run_export_registry(&args).map_err(add_help_to_cli_usage_error);
     }
@@ -624,6 +637,30 @@ async fn run_sync_hf_metadata(args: &[String]) -> Result<(), Box<dyn std::error:
             entry.min_vram_gb.map(|v| v.to_string()).unwrap_or_default(),
             entry.hf_repo.as_deref().unwrap_or("")
         );
+    }
+    Ok(())
+}
+
+async fn add_hf_token(token: &str) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(home) = dirs::home_dir() else {
+        return Err("Failed to determine home directory".into());
+    };
+    let config_dir = home.join(".config/gguf-switchboard");
+    let token_file = config_dir.join("hf_token");
+    tokio::fs::create_dir_all(&config_dir).await.map_err(|e| {
+        format!(
+            "Failed to create config dir '{}': {e}",
+            config_dir.display()
+        )
+    })?;
+    tokio::fs::write(&token_file, token)
+        .await
+        .map_err(|e| format!("Failed to write HF token file: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ =
+            tokio::fs::set_permissions(&token_file, std::fs::Permissions::from_mode(0o600)).await;
     }
     Ok(())
 }

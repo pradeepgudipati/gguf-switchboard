@@ -65,18 +65,24 @@ pub struct HfLfsMeta {
 }
 
 /// Build a reqwest client with the standard user-agent and optional HF token.
-pub fn build_hf_client() -> Result<reqwest::Client, RuntimeError> {
+/// Checks HF_TOKEN env var first, then falls back to
+/// ~/.config/gguf-switchboard/hf_token written by `ggs add hf_token`.
+pub async fn build_hf_client() -> Result<reqwest::Client, RuntimeError> {
     let mut builder = reqwest::Client::builder()
         .user_agent(concat!("gguf-switchboard/", env!("CARGO_PKG_VERSION")));
 
-    if let Ok(token) = std::env::var("HF_TOKEN")
-        && !token.is_empty()
-    {
+    let mut token: Option<String> = std::env::var("HF_TOKEN").ok().filter(|t| !t.is_empty());
+
+    if token.is_none() {
+        token = read_hf_token_from_file().await?;
+    }
+
+    if let Some(token) = token.filter(|t| !t.is_empty()) {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::AUTHORIZATION,
             reqwest::header::HeaderValue::from_str(&format!("Bearer {token}"))
-                .map_err(|e| RuntimeError::InternalError(format!("Invalid HF_TOKEN: {e}")))?,
+                .map_err(|e| RuntimeError::InternalError(format!("Invalid HF token: {e}")))?,
         );
         builder = builder.default_headers(headers);
     }
@@ -84,6 +90,30 @@ pub fn build_hf_client() -> Result<reqwest::Client, RuntimeError> {
     builder
         .build()
         .map_err(|e| RuntimeError::InternalError(e.to_string()))
+}
+
+/// Read the persisted HF token written by `ggs add hf_token`.
+/// Returns Ok(None) when no token file exists or it is empty.
+async fn read_hf_token_from_file() -> Result<Option<String>, RuntimeError> {
+    let Some(home) = dirs::home_dir() else {
+        return Ok(None);
+    };
+    let token_file = home.join(".config/gguf-switchboard/hf_token");
+    if !token_file.is_file() {
+        return Ok(None);
+    }
+    let content = tokio::fs::read_to_string(&token_file).await.map_err(|e| {
+        RuntimeError::ConfigError(format!(
+            "Failed to read HF token file '{}': {e}",
+            token_file.display()
+        ))
+    })?;
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(trimmed.to_string()))
+    }
 }
 
 /// Fetch the file tree for a repo, returning only `.gguf` entries.
