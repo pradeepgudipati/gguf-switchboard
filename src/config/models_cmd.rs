@@ -2763,22 +2763,94 @@ async fn bench_pulled_model(alias: &str) -> Result<(), String> {
 
 /// Find the default models directory for `models pull` downloads.
 ///
-/// Order: the canonical deployed registry first (whenever it exists, so
-/// pulls from a source checkout land where the running server reads them —
-/// mirroring registry resolution), then `./models.toml`, then
-/// `$MODELS_DIR`, then `~/models`.
+/// When a deployed install exists (`/opt/gguf-switchboard/models.toml` or
+/// `/opt/gguf-switchboard/config.toml`), its configured `models_dir` always
+/// wins regardless of `$PWD` — pulls from a source checkout must land where
+/// the running server reads them. The configured directory is returned even
+/// when it does not exist yet (the downloader creates it). `~/models`,
+/// `./models.toml` and `$MODELS_DIR` are only consulted when no deployed
+/// install is present (dev machines without `/opt`).
 fn resolve_default_models_dir() -> Result<PathBuf, RuntimeError> {
-    resolve_default_models_dir_inner(Path::new("/opt/gguf-switchboard/models.toml"))
+    resolve_default_models_dir_inner(
+        Path::new("/opt/gguf-switchboard/models.toml"),
+        Path::new("/opt/gguf-switchboard/config.toml"),
+    )
 }
 
-fn resolve_default_models_dir_inner(deployed_registry: &Path) -> Result<PathBuf, RuntimeError> {
-    if deployed_registry.is_file()
-        && let Ok(registry) = ModelsRegistry::load(&deployed_registry.to_string_lossy())
-        && let Ok(dirs) = super::models_registry::resolve_models_dirs(&registry.defaults.models_dir)
-        && let Some(dir) = dirs.first()
-    {
-        return Ok(dir.clone());
+fn resolve_default_models_dir_inner(
+    deployed_registry: &Path,
+    deployed_config: &Path,
+) -> Result<PathBuf, RuntimeError> {
+    // Deployed install present: never fall back to cwd/HOME — those would
+    // scatter downloads outside the install the server actually reads.
+    let deployed_present =
+        deployed_registry.symlink_metadata().is_ok() || deployed_config.is_file();
+
+    if deployed_present {
+        // 1a. Canonical deployed registry.
+        if deployed_registry.symlink_metadata().is_ok() {
+            match ModelsRegistry::load(&deployed_registry.to_string_lossy()) {
+                Ok(registry) => {
+                    let dirs =
+                        super::models_registry::parse_models_dirs(&registry.defaults.models_dir);
+                    if let Some(dir) = dirs.into_iter().next() {
+                        return Ok(dir);
+                    }
+                    return Err(RuntimeError::ConfigError(format!(
+                        "Deployed registry '{}' has an empty models_dir; fix it or pass --dir",
+                        deployed_registry.display()
+                    )));
+                }
+                Err(e) => {
+                    return Err(RuntimeError::ConfigError(format!(
+                        "Deployed registry '{}' exists but could not be loaded ({e}); check permissions instead of downloading elsewhere",
+                        deployed_registry.display()
+                    )));
+                }
+            }
+        }
+        // 1b. Deployed config exists but the registry file itself is missing
+        // (fresh install): honor its `models_file` when set, else the
+        // canonical state dir from deploy.sh.
+        if deployed_config.is_file()
+            && let Ok(content) = std::fs::read_to_string(deployed_config)
+            && let Ok(config) = toml::from_str::<toml::Value>(&content)
+            && let Some(path) = config.get("models_file").and_then(toml::Value::as_str)
+        {
+            let path = PathBuf::from(path);
+            let resolved = if path.is_absolute() {
+                path
+            } else {
+                deployed_config
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .join(path)
+            };
+            if resolved.symlink_metadata().is_ok() {
+                match ModelsRegistry::load(&resolved.to_string_lossy()) {
+                    Ok(registry) => {
+                        let dirs = super::models_registry::parse_models_dirs(
+                            &registry.defaults.models_dir,
+                        );
+                        if let Some(dir) = dirs.into_iter().next() {
+                            return Ok(dir);
+                        }
+                    }
+                    Err(e) => {
+                        return Err(RuntimeError::ConfigError(format!(
+                            "Deployed registry '{}' exists but could not be loaded ({e}); check permissions instead of downloading elsewhere",
+                            resolved.display()
+                        )));
+                    }
+                }
+            }
+        }
+        // Last resort within a deployed install: the canonical state dir.
+        // Returned even when missing — the downloader creates it.
+        return Ok(PathBuf::from("/var/lib/gguf-switchboard/models"));
     }
+
+    // No deployed install (dev machine): local layout only.
 
     // Try loading models.toml from the current directory.
     if Path::new("models.toml").is_file()
@@ -3490,8 +3562,8 @@ mod tests {
         extract_quant, extract_speed_stats, filter_hits_by_org, find_renamed_matches,
         format_hardware_summary, is_standalone_model, is_supported, normalize_oid,
         parse_check_updates_args, parse_connections, parse_update_args, refresh_url_from_config,
-        render_search_table, resolve_vllm_registry_path, sample_pull_command, select_quant_entry,
-        sha256_hex_file,
+        render_search_table, resolve_default_models_dir_inner, resolve_vllm_registry_path,
+        sample_pull_command, select_quant_entry, sha256_hex_file,
     };
     use crate::config::hf_download::HfTreeEntry;
     use crate::quant_profile;
@@ -3577,6 +3649,72 @@ mod tests {
             ),
             deployed_registry.to_string_lossy()
         );
+    }
+
+    #[test]
+    fn default_models_dir_prefers_deployed_registry_even_when_missing_on_disk() {
+        // The deployed models_dir wins regardless of $PWD and even when the
+        // directory does not exist yet — the downloader creates it. This is
+        // the `ggs models pull` from `~/Projects/...` case: it must land in
+        // the install dir, never in `~/models`.
+        let dir = tempfile::tempdir().unwrap();
+        let deployed = dir.path().join("models.toml");
+        let missing_target = dir.path().join("not-yet-created-models");
+        let models_dir = missing_target.display().to_string().replace('\\', "/");
+        std::fs::write(
+            &deployed,
+            format!("version = 1\n[defaults]\nmodels_dir = \"{models_dir}\"\n"),
+        )
+        .unwrap();
+        let missing_config = dir.path().join("no-config.toml");
+
+        let resolved =
+            resolve_default_models_dir_inner(&deployed, &missing_config).expect("deployed dir");
+        assert_eq!(resolved, missing_target);
+    }
+
+    #[test]
+    fn default_models_dir_reports_unreadable_deployed_registry_instead_of_home_fallback() {
+        // A deployed registry that exists but cannot be parsed (permissions,
+        // corruption) must surface — silently falling back to `~/models`
+        // would scatter downloads where the server never reads them.
+        let dir = tempfile::tempdir().unwrap();
+        let deployed = dir.path().join("models.toml");
+        std::fs::write(&deployed, "not valid toml [[[\n").unwrap();
+        let missing_config = dir.path().join("no-config.toml");
+
+        let err = resolve_default_models_dir_inner(&deployed, &missing_config)
+            .expect_err("unreadable deployed registry must error");
+        assert!(
+            err.to_string().contains("Deployed registry"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn default_models_dir_uses_deployed_config_registry_when_registry_file_missing() {
+        // Fresh install: config exists, registry file not yet written.
+        let dir = tempfile::tempdir().unwrap();
+        let pointed = dir.path().join("pointed-models.toml");
+        let target = dir.path().join("state-models");
+        let target_str = target.display().to_string().replace('\\', "/");
+        std::fs::write(
+            &pointed,
+            format!("version = 1\n[defaults]\nmodels_dir = \"{target_str}\"\n"),
+        )
+        .unwrap();
+        let deployed_config = dir.path().join("config.toml");
+        let pointed_forward = pointed.display().to_string().replace('\\', "/");
+        std::fs::write(
+            &deployed_config,
+            format!("models_file = \"{pointed_forward}\"\n"),
+        )
+        .unwrap();
+        let missing_registry = dir.path().join("missing-models.toml");
+
+        let resolved = resolve_default_models_dir_inner(&missing_registry, &deployed_config)
+            .expect("config-pointed registry");
+        assert_eq!(resolved, target);
     }
 
     #[test]
