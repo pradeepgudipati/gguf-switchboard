@@ -3517,20 +3517,11 @@ fn display_name_from_alias(alias: &str) -> String {
         .join(" ")
 }
 
-/// Infer model kind from a GGUF filename.
+/// Infer model kind from a GGUF filename. Delegates to the shared
+/// [`super::models_registry::classify_model_kind`] so `pull`, `discover` and
+/// `list` agree — one model, one kind (`coder` models stay `coder` only).
 fn infer_kind_from_filename(filename: &str) -> String {
-    let lower = filename.to_ascii_lowercase();
-    if lower.contains("rerank") {
-        "reranker".to_string()
-    } else if lower.contains("embed") {
-        "embedding".to_string()
-    } else if lower.contains("-vl") || lower.contains("vision") {
-        "vision".to_string()
-    } else if lower.contains("coder") || lower.contains("-code") {
-        "coder".to_string()
-    } else {
-        "chat".to_string()
-    }
+    super::models_registry::classify_model_kind(filename).to_string()
 }
 
 /// Format bytes as MB (e.g. "5243 MB").

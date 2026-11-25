@@ -55,19 +55,10 @@ impl LocalModelEntry {
     }
 }
 
+/// One model, one kind — delegates to the shared registry classifier so
+/// `coder` (and `vision`) models are never also listed as `chat`.
 fn infer_kind(name: &str) -> &'static str {
-    let lower = name.to_ascii_lowercase();
-    if lower.contains("rerank") {
-        "reranker"
-    } else if lower.contains("embed") {
-        "embedding"
-    } else if lower.contains("-vl") || lower.contains("vision") || lower.contains("mmproj") {
-        "vision"
-    } else if lower.contains("coder") || lower.contains("-code") {
-        "coder"
-    } else {
-        "chat"
-    }
+    super::models_registry::classify_model_kind(name)
 }
 
 fn canonical(path: &Path) -> PathBuf {
@@ -1015,7 +1006,11 @@ mod tests {
         assert_eq!(infer_kind("qwen3-embedding-4b"), "embedding");
         assert_eq!(infer_kind("bge-reranker-v2"), "reranker");
         assert_eq!(infer_kind("Qwen2.5-VL-7B"), "vision");
+        assert_eq!(infer_kind("wan2.2-ti2v-5b"), "vision");
         assert_eq!(infer_kind("qwen2.5-coder-7b"), "coder");
+        // Coder-flavored models are `coder` only, never also `chat`.
+        assert_eq!(infer_kind("kimi-dev-72b-iq4-xs"), "coder");
+        assert_eq!(infer_kind("deepseek-coder-v2-lite"), "coder");
         assert_eq!(infer_kind("gemma-3-12b-it"), "chat");
     }
 

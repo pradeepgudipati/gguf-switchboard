@@ -905,19 +905,57 @@ fn is_embedding_like_alias(alias: &str) -> bool {
 }
 
 fn infer_kind(alias: &str, file: &str) -> String {
-    let combined = format!("{alias} {file}").to_ascii_lowercase();
-    if combined.contains("rerank") {
-        "reranker".to_string()
-    } else if combined.contains("embed") {
-        "embedding".to_string()
-    } else if combined.contains("-vl") || combined.contains("vision") || combined.contains("mmproj")
-    {
-        "vision".to_string()
-    } else if combined.contains("coder") || combined.contains("-code") {
-        "coder".to_string()
-    } else {
-        "chat".to_string()
+    classify_model_kind(&format!("{alias} {file}")).to_string()
+}
+
+/// Classify a model name/filename into exactly one kind.
+///
+/// One model gets one kind — code-specialized models are `coder` only, never
+/// also `chat` (they chat poorly, so clients grouping on `kind` show them
+/// once, under Coder). Priority: reranker > embedding > vision > coder > chat.
+pub(crate) fn classify_model_kind(name: &str) -> &'static str {
+    let lower = name.to_ascii_lowercase();
+    let tokens: Vec<&str> = lower
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let has_token = |w: &str| tokens.contains(&w);
+    let token_contains = |s: &str| tokens.iter().any(|t| t.contains(s));
+    let token_starts_with = |s: &str| tokens.iter().any(|t| t.starts_with(s));
+
+    if token_contains("rerank") {
+        return "reranker";
     }
+    if token_contains("embed") {
+        return "embedding";
+    }
+    // Vision / multimodal / video-diffusion weights — not chat LLMs.
+    if has_token("vl")
+        || has_token("vlm")
+        || has_token("ti2v")
+        || has_token("t2v")
+        || has_token("i2v")
+        || has_token("video")
+        || has_token("diffusion")
+        || token_contains("vision")
+        || token_contains("mmproj")
+        || token_starts_with("wan")
+    {
+        return "vision";
+    }
+    // Code-specialized models chat poorly — keep them `coder` only.
+    if token_contains("coder")
+        || has_token("code")
+        || has_token("codes")
+        || has_token("coding")
+        || has_token("dev")
+        || token_starts_with("codegeex")
+        || token_starts_with("codestral")
+        || token_starts_with("codegemma")
+    {
+        return "coder";
+    }
+    "chat"
 }
 
 fn dedupe_registry_entries(entries: &mut Vec<RegistryEntry>) {
@@ -3041,6 +3079,49 @@ mod tests {
             infer_kind("some-model", "jina-reranker-v2.gguf"),
             "reranker"
         );
+    }
+
+    #[test]
+    fn classify_model_kind_gives_coder_and_vision_their_own_single_kind() {
+        // Coder-flavored models are `coder` only — never also `chat`.
+        for name in [
+            "deepseek-coder-v2-lite",
+            "DeepSeek-Coder-V2-Lite-Q4_K_M.gguf",
+            "kimi-dev-72b-iq4-xs",
+            "Kimi-Dev-72B-Q4_K_M.gguf",
+            "Qwen3-Coder-30B-Q4_K_M.gguf",
+            "starcoder2-15b-Q8_0.gguf",
+            "codestral-22b-v0.1-Q4_K_M.gguf",
+            "codegeex4-9b-chat-Q4_K_M.gguf",
+        ] {
+            assert_eq!(classify_model_kind(name), "coder", "{name}");
+        }
+        // Vision / video-diffusion weights are `vision` only.
+        for name in [
+            "Qwen2.5-VL-7B-Q4_K_M.gguf",
+            "wan2.2-ti2v-5b",
+            "Wan2.2-TI2V-5B-Q4_K_M.gguf",
+            "qwen3-vl-8b",
+            "mmproj-Qwen2.5-VL-7B.gguf",
+        ] {
+            assert_eq!(classify_model_kind(name), "vision", "{name}");
+        }
+        // Plain chat stays chat; embedding/reranker untouched.
+        assert_eq!(classify_model_kind("gemma-4-12b-it-qat"), "chat");
+        assert_eq!(classify_model_kind("qwen-qwen3.5-9b"), "chat");
+        assert_eq!(classify_model_kind("bespoke-nimble-9b-v3"), "chat");
+        assert_eq!(
+            classify_model_kind("nomic-embed-text-v1.5.q4-k-m"),
+            "embedding"
+        );
+        assert_eq!(
+            classify_model_kind("bge-reranker-v2-m3-Q4_K_M.gguf"),
+            "reranker"
+        );
+        // `code` as a substring of another word must not force coder …
+        assert_eq!(classify_model_kind("encode-aromi-1b"), "chat");
+        // … but an explicit coder alias still wins over the filename.
+        assert_eq!(infer_kind("my-coder", "plain-model.gguf"), "coder");
     }
 
     #[test]

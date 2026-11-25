@@ -128,8 +128,13 @@ fn infer_kind_from_hf(
     {
         return Some("vision".to_string());
     }
-    if hay.contains("coder") || hay.contains("code") {
-        return Some("coder".to_string());
+    // Code-specialized models chat poorly — one kind only (`coder`, never
+    // also `chat`). Token-based via the shared classifier so `dev` matches
+    // `kimi-dev` but `code` no longer matches `encode`.
+    let filename_kind =
+        super::models_registry::classify_model_kind(&format!("{joined} {local_filename}"));
+    if filename_kind != "chat" {
+        return Some(filename_kind.to_string());
     }
     if !tag.is_empty() || !tags.is_empty() {
         return Some("chat".to_string());
@@ -417,6 +422,21 @@ mod tests {
         });
         let enrich = enrichment_from_hf_json(&hit, "embeddinggemma.gguf").unwrap();
         assert_eq!(enrich.kind.as_deref(), Some("embedding"));
+    }
+
+    #[test]
+    fn coder_filename_maps_to_coder_only() {
+        // `kimi-dev` has no `coder`/`code` substring — the shared classifier
+        // must still put it in `coder`, never `chat`.
+        let hit = json!({
+            "id": "moonshotai/Kimi-Dev-72B-GGUF",
+            "pipeline_tag": "text-generation",
+            "tags": ["gguf", "text-generation"],
+            "gguf": { "context_length": 131072, "total": 40_000_000_000u64 },
+            "siblings": []
+        });
+        let enrich = enrichment_from_hf_json(&hit, "Kimi-Dev-72B-Q4_K_M.gguf").unwrap();
+        assert_eq!(enrich.kind.as_deref(), Some("coder"));
     }
 
     #[test]
