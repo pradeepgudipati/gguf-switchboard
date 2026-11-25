@@ -154,7 +154,7 @@ pub struct ModelConfig {
     /// If true, this model is loaded automatically after idle timeout
     #[serde(default)]
     pub priority: bool,
-    /// Model role: `chat`, `coder`, `vision`, `embedding`, or `reranker`.
+    /// Model role: `chat`, `coder`, `vision`, `decision`, `embedding`, or `reranker`.
     #[serde(default = "default_model_kind")]
     pub kind: String,
     #[serde(default)]

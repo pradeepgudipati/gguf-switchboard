@@ -6,6 +6,12 @@ use crate::errors::RuntimeError;
 pub const CHAT_KINDS: &[&str] = &["chat", "coder", "vision"];
 pub const EMBEDDING_KINDS: &[&str] = &["embedding"];
 pub const RERANK_KINDS: &[&str] = &["reranker"];
+/// Decision models (e.g. Bespoke-Nimble) answer typed choice/yes-no questions
+/// with probabilities via llama.cpp's `/v1/systemone` — chatting with them is
+/// meaningless, so they are deliberately excluded from `CHAT_KINDS`. No ggs
+/// endpoint serves them yet; they list under their own `decision` kind in
+/// `/v1/models` instead of being clubbed into chat.
+pub const DECISION_KINDS: &[&str] = &["decision"];
 
 pub fn require_kind(
     model_id: &str,
@@ -62,6 +68,14 @@ mod tests {
         let err =
             require_kind("emb", &cfg("embedding"), CHAT_KINDS, "/v1/chat/completions").unwrap_err();
         assert!(err.to_string().contains("kind=embedding"));
+    }
+
+    #[test]
+    fn decision_models_are_not_chat_models() {
+        let err =
+            require_kind("nim", &cfg("decision"), CHAT_KINDS, "/v1/chat/completions").unwrap_err();
+        assert!(err.to_string().contains("kind=decision"));
+        assert!(require_kind("nim", &cfg("decision"), DECISION_KINDS, "/v1/systemone").is_ok());
     }
 
     #[test]

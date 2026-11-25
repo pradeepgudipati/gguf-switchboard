@@ -128,6 +128,13 @@ fn infer_kind_from_hf(
     {
         return Some("vision".to_string());
     }
+    // Decision models (Bespoke-Nimble family): typed choice/yes-no questions
+    // answered with probabilities via llama.cpp's `/v1/systemone` — not chat.
+    // The GGUF repos carry a `decision-model` tag and usually a
+    // `zero-shot-classification` pipeline tag.
+    if tag.contains("zero-shot-classification") || joined.contains("decision-model") {
+        return Some("decision".to_string());
+    }
     // Code-specialized models chat poorly — one kind only (`coder`, never
     // also `chat`). Token-based via the shared classifier so `dev` matches
     // `kimi-dev` but `code` no longer matches `encode`.
@@ -437,6 +444,19 @@ mod tests {
         });
         let enrich = enrichment_from_hf_json(&hit, "Kimi-Dev-72B-Q4_K_M.gguf").unwrap();
         assert_eq!(enrich.kind.as_deref(), Some("coder"));
+    }
+
+    #[test]
+    fn decision_model_tag_maps_to_decision_only() {
+        let hit = json!({
+            "id": "ggml-org/Bespoke-Nimble-9B-v3-GGUF",
+            "pipeline_tag": "zero-shot-classification",
+            "tags": ["gguf", "decision-model", "zero-shot-classification"],
+            "gguf": { "context_length": 262144, "total": 9_530_000_000u64 },
+            "siblings": []
+        });
+        let enrich = enrichment_from_hf_json(&hit, "Bespoke-Nimble-9B-v3-Q8_0.gguf").unwrap();
+        assert_eq!(enrich.kind.as_deref(), Some("decision"));
     }
 
     #[test]

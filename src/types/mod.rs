@@ -6,6 +6,7 @@ pub mod embeddings;
 pub mod models;
 pub mod rerank;
 pub mod responses;
+pub mod systemone;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -42,7 +43,7 @@ pub struct ModelInfo {
     pub backend: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
-    /// Model role: `chat`, `coder`, `vision`, `embedding`, or `reranker`.
+    /// Model role: `chat`, `coder`, `vision`, `decision`, `embedding`, or `reranker`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

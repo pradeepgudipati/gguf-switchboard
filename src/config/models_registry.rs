@@ -70,7 +70,8 @@ pub struct RegistryEntry {
     /// Human-readable name for `/v1/models`. Defaults to a title-cased alias.
     #[serde(default)]
     pub display_name: Option<String>,
-    /// Model role: `chat`, `coder`, `vision`, `embedding`, or `reranker`. Inferred from alias/file when omitted.
+    /// Model role: `chat`, `coder`, `vision`, `decision`, `embedding`, or
+    /// `reranker`. Inferred from alias/file when omitted.
     #[serde(default)]
     pub kind: Option<String>,
     /// When false, the model is omitted from scheduling and `/v1/models`.
@@ -626,6 +627,10 @@ pub struct GgufMetadata {
     pub block_count: Option<u64>,
     /// Maximum context length from `{arch}.context_length` GGUF KV pair.
     pub context_length: Option<u64>,
+    /// Decision-model marker from `{arch}.decision.type` (e.g. `nimble` on
+    /// Bespoke-Nimble) — authoritative file ground truth that this model is
+    /// served via `/v1/systemone`, not chat.
+    pub decision_type: Option<String>,
 }
 
 impl GgufMetadata {
@@ -800,6 +805,7 @@ fn inspect_gguf_metadata(path: &Path) -> Result<GgufMetadata, GgufSkipReason> {
             match key.as_str() {
                 "general.architecture" => metadata.architecture = Some(value),
                 "general.type" => metadata.file_type = Some(value),
+                _ if key.ends_with(".decision.type") => metadata.decision_type = Some(value),
                 _ => {}
             }
         } else if key.ends_with(".block_count")
@@ -912,7 +918,9 @@ fn infer_kind(alias: &str, file: &str) -> String {
 ///
 /// One model gets one kind — code-specialized models are `coder` only, never
 /// also `chat` (they chat poorly, so clients grouping on `kind` show them
-/// once, under Coder). Priority: reranker > embedding > vision > coder > chat.
+/// once, under Coder); decision models (`nimble`, `decision`, `systemone` —
+/// served via llama.cpp's `/v1/systemone`, not chat) are `decision` only.
+/// Priority: reranker > embedding > vision > decision > coder > chat.
 pub(crate) fn classify_model_kind(name: &str) -> &'static str {
     let lower = name.to_ascii_lowercase();
     let tokens: Vec<&str> = lower
@@ -942,6 +950,11 @@ pub(crate) fn classify_model_kind(name: &str) -> &'static str {
         || token_starts_with("wan")
     {
         return "vision";
+    }
+    // Decision models answer typed choice/yes-no questions with probabilities
+    // via `/v1/systemone` — chatting with them is meaningless.
+    if token_contains("nimble") || token_contains("decision") || token_contains("systemone") {
+        return "decision";
     }
     // Code-specialized models chat poorly — keep them `coder` only.
     if token_contains("coder")
@@ -1913,6 +1926,7 @@ impl ModelsRegistry {
                 continue;
             }
 
+            let mut gguf_is_decision = false;
             let (command, args, block_count, max_context_from_gguf, model_fingerprint) =
                 if entry_backend == "vllm" {
                     build_vllm_args(entry, &self.defaults, &models_dirs, port)?
@@ -1927,6 +1941,9 @@ impl ModelsRegistry {
                     let ngl = entry.ngl.unwrap_or(self.defaults.ngl);
                     let extra = effective_extra_args(entry);
                     let gguf_meta = inspect_gguf_metadata(Path::new(&model_path)).ok();
+                    gguf_is_decision = gguf_meta
+                        .as_ref()
+                        .is_some_and(|m| m.decision_type.is_some());
                     let block_count = gguf_meta
                         .as_ref()
                         .and_then(|m| m.block_count)
@@ -2006,6 +2023,16 @@ impl ModelsRegistry {
             let ngl_pinned = entry_backend != "vllm"
                 && (entry.ngl.is_some() || extra_args_pin_ngl(&effective_extra_args(entry)));
 
+            // GGUF `{arch}.decision.type` is file ground truth (e.g. nimble):
+            // a decision model stale-pinned as `chat` by an older pull is
+            // corrected here at load — restart or POST /v1/models/refresh
+            // picks it up, no models.toml edit needed. Explicit non-chat
+            // pins are left alone.
+            let mut kind = entry.effective_kind();
+            if gguf_is_decision && (entry.kind.is_none() || entry.kind.as_deref() == Some("chat")) {
+                kind = "decision".to_string();
+            }
+
             let config = ModelConfig {
                 backend: entry_backend.clone(),
                 display_name: entry
@@ -2017,7 +2044,7 @@ impl ModelsRegistry {
                 backend_url: format!("http://{}:{}/v1", self.defaults.host, port),
                 health_url: format!("http://{}:{}/health", self.defaults.host, port),
                 priority: entry.priority,
-                kind: entry.effective_kind(),
+                kind,
                 description: entry.description.clone(),
                 max_context_length: entry.max_context_length.or(max_context_from_gguf),
                 min_vram_gb: entry.min_vram_gb,
@@ -2587,6 +2614,33 @@ mod tests {
     }
 
     #[test]
+    fn inspect_gguf_metadata_reads_decision_type() {
+        let dir = std::env::temp_dir().join("gguf-switchboard-decision-type-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Bespoke-Nimble-9B-v3-Q8_0.gguf");
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&GGUF_MAGIC.to_le_bytes());
+        buf.extend_from_slice(&3u32.to_le_bytes());
+        buf.extend_from_slice(&427u64.to_le_bytes());
+        buf.extend_from_slice(&2u64.to_le_bytes());
+        write_gguf_string(&mut buf, "general.architecture");
+        buf.extend_from_slice(&GGUF_METADATA_STRING.to_le_bytes());
+        write_gguf_string(&mut buf, "qwen35");
+        write_gguf_string(&mut buf, "qwen35.decision.type");
+        buf.extend_from_slice(&GGUF_METADATA_STRING.to_le_bytes());
+        write_gguf_string(&mut buf, "nimble");
+        std::fs::write(&path, &buf).unwrap();
+
+        let meta = validate_gguf_model(&path).expect("nimble header is loadable");
+        assert_eq!(meta.architecture.as_deref(), Some("qwen35"));
+        assert_eq!(meta.decision_type.as_deref(), Some("nimble"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn inspect_gguf_metadata_reads_prefix_only() {
         let dir = std::env::temp_dir().join("gguf-switchboard-inspect-prefix-test");
         let _ = std::fs::remove_dir_all(&dir);
@@ -3109,7 +3163,14 @@ mod tests {
         // Plain chat stays chat; embedding/reranker untouched.
         assert_eq!(classify_model_kind("gemma-4-12b-it-qat"), "chat");
         assert_eq!(classify_model_kind("qwen-qwen3.5-9b"), "chat");
-        assert_eq!(classify_model_kind("bespoke-nimble-9b-v3"), "chat");
+        // Decision models get their own kind — never chat.
+        assert_eq!(classify_model_kind("bespoke-nimble-9b-v3"), "decision");
+        assert_eq!(
+            classify_model_kind("Bespoke-Nimble-9B-v3-Q8_0.gguf"),
+            "decision"
+        );
+        assert_eq!(classify_model_kind("some-decision-model-7b"), "decision");
+        assert_eq!(classify_model_kind("systemone-qa-8b"), "decision");
         assert_eq!(
             classify_model_kind("nomic-embed-text-v1.5.q4-k-m"),
             "embedding"

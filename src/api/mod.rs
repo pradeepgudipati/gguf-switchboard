@@ -9,6 +9,7 @@ pub mod metrics;
 pub mod models;
 pub mod rerank;
 pub mod responses;
+pub mod systemone;
 pub mod usage;
 
 use std::sync::Arc;
@@ -50,6 +51,7 @@ use crate::state::AppState;
         embeddings::embeddings,
         rerank::rerank,
         responses::responses,
+        systemone::systemone,
         audio::transcriptions,
         anthropic::messages,
         audio::speech,
@@ -116,6 +118,9 @@ use crate::state::AppState;
         crate::types::responses::ResponseFunctionCallOutput,
         crate::types::responses::ResponseContent,
         crate::types::responses::ResponseUsage,
+        crate::types::systemone::SystemoneRequest,
+        crate::types::systemone::SystemoneResponse,
+        crate::types::systemone::SystemoneUsage,
         crate::types::audio::TranscriptionRequest,
         crate::types::anthropic::MessagesRequest,
         crate::types::anthropic::MessagesResponse,
@@ -154,6 +159,7 @@ use crate::state::AppState;
         (name = "embeddings", description = "Embedding endpoints"),
         (name = "rerank", description = "Document reranking endpoints"),
         (name = "responses", description = "Responses API endpoints"),
+        (name = "systemone", description = "Decision-model System One endpoints"),
         (name = "audio", description = "Audio transcription and speech endpoints"),
         (name = "usage", description = "Usage statistics endpoints"),
         (name = "metrics", description = "Prometheus metrics endpoint"),
@@ -257,6 +263,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
             axum::routing::get(models::get_model),
         )
         .route("/v1/responses", axum::routing::post(responses::responses))
+        .route("/v1/systemone", axum::routing::post(systemone::systemone))
         .route(
             "/v1/audio/transcriptions",
             axum::routing::post(audio::transcriptions),
