@@ -1182,27 +1182,37 @@ fi
 # declares `rerun-if-changed=swagger-ui-overrides/`, so cargo's own
 # fingerprinting rebuilds exactly when needed. The forced clean made every
 # deploy pay for a full swagger-dependency rebuild + LTO relink.
-# Skip rebuild AND reinstall when git reported no changes, the installed
-# binary reports the current package version, and a cached artifact exists.
-# The version check is load-bearing: without it a stale target/ cache would
-# be re-installed over a newer binary and pinned there forever (every later
-# deploy would keep skipping the rebuild that would have fixed it).
-BIN_VERSION_OK=false
-if [[ -x "$BIN" ]]; then
-    installed_version="$("$BIN" version 2>/dev/null | grep -oE '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1 || true)"
-    package_version="$(awk -F'"' '/^version[[:space:]]*=/ { print $2; exit }' "$SOURCE_DIR/Cargo.toml")"
-    if [[ -n "${installed_version:-}" && "${installed_version:-}" == "${package_version:-}" ]]; then
-        BIN_VERSION_OK=true
-    fi
+# Skip rebuild AND reinstall when the installed binary was already built from
+# the current source HEAD and a cached artifact exists. Freshness is tracked
+# by commit, not package version: same-version commits (the common case) must
+# still rebuild, and a bare `Cargo.toml` version comparison (0.2.0 == 0.2.0)
+# wrongly reports "current" forever. A stamp file records the HEAD the
+# installed binary was built from; it survives the re-exec path above, where
+# the fresh process's own `git pull` is a no-op and `git status` is clean —
+# so the pull-based skip signal is lost and version-only checks pin a stale
+# binary in place (observed: new commits deployed as the old binary).
+BUILT_HEAD_FILE="${INSTALL_DIR}/.built-head"
+built_head=""
+if sudo test -r "$BUILT_HEAD_FILE" 2>/dev/null; then
+    built_head="$(sudo cat "$BUILT_HEAD_FILE" 2>/dev/null | tr -d '[:space:]')"
 fi
-if [[ "$SKIP_GGS_INSTALL" == "true" && "$BIN_VERSION_OK" == "true" && -f "${SOURCE_DIR}/target/release/gguf-switchboard" ]]; then
-    echo "==> No changes in git pull and installed binary ($installed_version) is current; skipping rebuild."
+head_now="$(git rev-parse HEAD 2>/dev/null || true)"
+BINARY_IS_FRESH=false
+if [[ -n "$head_now" && "$built_head" == "$head_now" && -x "$BIN" && -f "${SOURCE_DIR}/target/release/gguf-switchboard" ]]; then
+    BINARY_IS_FRESH=true
+fi
+if [[ "$SKIP_GGS_INSTALL" == "true" && "$BINARY_IS_FRESH" == "true" ]]; then
+    echo "==> Installed binary already built from HEAD ($head_now); skipping rebuild."
 else
     cargo build --release
     echo "==> Installing binary → $BIN..."
     sudo install -o root -g root -m 755 \
         "${SOURCE_DIR}/target/release/gguf-switchboard" \
         "$BIN"
+    if [[ -n "$head_now" ]]; then
+        printf '%s\n' "$head_now" | sudo tee "$BUILT_HEAD_FILE" >/dev/null
+        sudo chmod 644 "$BUILT_HEAD_FILE"
+    fi
 fi
 
 sync_project_to_install "$SOURCE_DIR"

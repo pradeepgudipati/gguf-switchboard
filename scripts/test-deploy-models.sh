@@ -373,6 +373,14 @@ pop_line="$(grep -n 'Restored pre-pull local changes' deploy.sh | head -1 | cut 
 reexec_line="$(grep -n 'restarting with the fresh copy' deploy.sh | head -1 | cut -d: -f1)"
 test "$pop_line" -lt "$reexec_line"
 
+# Rebuild freshness: tracked by source commit stamp, never by package
+# version (same-version commits must still rebuild). The stamp survives the
+# re-exec path where the pull-based skip signal is lost — version-only checks
+# pinned a stale binary in place (new commits deployed as the old binary).
+grep -q 'BUILT_HEAD_FILE="${INSTALL_DIR}/.built-head"' deploy.sh
+grep -q 'BINARY_IS_FRESH' deploy.sh
+! grep -q 'BIN_VERSION_OK' deploy.sh
+
 # Runtime paths must not be constructed from $HOME in the main deploy body.
 # (HOME is still ok for git clone bootstrap, rustup, and optional shell alias.)
 ! grep -E 'MODELS_DIR=.*\$HOME/models|chown.*whoami.*/var/lib|User=\$\(whoami\)|WorkingDirectory=\$\(pwd\)' deploy.sh
